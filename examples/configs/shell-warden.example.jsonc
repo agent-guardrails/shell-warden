@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "defaults": { "action": "ask", "message": "no rule matched — ask the human" },
+  "stages": [
+    { "id": "vcs",
+      "scope":  { "anyOf": [ { "argv": ["git"] } ] },
+      "flags":  { "-f": 0, "--force": 0, "-C": 1, "-m": 1 },
+      "rules": [
+        { "id": "vcs/no-force-push",
+          "argv": ["push"], "flag": { "--force": "present" },
+          "action": "deny", "message": "push --force is forbidden — history is protected" },
+        { "id": "vcs/allow-inspection",
+          "argv": [ { "anyOf": ["status", "log", "diff"] } ],
+          "action": "allow" }
+      ] },
+    { "id": "docker",
+      "scope":  { "anyOf": [ { "argv": ["docker"] }, { "pattern": "docker *" } ] },
+      "flags":  { "-v": 1, "--volume": 1, "-d": 0 },
+      "rules": [
+        { "id": "docker/no-root-mount",
+          "argv": ["run"], "flagValue": { "-v": "/:*", "--volume": "/:*" },
+          "action": "deny", "message": "do not mount / into the container" }
+      ] },
+    { "id": "catch-all",
+      "scope":  { "anyOf": [ { "pattern": "*" } ] },
+      "flags":  {}, "rules": [] }
+  ]
+}

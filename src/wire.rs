@@ -617,7 +617,7 @@ pub fn encode_response(id: Option<u64>, reply: &Reply, cap: usize) -> String {
         ReplyBody::Error(e) => body["error"] = serde_json::to_value(e).expect("serialize error"),
     }
     let line = serde_json::to_string(&body).expect("serialize response");
-    if line.len() + 1 <= cap {
+    if line.len() < cap {
         return line;
     }
     // Strip to the minimal legal shape — the verdict itself is tiny and must
@@ -1107,7 +1107,7 @@ mod tests {
         let full = encode_response(Some(1), &reply, 65_536);
         assert!(full.len() > 80, "fixture must exceed the strip cap");
         let line = encode_response(Some(1), &reply, 80);
-        assert!(line.len() + 1 <= 80, "line must fit the cap: {line}");
+        assert!(line.len() < 80, "line must fit the cap: {line}");
         let v: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(v["result"]["verdict"], "deny"); // decision itself survives
         assert_eq!(v["result"]["invocationId"], "m:c"); // schema-required field survives

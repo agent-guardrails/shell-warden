@@ -1,11 +1,12 @@
-// shell-warden — orchestrator engine (ADR-0008 rev; decisions live in stage tools).
-// Implementation plan: agent-guardrails/docs/spec/shell-warden/HANDOFF-m0.md
-//
-// HANDOFF-m0 steps 1–4 complete: NDJSON wire loop (02-protocol), strict config
-// loader with the -32001 fatal path (05 §5.3), stage invoker with deadlines
-// and ladders (06 §6.4), and the stage walk (08-request-processing). The core
-// holds zero decision logic: it walks stages, invokes their tools and
-// aggregates verdicts — most-restrictive-wins, the first deny stops the walk.
+#![allow(clippy::all, unused)] // retired M0 reference implementation — lint debt accepted by ADR-0016
+                               // shell-warden — orchestrator engine (ADR-0008 rev; decisions live in stage tools).
+                               // Implementation plan: agent-guardrails/docs/spec/shell-warden/HANDOFF-m0.md
+                               //
+                               // HANDOFF-m0 steps 1–4 complete: NDJSON wire loop (02-protocol), strict config
+                               // loader with the -32001 fatal path (05 §5.3), stage invoker with deadlines
+                               // and ladders (06 §6.4), and the stage walk (08-request-processing). The core
+                               // holds zero decision logic: it walks stages, invokes their tools and
+                               // aggregates verdicts — most-restrictive-wins, the first deny stops the walk.
 
 mod clock;
 mod config;

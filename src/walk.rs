@@ -234,7 +234,7 @@ pub fn walk(
                 contributed = true;
                 let takes = per_command[i]
                     .verdict
-                    .map_or(true, |prev| action.rank() > prev.rank());
+                    .is_none_or(|prev| action.rank() > prev.rank());
                 if takes {
                     let (rule_id, reason, classification, cache_ttl_ms) = match decided {
                         Some(v) => (

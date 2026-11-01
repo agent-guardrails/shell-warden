@@ -1,0 +1,28 @@
+{
+  "letter": {
+    "version": 1,
+    "invocation": {
+      "id": "m:c",
+      "sessionID": "s1",
+      "projectDir": "/repo"
+    },
+    "action": "shell",
+    "commands": [
+      {
+        "index": 0,
+        "raw": "docker run -v /:/mnt alpine",
+        "cwd": "/repo"
+      }
+    ]
+  },
+  "expect": {
+    "verdict": "deny",
+    "commands": [
+      {
+        "index": 0,
+        "verdict": "deny",
+        "ruleId": "docker/no-root-mount"
+      }
+    ]
+  }
+}

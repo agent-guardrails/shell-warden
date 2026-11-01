@@ -5,7 +5,11 @@ use super::grammar::*;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
+// re-exported for pipeline/src access
+
 pub type ConfigResult = Result<Config, String>;
+
+pub use super::grammar::Config;
 
 pub struct LoadedConfig {
     pub config: Config,
@@ -264,7 +268,7 @@ fn validate_rule(rule: &Rule, stage: &Stage) -> Result<(), String> {
     }
     // Flag references must exist in the stage table, checked against arity too.
     if let Some(flags) = &rule.flag {
-        for (flag, _) in flags {
+        for flag in flags.keys() {
             if !stage.flags.contains_key(flag) {
                 return Err(format!(
                     "rule \"{}\": flag \"{flag}\" is not in stage \"{}\" flags table",

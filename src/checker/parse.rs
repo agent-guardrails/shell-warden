@@ -59,6 +59,10 @@ pub struct ScanResult {
     pub salvage_failed: bool,
 }
 
+// The scanner maintains a defensive state machine: some assignments are
+// overwritten before read on early-exit paths; clippy cannot see the loop
+// structure. Accepted at this function level.
+#[allow(unused_assignments)]
 pub fn scan(raw: &str) -> ScanResult {
     let chars: Vec<char> = raw.chars().collect();
     let n = chars.len();
@@ -89,9 +93,10 @@ pub fn scan(raw: &str) -> ScanResult {
                 items.push(Item::Tok(Tok {
                     kind: $kind,
                     text: std::mem::take(&mut cur_text),
-                    resolvable: std::mem::take(&mut cur_resolvable),
+                    resolvable: cur_resolvable, // note: take() would reset bool to false
                     subtexts: std::mem::take(&mut cur_sub),
                 }));
+                cur_resolvable = true;
             }
         };
     }

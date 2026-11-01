@@ -98,11 +98,11 @@ fn assemble(seg: &Segment, depth: usize) -> Vec<Part> {
     let st = parse::summarize(seg);
 
     // leading `NAME=…` words are env-prefix assignments (07 §7.4 step 5)
-    let mut assigns = Vec::new();
+    let mut assigns: Vec<String> = Vec::new();
     let mut start = 0usize;
-    for w in &st.words {
-        if is_assignment(w) {
-            assigns.push(w.clone());
+    for (text, resolvable) in &st.words {
+        if *resolvable && is_assignment(text) {
+            assigns.push(text.clone());
             start += 1;
         } else {
             break;
@@ -118,17 +118,21 @@ fn assemble(seg: &Segment, depth: usize) -> Vec<Part> {
     let unknown: Vec<String> = st
         .words
         .iter()
-        .enumerate()
         .skip(start)
         .filter(|(_, r)| !*r)
-        .map(|(i, _)| st.words[i].0.clone())
+        .map(|(t, _)| t.clone())
         .collect();
 
-    let mut part = Part {
+    let part = Part {
         raw: seg.raw.clone(),
         argv,
         assigns,
-        paths: st.pathlike_words.clone().into_iter().chain(st.pathlike_targets.iter().cloned()).collect(),
+        paths: st
+            .pathlike_words
+            .clone()
+            .into_iter()
+            .chain(st.pathlike_targets.iter().cloned())
+            .collect(),
         unknown_texts: unknown,
         opaque_reason: if st.resolvable_all {
             None
@@ -137,17 +141,18 @@ fn assemble(seg: &Segment, depth: usize) -> Vec<Part> {
         },
     };
     let mut out = Vec::new();
-    unwrap_wrapper(&mut part, depth, &mut out);
+    unwrap_wrapper(&part, depth, &mut out);
     out
 }
 
 fn is_assignment(w: &str) -> bool {
     match w.find('=') {
         None => false,
-        Some(eq) if eq == 0 => false,
+        Some(0) => false,
         Some(eq) => {
             let name = &w[..eq];
-            name.chars().next()
+            name.chars()
+                .next()
                 .map(|c| c.is_ascii_alphabetic() || c == '_')
                 .unwrap_or(false)
                 && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
@@ -163,8 +168,12 @@ fn unwrap_wrapper(part: &Part, depth: usize, out: &mut Vec<Part>) {
         if let Some(head) = part.argv.first().map(String::as_str) {
             match head {
                 "bash" | "sh" => unwrap_bash(part, depth, out),
-                "sudo" => unwrap_transparent(part, out, "sudo options", "sudo without command"),
-                "nohup" => unwrap_transparent(part, out, "nohup options", "nohup without command"),
+                "sudo" => {
+                    unwrap_transparent(part, depth, out, "sudo options", "sudo without command")
+                }
+                "nohup" => {
+                    unwrap_transparent(part, depth, out, "nohup options", "nohup without command")
+                }
                 "nice" => unwrap_nice(part, depth, out),
                 "timeout" => unwrap_timeout(part, depth, out),
                 "env" => unwrap_env(part, depth, out),
@@ -203,8 +212,14 @@ fn unwrap_bash(part: &Part, depth: usize, out: &mut Vec<Part>) {
     out.extend(children);
 }
 
-fn unwrap_transparent(part: &Part, out: &mut Vec<Part>, opt_reason: &str, empty_reason: &'static str) {
-    let rest: Vec<&String> = part.argv[1..].iter().collect();
+fn unwrap_transparent(
+    part: &Part,
+    depth: usize,
+    out: &mut Vec<Part>,
+    opt_reason: &'static str,
+    empty_reason: &'static str,
+) {
+    let rest: Vec<String> = part.argv[1..].to_vec();
     if rest.is_empty() {
         out.push(opaque_like(part, empty_reason));
         return;
@@ -215,8 +230,7 @@ fn unwrap_transparent(part: &Part, out: &mut Vec<Part>, opt_reason: &str, empty_
         return;
     }
     let mut child = part.clone();
-    child.argv = vec![rest[0].clone()];
-    child.argv.extend(rest[1..].iter().cloned());
+    child.argv = rest;
     unwrap_wrapper(&child, depth, out);
 }
 
@@ -247,8 +261,8 @@ fn unwrap_timeout(part: &Part, _depth: usize, out: &mut Vec<Part>) {
                 return;
             }
             rest.drain(0..1);
-            // optional priority/signal flags after duration
-            while matches!(rest.first(), Some(f) if f.starts_with('-') && f.len() > 1) {
+            // optional priority/signal flags after duration: unknown head
+            if matches!(rest.first(), Some(f) if f.starts_with('-') && f.len() > 1) {
                 out.push(opaque_like(part, "timeout options"));
                 return;
             }
@@ -295,7 +309,11 @@ fn unwrap_xargs(part: &Part, out: &mut Vec<Part>) {
     // executed command = operand + pipe-appended args (unconstrained) ⇒ the
     // whole thing is unresolvable for `allow`; the operand still parses as an
     // opaque child so raw deny rules can see it.
-    let operand: Vec<String> = part.argv[1..].iter().filter(|w| !w.starts_with('-')).cloned().collect();
+    let operand: Vec<String> = part.argv[1..]
+        .iter()
+        .filter(|w| !w.starts_with('-'))
+        .cloned()
+        .collect();
     if !operand.is_empty() {
         out.push(Part {
             argv: operand,
@@ -307,15 +325,24 @@ fn unwrap_xargs(part: &Part, out: &mut Vec<Part>) {
 }
 
 fn part_with_argv(part: &Part, argv: Vec<String>) -> Part {
-    Part { argv, ..part.clone() }
+    Part {
+        argv,
+        ..part.clone()
+    }
 }
 
 fn opaque_like(part: &Part, reason: &'static str) -> Part {
-    Part { opaque_reason: Some(reason), ..part.clone() }
+    Part {
+        opaque_reason: Some(reason),
+        ..part.clone()
+    }
 }
 
 fn is_duration(w: &str) -> bool {
-    let base: String = w.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+    let base: String = w
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
     if base.is_empty() {
         return false;
     }

@@ -1,0 +1,29 @@
+{
+  "letter": {
+    "version": 1,
+    "invocation": {
+      "id": "m:c",
+      "sessionID": "s1",
+      "projectDir": "/repo"
+    },
+    "action": "shell",
+    "commands": [
+      {
+        "index": 0,
+        "raw": "git push origin main",
+        "cwd": "/repo"
+      }
+    ]
+  },
+  "expect": {
+    "verdict": "ask",
+    "commands": [
+      {
+        "index": 0,
+        "verdict": "ask",
+        "classification": "static"
+      }
+    ],
+    "message": "contains:ask the human"
+  }
+}

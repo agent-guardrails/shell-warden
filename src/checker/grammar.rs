@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub version: u32,
@@ -21,7 +21,7 @@ impl Config {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Defaults {
     #[serde(default = "default_ask")]
@@ -64,7 +64,7 @@ impl VerdictKind {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 #[serde(default)]
 pub struct Limits {
@@ -83,7 +83,7 @@ impl Default for Limits {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct Stage {
@@ -98,14 +98,14 @@ pub struct Stage {
 /// Typed as a map but validated in config loader via flag arity range.
 pub type IndexMapLike = std::collections::BTreeMap<String, u8>;
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ConditionGroup {
     /// Ordered condition list; a group matches when ANY member matches (§6.3).
     pub any_of: Vec<ScopeCondition>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct ScopeCondition {
@@ -117,11 +117,11 @@ pub struct ScopeCondition {
     pub pattern: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ArgvSequence(pub Vec<ArgvToken>);
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(untagged, deny_unknown_fields, rename_all_fields = "camelCase")]
 pub enum ArgvToken {
     Word(String),
@@ -137,7 +137,7 @@ impl ArgvToken {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct Rule {
@@ -162,7 +162,7 @@ pub struct Rule {
     pub paths: Option<PathsCondition>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct ArgvAt {
@@ -180,7 +180,7 @@ pub enum Classification {
     Opaque,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 pub enum FlagPresence {
     #[serde(rename = "present")]
     Present,
@@ -188,7 +188,7 @@ pub enum FlagPresence {
     Absent,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct PathsCondition {
