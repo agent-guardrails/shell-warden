@@ -64,19 +64,27 @@ impl Engine {
         self.send(&serde_json::to_string(v).unwrap());
     }
 
-    /// Read one response line. Panics with the engine's stderr when stdout is
-    /// empty — that usually means the engine crashed.
+    /// Read the next *response* line; engine notifications (no id, e.g.
+    /// audit/event) are skipped the same way the shim routes them.
     fn read(&mut self) -> Value {
-        let mut line = String::new();
-        let n = self.reader.read_line(&mut line).expect("read stdout");
-        if n == 0 {
-            let mut stderr = String::new();
-            if let Some(mut pipe) = self.child.stderr.take() {
-                let _ = pipe.read_to_string(&mut stderr);
+        loop {
+            let mut line = String::new();
+            let n = self.reader.read_line(&mut line).expect("read stdout");
+            if n == 0 {
+                let mut stderr = String::new();
+                if let Some(mut pipe) = self.child.stderr.take() {
+                    let _ = pipe.read_to_string(&mut stderr);
+                }
+                panic!("engine stdout closed early; stderr:\n{stderr}");
             }
-            panic!("engine stdout closed early; stderr:\n{stderr}");
+            let v: Value = serde_json::from_str(&line).unwrap_or_else(|e| panic!("non-JSON line `{line}`: {e}"));
+            if v.get("id").is_none() {
+                assert_eq!(v["jsonrpc"], "2.0", "notification framing");
+                assert!(v.get("method").is_some(), "notification carries a method");
+                continue;
+            }
+            return v;
         }
-        serde_json::from_str(&line).unwrap_or_else(|e| panic!("non-JSON line `{line}`: {e}"))
     }
 
     fn request(&mut self, id: u64, method: &str, params: Value) -> Value {
@@ -131,8 +139,20 @@ fn handshake_and_check_follow_the_wire_contract() {
     assert!(reply["result"]["config"]["source"].as_str().unwrap().ends_with("config.jsonc"));
     assert!(reply["result"]["config"]["loadedAt"].as_str().unwrap().ends_with('Z'));
 
-    // policy/check (02 §2.4): interim fail-closed verdict ask, same id
-    let reply = eng.request(7, "policy/check", check_params("git push origin main"));
+    // policy/check (02 §2.4): walk verdict, same id. The audit/event
+    // notification (02 §2.5) precedes it (02 §2.10) — read it first.
+    eng.send_value(&json!({ "jsonrpc": "2.0", "id": 7, "method": "policy/check", "params": check_params("git push origin main") }));
+    let mut audit_line = String::new();
+    eng.reader.read_line(&mut audit_line).expect("read audit line");
+    let audit: Value = serde_json::from_str(&audit_line).expect("audit is JSON");
+    assert_eq!(audit["method"], "audit/event");
+    assert!(audit.get("id").is_none(), "notifications carry no id");
+    assert_eq!(audit["params"]["type"], "decision");
+    assert_eq!(audit["params"]["invocationId"], "msg_1:call_1");
+    assert_eq!(audit["params"]["verdict"], "ask");
+    assert!(audit["params"]["ts"].as_str().unwrap().ends_with('Z'));
+
+    let reply = eng.read();
     assert_eq!(reply["id"], 7);
     assert_eq!(reply["result"]["invocationId"], "msg_1:call_1");
     assert_eq!(reply["result"]["verdict"], "ask");
@@ -214,4 +234,100 @@ fn clean_eof_exits_zero() {
     assert_eq!(reply["id"], 1);
     let status = eng.wait_after_eof();
     assert!(status.success(), "clean EOF must exit 0, got {status}");
+}
+
+// ── Stage walk end-to-end (HANDOFF step 4): real tool + onError stage ──
+
+fn stage_config() -> String {
+    // Derive the helper's path from our own exe (target/debug/<helper>) —
+    // unit tests cannot use CARGO_BIN_EXE_* and some runtime setups omit it.
+    let me = std::env::current_exe().expect("current_exe");
+    let helper = me
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|d| d.join("warden-test-tool"))
+        .expect("target dir");
+    assert!(helper.is_file(), "warden-test-tool not built at {}", helper.display());
+    let helper = helper.display().to_string();
+    format!(
+        r#"{{
+            "version": 1,
+            "stages": [
+                {{ "id": "s1", "type": "tool", "tool": {{ "command": ["{helper}", "loop"] }} }},
+                {{ "id": "s2", "type": "tool", "tool": {{ "command": ["/nonexistent/warden-tool"], "onError": "deny" }} }},
+            ],
+        }}"#
+    )
+}
+
+#[test]
+fn stage_walk_end_to_end_with_real_tools() {
+    let mut eng = Engine::spawn(write_config(&stage_config()));
+
+    let reply = eng.request(1, "initialize", json!({ "protocolVersion": 1, "client": { "name": "hook", "version": "0.1.0" } }));
+    assert_eq!(reply["result"]["config"]["stages"], json!(["s1", "s2"]));
+
+    // s1 (real tool) allows; s2 (spawn failure, onError: deny) denies ⇒ the
+    // aggregate is deny and the audit names the decisive stage.
+    let mut audit_line = String::new();
+    eng.send_value(&json!({ "jsonrpc": "2.0", "id": 2, "method": "policy/check", "params": check_params("ls -la") }));
+    eng.reader.read_line(&mut audit_line).expect("audit line");
+    let audit: Value = serde_json::from_str(&audit_line).unwrap();
+    assert_eq!(audit["method"], "audit/event");
+    assert_eq!(audit["params"]["verdict"], "deny");
+    assert_eq!(audit["params"]["stage"], "s2");
+
+    let reply = eng.read();
+    assert_eq!(reply["id"], 2);
+    assert_eq!(reply["result"]["verdict"], "deny");
+    assert_eq!(reply["result"]["commands"][0]["verdict"], "deny");
+    assert_eq!(reply["result"]["commands"][0]["stage"], "s2");
+    assert!(reply["result"]["commands"][0]["reason"].as_str().unwrap().contains("spawn failure"));
+}
+
+#[test]
+fn check_mode_prints_the_result_json() {
+    let dir = std::env::temp_dir().join(format!("sw-check-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("config.jsonc"), stage_config()).unwrap();
+    std::fs::write(
+        dir.join("req.json"),
+        json!({
+            "invocation": { "id": "m:c", "sessionID": "s", "hook": "permission.evaluate" },
+            "action": "shell",
+            "commands": [ { "index": 0, "raw": "ls", "cwd": "/w" } ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_shell-warden"))
+        .arg("check")
+        .arg("--config")
+        .arg(dir.join("config.jsonc"))
+        .arg("--file")
+        .arg(dir.join("req.json"))
+        .output()
+        .expect("run check mode");
+    assert!(out.status.success(), "check mode: {}", String::from_utf8_lossy(&out.stderr));
+    let result: Value = serde_json::from_slice(&out.stdout).expect("result JSON on stdout");
+    assert_eq!(result["invocationId"], "m:c");
+    assert_eq!(result["verdict"], "deny");
+    assert!(result["engine"]["checkMs"].is_number());
+
+    // Broken request → exit 1; broken config → exit 2; stdout stays wire-only.
+    std::fs::write(dir.join("bad.json"), "{}").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_shell-warden"))
+        .arg("check")
+        .arg("--config")
+        .arg(dir.join("config.jsonc"))
+        .arg("--file")
+        .arg(dir.join("bad.json"))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty(), "diagnostics go to stderr only");
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

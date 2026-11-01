@@ -277,7 +277,6 @@ extern "C" {
 }
 
 const SIGTERM: i32 = 15;
-const SIGKILL: i32 = 9;
 
 /// SIGTERM → wait grace → SIGKILL (06 §6.4.1 killGraceMs).
 fn grace_kill(child: &mut Child, grace: Duration) {
@@ -397,6 +396,7 @@ impl StageRunner {
     }
 
     /// Diagnostics/test hook: current pool state.
+    #[cfg(test)]
     pub fn state_name(&self) -> &'static str {
         match self.state {
             PoolState::Cold => "cold",
@@ -755,6 +755,13 @@ impl StagePools {
         for runner in self.runners.values_mut() {
             runner.tick(now);
         }
+    }
+}
+
+/// The real pools drive the walk (walk::StageInvoker).
+impl crate::walk::StageInvoker for StagePools {
+    fn invoke(&mut self, stage: &crate::config::Stage, cmd: &CheckCommand, invocation: &Invocation, now: Instant) -> InvokeResult {
+        StagePools::invoke(self, stage, cmd, invocation, now)
     }
 }
 

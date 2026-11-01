@@ -343,9 +343,7 @@ fn valid_id(v: Option<&Value>) -> Option<u64> {
 pub struct Reply {
     pub audit: Option<AuditEvent>,
     pub body: ReplyBody,
-}
-
-pub enum ReplyBody {
+}pub enum ReplyBody {
     Result(Value),
     Error(RpcError),
 }
@@ -366,6 +364,11 @@ pub trait Handler {
     /// Fail-closed: an error reply (e.g. -32001 fatal) is always legal; an Ok
     /// reply must carry a verdict of ask/deny or a tool-verified allow.
     fn check(&mut self, params: CheckParams) -> Result<CheckResult, RpcError>;
+    /// Audit notification for the last successful check (02 §2.5), if the
+    /// engine emits decisions. Consumed once by the dispatch loop.
+    fn take_audit(&mut self) -> Option<AuditEvent> {
+        None
+    }
     fn ping(&mut self) -> PingResult;
     /// Fire-and-forget shim notifications (02 §2.6). Unknown methods are
     /// tolerated (forward compatibility).
@@ -403,7 +406,10 @@ pub fn dispatch(handler: &mut dyn Handler, method: &str, params: Option<Value>) 
                 return Reply::error(RpcError::new(CODE_INVALID_PARAMS, format!("invalid params: {e}")));
             }
             match handler.check(params) {
-                Ok(result) => Reply::result(serde_json::to_value(result).expect("serialize check result")),
+                Ok(result) => Reply {
+                    audit: handler.take_audit(),
+                    body: ReplyBody::Result(serde_json::to_value(result).expect("serialize check result")),
+                },
                 Err(e) => Reply::error(e),
             }
         }
@@ -419,7 +425,7 @@ mod de {
 }
 
 /// Schema limits from wire.v1.schema.json that serde types cannot express.
-fn validate_check(p: &CheckParams) -> Result<(), String> {
+pub fn validate_check(p: &CheckParams) -> Result<(), String> {
     if p.invocation.id.chars().count() > 256 {
         return Err("invocation.id exceeds 256 chars".into());
     }
