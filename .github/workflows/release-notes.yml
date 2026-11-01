@@ -1,0 +1,21 @@
+# Thin caller: drop this into every project repo as .github/workflows/release-notes.yml
+name: AI Release Notes
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag"
+        required: true
+        type: string
+
+jobs:
+  notes:
+    uses: agent-guardrails/.github/.github/workflows/release-notes.yml@main
+    with:
+      tag: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || '' }}
+    permissions:
+      contents: write
+    secrets: inherit
