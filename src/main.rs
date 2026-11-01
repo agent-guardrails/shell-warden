@@ -1,6 +1,5 @@
 // shell-warden — orchestrator engine (ADR-0008 rev; decisions live in stage tools).
-// M0 skeleton: modes stub per spec 06 §6.8. Implementation continues per
-// agent-guardrails/docs/spec/shell-warden/HANDOFF-m0.md.
+// M0 skeleton. Implementation plan: agent-guardrails/docs/spec/shell-warden/HANDOFF-m0.md
 
 const VERSION: &str = "0.1.0";
 
@@ -17,11 +16,11 @@ fn main() {
 }
 
 fn serve() {
-    eprintln!("shell-warden v{VERSION}: serve mode — implementation pending (HANDOFF-m0 step 1)");
+    eprintln!("shell-warden v{VERSION}: serve mode — implementation pending (HANDOFF-m0 steps 1–4)");
     std::process::exit(1);
 }
 
 fn check() {
-    eprintln!("shell-warden v{VERSION}: check mode — implementation pending (HANDOFF-m0 step 1)");
+    eprintln!("shell-warden v{VERSION}: check mode — implementation pending (HANDOFF-m0 steps 1–4)");
     std::process::exit(1);
 }
