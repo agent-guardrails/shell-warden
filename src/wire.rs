@@ -370,6 +370,9 @@ pub trait Handler {
     /// Fire-and-forget shim notifications (02 §2.6). Unknown methods are
     /// tolerated (forward compatibility).
     fn notification(&mut self, method: &str, params: Option<&Value>);
+    /// Called once per serve-loop iteration before reading: config reload
+    /// polling, pool idle maintenance (05 §5.3 reload, 06 §6.4.1 idle kill).
+    fn tick(&mut self) {}
 }
 
 /// Validate and dispatch one request. Parameter errors are -32602 per 08 §8.1
@@ -605,6 +608,7 @@ pub fn serve(handler: &mut dyn Handler, max_frame_bytes: usize) -> i32 {
         if terminating() {
             return 0;
         }
+        handler.tick();
         let mut audit_line: Option<String> = None;
         let response: Option<String> = match line_to_incoming(&raw) {
             Incoming::Notification { method, params } => {

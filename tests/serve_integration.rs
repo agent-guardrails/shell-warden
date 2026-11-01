@@ -11,12 +11,38 @@ struct Engine {
     child: Child,
     stdin: Option<ChildStdin>,
     reader: BufReader<std::process::ChildStdout>,
+    _config: TempDirGuard,
+}
+
+/// Owns a temp dir with the engine config; removes it on drop.
+struct TempDirGuard {
+    dir: std::path::PathBuf,
+}
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn write_config(body: &str) -> TempDirGuard {
+    let dir = std::env::temp_dir().join(format!(
+        "shell-warden-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    std::fs::write(dir.join("config.jsonc"), body).expect("write config");
+    TempDirGuard { dir }
 }
 
 impl Engine {
-    fn spawn() -> Engine {
+    fn spawn(config: TempDirGuard) -> Engine {
+        let config_path = config.dir.join("config.jsonc");
         let mut child = Command::new(env!("CARGO_BIN_EXE_shell-warden"))
             .arg("serve")
+            .arg("--config")
+            .arg(&config_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -24,7 +50,7 @@ impl Engine {
             .expect("spawn engine");
         let stdin = child.stdin.take().unwrap();
         let reader = BufReader::new(child.stdout.take().unwrap());
-        Engine { child, stdin: Some(stdin), reader }
+        Engine { child, stdin: Some(stdin), reader, _config: config }
     }
 
     fn send(&mut self, line: &str) {
@@ -72,6 +98,16 @@ impl Drop for Engine {
     }
 }
 
+const VALID_CONFIG: &str = r#"{
+    // user-global stage config (06 §6.1)
+    "version": 1,
+    "stages": [
+        { "id": "s1", "type": "tool", "tool": { "command": ["/bin/echo"], "timeoutMs": 1000 } },
+    ],
+}"#;
+
+const INVALID_CONFIG: &str = r#"{ "version": 2, "stages": [] }"#;
+
 fn check_params(raw: &str) -> Value {
     json!({
         "invocation": { "id": "msg_1:call_1", "sessionID": "ses_1", "agent": "build", "hook": "permission.evaluate" },
@@ -82,17 +118,20 @@ fn check_params(raw: &str) -> Value {
 
 #[test]
 fn handshake_and_check_follow_the_wire_contract() {
-    let mut eng = Engine::spawn();
+    let mut eng = Engine::spawn(write_config(VALID_CONFIG));
 
-    // initialize (02 §2.3)
+    // initialize (02 §2.3): config echo reflects the active file (05 §5.3)
     let reply = eng.request(1, "initialize", json!({ "protocolVersion": 1, "client": { "name": "opencode-shell-warden-hook", "version": "0.1.0", "opencode": "2.4.1" } }));
     assert_eq!(reply["jsonrpc"], "2.0");
     assert_eq!(reply["id"], 1);
     assert_eq!(reply["result"]["protocolVersion"], 1);
     assert_eq!(reply["result"]["engine"]["name"], "shell-warden");
     assert!(reply["result"]["capabilities"].is_object());
+    assert_eq!(reply["result"]["config"]["stages"], json!(["s1"]));
+    assert!(reply["result"]["config"]["source"].as_str().unwrap().ends_with("config.jsonc"));
+    assert!(reply["result"]["config"]["loadedAt"].as_str().unwrap().ends_with('Z'));
 
-    // policy/check — interim fail-closed verdict: ask, same id (02 §2.4)
+    // policy/check (02 §2.4): interim fail-closed verdict ask, same id
     let reply = eng.request(7, "policy/check", check_params("git push origin main"));
     assert_eq!(reply["id"], 7);
     assert_eq!(reply["result"]["invocationId"], "msg_1:call_1");
@@ -103,8 +142,29 @@ fn handshake_and_check_follow_the_wire_contract() {
 }
 
 #[test]
+fn invalid_config_is_fatal_but_never_fail_open() {
+    let mut eng = Engine::spawn(write_config(INVALID_CONFIG));
+
+    // Handshake still succeeds (05 §5.3: "start anyway").
+    let reply = eng.request(1, "initialize", json!({ "protocolVersion": 1, "client": { "name": "hook", "version": "0.1.0" } }));
+    assert_eq!(reply["result"]["protocolVersion"], 1);
+    assert_eq!(reply["result"]["config"]["stages"], json!([]));
+
+    // Every policy/check is answered -32001 with data.fatal=true.
+    let reply = eng.request(2, "policy/check", check_params("ls"));
+    assert_eq!(reply["id"], 2);
+    assert_eq!(reply["error"]["code"], -32001);
+    assert_eq!(reply["error"]["data"]["fatal"], true);
+
+    // Engine stays alive: a later request still gets an answer.
+    let reply = eng.request(3, "ping", json!({}));
+    assert_eq!(reply["id"], 3);
+    assert!(reply["result"]["uptimeMs"].is_number());
+}
+
+#[test]
 fn notifications_are_not_answered_and_unknown_methods_are_32601() {
-    let mut eng = Engine::spawn();
+    let mut eng = Engine::spawn(write_config(VALID_CONFIG));
 
     // Notification (no id): MUST NOT be answered (02 §2.2). The next line we
     // read must therefore be the response to the *following* request.
@@ -118,7 +178,7 @@ fn notifications_are_not_answered_and_unknown_methods_are_32601() {
 
 #[test]
 fn malformed_lines_map_to_error_codes() {
-    let mut eng = Engine::spawn();
+    let mut eng = Engine::spawn(write_config(VALID_CONFIG));
 
     // Unparseable line → -32700 with id null (02 §2.8).
     eng.send("not json at all");
@@ -148,7 +208,7 @@ fn malformed_lines_map_to_error_codes() {
 
 #[test]
 fn clean_eof_exits_zero() {
-    let mut eng = Engine::spawn();
+    let mut eng = Engine::spawn(write_config(VALID_CONFIG));
     eng.send_value(&json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": 1, "client": { "name": "hook", "version": "0.1.0" } } }));
     let reply = eng.read();
     assert_eq!(reply["id"], 1);
