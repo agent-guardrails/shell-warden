@@ -1,0 +1,22 @@
+# Thin caller: drop this into every project repo as .github/workflows/issue-triage.yml
+name: AI Issue Triage
+
+on:
+  issues:
+    types: [opened, reopened]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: "Issue to triage"
+        required: true
+        type: string
+
+jobs:
+  triage:
+    uses: agent-guardrails/.github/.github/workflows/issue-triage.yml@main
+    with:
+      issue_number: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.issue_number || '' }}
+    permissions:
+      issues: write
+      contents: read
+    secrets: inherit
