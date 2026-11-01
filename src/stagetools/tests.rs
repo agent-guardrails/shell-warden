@@ -12,7 +12,9 @@ use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 
 fn test_lock() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(PoisonError::into_inner)
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Cargo puts package bins together in target/debug/; unit tests see no
@@ -21,7 +23,11 @@ fn tool_binary() -> PathBuf {
     let exe = std::env::current_exe().expect("current_exe");
     let dir = exe.parent().and_then(|p| p.parent()).expect("target dir");
     let helper = dir.join("warden-test-tool");
-    assert!(helper.is_file(), "warden-test-tool not built at {}", helper.display());
+    assert!(
+        helper.is_file(),
+        "warden-test-tool not built at {}",
+        helper.display()
+    );
     helper
 }
 
@@ -64,7 +70,12 @@ fn invocation() -> Invocation {
 }
 
 fn cmd() -> CheckCommand {
-    CheckCommand { index: 0, raw: "ls -la".into(), argv: None, cwd: "/work/repo".into() }
+    CheckCommand {
+        index: 0,
+        raw: "ls -la".into(),
+        argv: None,
+        cwd: "/work/repo".into(),
+    }
 }
 
 fn runner(spec: ToolSpec) -> (MutexGuard<'static, ()>, StageRunner) {
@@ -98,7 +109,10 @@ fn letter_has_command_and_cwd_always_and_optins_gated() {
     assert_eq!(letter["protocolVersion"], 1);
     assert_eq!(letter["command"]["raw"], "ls -la");
     assert_eq!(letter["command"]["cwd"], "/work/repo");
-    assert!(letter.get("session").is_none(), "opt-in flags off by default");
+    assert!(
+        letter.get("session").is_none(),
+        "opt-in flags off by default"
+    );
     assert!(letter.get("mcp").is_none());
 }
 
@@ -128,7 +142,9 @@ fn letter_omits_absent_agent() {
 
 #[test]
 fn classify_accepts_the_canonical_shapes() {
-    let out = classify_response(r#"{"verdict":"deny","message":"no","ruleId":"t/r","reason":"why","classification":"static","cacheTtlMs":0}"#);
+    let out = classify_response(
+        r#"{"verdict":"deny","message":"no","ruleId":"t/r","reason":"why","classification":"static","cacheTtlMs":0}"#,
+    );
     let v = decided(out);
     assert_eq!(v.verdict, Verdict::Deny);
     assert_eq!(v.message.as_deref(), Some("no"));
@@ -153,7 +169,10 @@ fn classify_rejects_garbage_with_violation() {
         r#"{"verdict":"allow","cacheTtlMs":-5}"#,
     ] {
         let (reason, violation) = on_error(classify_response(line));
-        assert!(violation, "garbage must flag a violation: {line} ({reason})");
+        assert!(
+            violation,
+            "garbage must flag a violation: {line} ({reason})"
+        );
     }
 }
 
@@ -188,7 +207,11 @@ fn persistent_tool_is_reused_across_calls() {
     assert!(r.is_active(), "persistent child stays Ready between calls");
     std::thread::sleep(Duration::from_millis(30));
     let second = decided(r.invoke(&cmd(), &invocation(), now).unwrap());
-    assert_eq!(pid_reason(&first), pid_reason(&second), "same child process answers both calls");
+    assert_eq!(
+        pid_reason(&first),
+        pid_reason(&second),
+        "same child process answers both calls"
+    );
 }
 
 #[test]
@@ -202,7 +225,11 @@ fn spawn_lifecycle_runs_a_fresh_child_per_call() {
     let first = decided(r.invoke(&cmd(), &invocation(), now).unwrap());
     assert!(!r.is_active(), "one-shot children do not persist");
     let second = decided(r.invoke(&cmd(), &invocation(), now).unwrap());
-    assert_ne!(pid_reason(&first), pid_reason(&second), "each call spawns a new process");
+    assert_ne!(
+        pid_reason(&first),
+        pid_reason(&second),
+        "each call spawns a new process"
+    );
 }
 
 // ── Runtime outcome classification (06 §6.4.4) ──
@@ -221,7 +248,10 @@ fn timeout_is_onerror_with_violation_and_the_child_dies() {
         let (reason, violation) = on_error(r.invoke(&cmd(), &invocation(), started).unwrap());
         assert!(violation, "timeout counts a violation");
         assert!(reason.contains("deadline"), "{reason}");
-        assert!(started.elapsed() < Duration::from_secs(3), "grace-kill must not wait out the sleep");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "grace-kill must not wait out the sleep"
+        );
         assert!(!r.is_active());
     }
 }
@@ -236,8 +266,12 @@ fn exit_nonzero_is_onerror_without_violation() {
             s.lifecycle = Lifecycle::Spawn;
             s
         });
-        let (reason, violation) = on_error(r.invoke(&cmd(), &invocation(), Instant::now()).unwrap());
-        assert!(!violation, "exit != 0 is the tool's own failure, not a violation");
+        let (reason, violation) =
+            on_error(r.invoke(&cmd(), &invocation(), Instant::now()).unwrap());
+        assert!(
+            !violation,
+            "exit != 0 is the tool's own failure, not a violation"
+        );
         assert!(reason.contains("exited"), "{reason}");
     }
 }
@@ -252,7 +286,10 @@ fn garbage_and_oversize_output_violate() {
     {
         let (_g, mut r) = runner(test_tool("oversize", Some(200_000)));
         let (_, violation) = on_error(r.invoke(&cmd(), &invocation(), Instant::now()).unwrap());
-        assert!(violation, "output above maxOutputBytes is a protocol violation");
+        assert!(
+            violation,
+            "output above maxOutputBytes is a protocol violation"
+        );
     }
 }
 
@@ -260,7 +297,8 @@ fn garbage_and_oversize_output_violate() {
 fn foreign_pv_and_overlong_message_violate() {
     {
         let (_g, mut r) = runner(test_tool("foreign-pv", None));
-        let (reason, violation) = on_error(r.invoke(&cmd(), &invocation(), Instant::now()).unwrap());
+        let (reason, violation) =
+            on_error(r.invoke(&cmd(), &invocation(), Instant::now()).unwrap());
         assert!(violation);
         assert!(reason.contains("protocolVersion"));
     }
@@ -278,8 +316,12 @@ fn missing_binary_is_onerror_with_violation() {
             argv: vec!["/nonexistent/warden-tool".into()],
             ..test_tool("answer", None)
         });
-        let (reason, violation) = on_error(r.invoke(&cmd(), &invocation(), Instant::now()).unwrap());
-        assert!(violation, "spawn failure (ENOENT) counts a violation (06 §6.4.4)");
+        let (reason, violation) =
+            on_error(r.invoke(&cmd(), &invocation(), Instant::now()).unwrap());
+        assert!(
+            violation,
+            "spawn failure (ENOENT) counts a violation (06 §6.4.4)"
+        );
         assert!(reason.contains("spawn"), "{reason}");
     }
 }
@@ -289,7 +331,10 @@ fn ladder_restarts_then_marks_unhealthy() {
     // Every call fails to spawn → violations at a steady cadence. Time is
     // advanced just past each expected backoff delay (250ms × 2ⁿ) so gates
     // are observed but windows (60s violations / 300s restarts) stay hot.
-    let (_g, mut r) = runner(spec(Lifecycle::Spawn, vec!["/nonexistent/warden-tool".into()]));
+    let (_g, mut r) = runner(spec(
+        Lifecycle::Spawn,
+        vec!["/nonexistent/warden-tool".into()],
+    ));
     let mut now = Instant::now();
     let mut saw_restart_state = false;
     let mut saw_unhealthy = false;
@@ -315,7 +360,10 @@ fn ladder_restarts_then_marks_unhealthy() {
     }
     assert!(saw_restart_state, "3 violations ⇒ restart with backoff");
     assert!(saw_unhealthy, "restarts exceeding the window ⇒ unhealthy");
-    assert_eq!(backoff_level, 3, "three backoff gates precede the unhealthy verdict");
+    assert_eq!(
+        backoff_level, 3,
+        "three backoff gates precede the unhealthy verdict"
+    );
 }
 
 #[test]
@@ -343,10 +391,16 @@ fn persistent_tool_quitting_after_answers_hits_the_ladder() {
             other => panic!("unexpected outcome: {other:?}"),
         }
     }
-    assert!(saw_restart, "repeated persistent exits must hit the restart ladder");
+    assert!(
+        saw_restart,
+        "repeated persistent exits must hit the restart ladder"
+    );
     // Past the backoff the pool spawns fresh and serves again.
     std::thread::sleep(Duration::from_millis(300));
-    assert_eq!(decided(r.invoke(&cmd(), &invocation(), Instant::now()).unwrap()).verdict, Verdict::Allow);
+    assert_eq!(
+        decided(r.invoke(&cmd(), &invocation(), Instant::now()).unwrap()).verdict,
+        Verdict::Allow
+    );
 }
 
 // ── sha256 pin (I8) ──
@@ -357,13 +411,22 @@ fn sha256_pin_mismatch_is_fatal_and_match_passes() {
     let good = crate::sha256::hex_digest(&bytes);
 
     {
-        let (_g, mut r) = runner(ToolSpec { sha256: Some("0".repeat(64)), ..test_tool("loop", None) });
+        let (_g, mut r) = runner(ToolSpec {
+            sha256: Some("0".repeat(64)),
+            ..test_tool("loop", None)
+        });
         let pin = r.invoke(&cmd(), &invocation(), Instant::now()).unwrap_err();
         assert!(pin.reason.contains("sha256 mismatch"), "{}", pin.reason);
     }
     {
-        let (_g, mut r) = runner(ToolSpec { sha256: Some(good), ..test_tool("loop", None) });
-        assert_eq!(decided(r.invoke(&cmd(), &invocation(), Instant::now()).unwrap()).verdict, Verdict::Allow);
+        let (_g, mut r) = runner(ToolSpec {
+            sha256: Some(good),
+            ..test_tool("loop", None)
+        });
+        assert_eq!(
+            decided(r.invoke(&cmd(), &invocation(), Instant::now()).unwrap()).verdict,
+            Verdict::Allow
+        );
     }
 }
 
@@ -414,36 +477,69 @@ fn pools_tick_all_runners_and_fail_independently() {
     };
     let stages = vec![
         stage("s1", good.clone()),
-        stage("s2", ToolSpec { argv: vec!["/nonexistent/x".into()], ..good.clone() }),
+        stage(
+            "s2",
+            ToolSpec {
+                argv: vec!["/nonexistent/x".into()],
+                ..good.clone()
+            },
+        ),
     ];
     let mut pools = StagePools::build(&stages, 16);
     let now = Instant::now();
-    { let _g = test_lock();
+    {
+        let _g = test_lock();
 
-        let out1 = pools.invoke(&stages[0], &cmd(), &invocation(), now).unwrap();
-        assert!(matches!(out1, StageOutcome::Decided(_)), "healthy stage works");
+        let out1 = pools
+            .invoke(&stages[0], &cmd(), &invocation(), now)
+            .unwrap();
+        assert!(
+            matches!(out1, StageOutcome::Decided(_)),
+            "healthy stage works"
+        );
 
-        let out2 = pools.invoke(&stages[1], &cmd(), &invocation(), now).unwrap();
-        assert!(matches!(out2, StageOutcome::OnError { .. }), "broken stage fails");
+        let out2 = pools
+            .invoke(&stages[1], &cmd(), &invocation(), now)
+            .unwrap();
+        assert!(
+            matches!(out2, StageOutcome::OnError { .. }),
+            "broken stage fails"
+        );
 
         // One broken tool must not disable the other (08 §8.2).
-        let out1 = pools.invoke(&stages[0], &cmd(), &invocation(), now).unwrap();
+        let out1 = pools
+            .invoke(&stages[0], &cmd(), &invocation(), now)
+            .unwrap();
         assert!(matches!(out1, StageOutcome::Decided(_)));
     }
     pools.tick(now + Duration::from_secs(3600));
-    assert!(!pools.runners.values().any(|r| r.is_active()), "tick idles out children");
+    assert!(
+        !pools.runners.values().any(|r| r.is_active()),
+        "tick idles out children"
+    );
 }
 
 #[test]
 fn max_concurrent_tools_gate_is_enforced() {
     let good = test_tool("loop", None);
-    let stages: Vec<Stage> = (0..2).map(|i| stage(&format!("s{i}"), good.clone())).collect();
+    let stages: Vec<Stage> = (0..2)
+        .map(|i| stage(&format!("s{i}"), good.clone()))
+        .collect();
     let mut pools = StagePools::build(&stages, 1);
     let now = Instant::now();
     {
         let _g = test_lock();
-        assert!(matches!(pools.invoke(&stages[0], &cmd(), &invocation(), now).unwrap(), StageOutcome::Decided(_)));
-        let (reason, violation) = on_error(pools.invoke(&stages[1], &cmd(), &invocation(), now).unwrap());
+        assert!(matches!(
+            pools
+                .invoke(&stages[0], &cmd(), &invocation(), now)
+                .unwrap(),
+            StageOutcome::Decided(_)
+        ));
+        let (reason, violation) = on_error(
+            pools
+                .invoke(&stages[1], &cmd(), &invocation(), now)
+                .unwrap(),
+        );
         assert!(reason.contains("maxConcurrentTools"));
         assert!(!violation, "cap enforcement is not a tool fault");
     }

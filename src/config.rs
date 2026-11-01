@@ -267,17 +267,22 @@ pub fn default_path() -> PathBuf {
 /// "config invalid:"), safe for the -32001 message (truncated by the wire layer).
 pub fn load(path: &Path) -> Result<Config, String> {
     let bytes = read_capped(path)?;
-    let text = std::str::from_utf8(&bytes).map_err(|_| "config invalid: file is not UTF-8".to_string())?;
+    let text =
+        std::str::from_utf8(&bytes).map_err(|_| "config invalid: file is not UTF-8".to_string())?;
     parse_text(path, text)
 }
 
 fn read_capped(path: &Path) -> Result<Vec<u8>, String> {
-    let meta = std::fs::metadata(path).map_err(|e| format!("config invalid: cannot read file: {e}"))?;
+    let meta =
+        std::fs::metadata(path).map_err(|e| format!("config invalid: cannot read file: {e}"))?;
     if !meta.is_file() {
         return Err("config invalid: not a regular file".into());
     }
     if meta.len() > DEFAULT_CONFIG_BYTES as u64 {
-        return Err(format!("config invalid: file exceeds {} bytes", DEFAULT_CONFIG_BYTES));
+        return Err(format!(
+            "config invalid: file exceeds {} bytes",
+            DEFAULT_CONFIG_BYTES
+        ));
     }
     std::fs::read(path).map_err(|e| format!("config invalid: cannot read file: {e}"))
 }
@@ -286,10 +291,14 @@ fn read_capped(path: &Path) -> Result<Vec<u8>, String> {
 /// .jsonc contract in 06 §6.1). Everything else is strict.
 pub fn parse_text(path: &Path, text: &str) -> Result<Config, String> {
     if text.len() > DEFAULT_CONFIG_BYTES {
-        return Err(format!("config invalid: file exceeds {} bytes", DEFAULT_CONFIG_BYTES));
+        return Err(format!(
+            "config invalid: file exceeds {} bytes",
+            DEFAULT_CONFIG_BYTES
+        ));
     }
     let stripped = strip_jsonc(text);
-    let raw: RawConfig = serde_json::from_str(&stripped).map_err(|e| format!("config invalid: {e}"))?;
+    let raw: RawConfig =
+        serde_json::from_str(&stripped).map_err(|e| format!("config invalid: {e}"))?;
     validate(path, raw)
 }
 
@@ -394,7 +403,10 @@ fn strip_trailing_commas(text: &str) -> String {
 
 fn validate(path: &Path, raw: RawConfig) -> Result<Config, String> {
     if raw.version != 1 {
-        return Err(format!("config invalid: version must be 1, got {}", raw.version));
+        return Err(format!(
+            "config invalid: version must be 1, got {}",
+            raw.version
+        ));
     }
     if let Some(defaults) = &raw.defaults {
         if let Some(action) = &defaults.action {
@@ -407,7 +419,11 @@ fn validate(path: &Path, raw: RawConfig) -> Result<Config, String> {
 
     let limits = resolve_limits(raw.limits.as_ref())?;
     if raw.stages.len() > limits.stages {
-        return Err(format!("config invalid: {} stages exceed the limit {}", raw.stages.len(), limits.stages));
+        return Err(format!(
+            "config invalid: {} stages exceed the limit {}",
+            raw.stages.len(),
+            limits.stages
+        ));
     }
     if raw.stages.is_empty() {
         return Err("config invalid: stages must contain at least 1 item".into());
@@ -417,7 +433,10 @@ fn validate(path: &Path, raw: RawConfig) -> Result<Config, String> {
     for (i, s) in raw.stages.into_iter().enumerate() {
         let stage = validate_stage(s).map_err(|e| format!("config invalid: stages[{i}]: {e}"))?;
         if stages.iter().any(|x: &Stage| x.id == stage.id) {
-            return Err(format!("config invalid: stages[{i}]: duplicate stage id `{}`", stage.id));
+            return Err(format!(
+                "config invalid: stages[{i}]: duplicate stage id `{}`",
+                stage.id
+            ));
         }
         stages.push(stage);
     }
@@ -434,7 +453,9 @@ fn resolve_limits(raw: Option<&RawLimits>) -> Result<Limits, String> {
     let d = |v: Option<u64>, def: usize| -> Result<usize, String> {
         match v {
             None => Ok(def),
-            Some(n) => usize::try_from(n).map_err(|_| "config invalid: limits value too large".to_string()),
+            Some(n) => {
+                usize::try_from(n).map_err(|_| "config invalid: limits value too large".to_string())
+            }
         }
     };
     let limits = Limits {
@@ -442,15 +463,24 @@ fn resolve_limits(raw: Option<&RawLimits>) -> Result<Limits, String> {
         config_bytes: d(raw.and_then(|l| l.config_bytes), DEFAULT_CONFIG_BYTES)?,
         facts_bytes: d(raw.and_then(|l| l.facts_bytes), DEFAULT_FACTS_BYTES)?,
         facts_depth: d(raw.and_then(|l| l.facts_depth), DEFAULT_FACTS_DEPTH)?,
-        max_concurrent_tools: d(raw.and_then(|l| l.max_concurrent_tools), DEFAULT_MAX_CONCURRENT_TOOLS)?,
+        max_concurrent_tools: d(
+            raw.and_then(|l| l.max_concurrent_tools),
+            DEFAULT_MAX_CONCURRENT_TOOLS,
+        )?,
     };
     // Schema bounds (shell-warden.config.v1.schema.json): stages 1..=64,
     // configBytes ≤ 262144. The file-size cap is enforced in parse_text too.
     if limits.stages == 0 || limits.stages > 64 {
-        return Err(format!("config invalid: limits.stages must be 1..=64, got {}", limits.stages));
+        return Err(format!(
+            "config invalid: limits.stages must be 1..=64, got {}",
+            limits.stages
+        ));
     }
     if limits.config_bytes > DEFAULT_CONFIG_BYTES {
-        return Err(format!("config invalid: limits.config_bytes must be ≤ {}", DEFAULT_CONFIG_BYTES));
+        return Err(format!(
+            "config invalid: limits.config_bytes must be ≤ {}",
+            DEFAULT_CONFIG_BYTES
+        ));
     }
     Ok(limits)
 }
@@ -463,7 +493,11 @@ fn valid_stage_id(id: &str) -> bool {
         _ => return false,
     }
     let rest = chars.count();
-    rest <= 31 && id.chars().skip(1).all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    rest <= 31
+        && id
+            .chars()
+            .skip(1)
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
 /// Expand `{env:NAME}` (whole-string form) from the engine's environment at
@@ -473,7 +507,9 @@ fn expand_env(spec: &str) -> Result<String, String> {
         if name.is_empty() {
             return Err("config invalid: empty {{env:}} reference".into());
         }
-        std::env::var(name).map_err(|_| format!("config invalid: {{env:{name}}} is not set in the engine environment"))
+        std::env::var(name).map_err(|_| {
+            format!("config invalid: {{env:{name}}} is not set in the engine environment")
+        })
     } else {
         Ok(spec.to_string())
     }
@@ -484,7 +520,10 @@ fn validate_stage(raw: RawStage) -> Result<Stage, String> {
         RawStageType::Tool => {}
     }
     if !valid_stage_id(&raw.id) {
-        return Err(format!("id `{}` must match ^[a-z][a-z0-9-]{{0,31}}$", raw.id));
+        return Err(format!(
+            "id `{}` must match ^[a-z][a-z0-9-]{{0,31}}$",
+            raw.id
+        ));
     }
     let tool = validate_tool(raw.tool)?;
     let message_mode = match raw.message_mode {
@@ -496,15 +535,24 @@ fn validate_stage(raw: RawStage) -> Result<Stage, String> {
         Some(b) => {
             // 06 §6.6 semantics need the pair; schema leaves each optional,
             // the engine requires both together (stricter, fail-closed).
-            let max_rejections = b.max_rejections.ok_or("budget.maxRejections is required together with windowMs")?;
-            let window_ms = b.window_ms.ok_or("budget.windowMs is required together with maxRejections")?;
+            let max_rejections = b
+                .max_rejections
+                .ok_or("budget.maxRejections is required together with windowMs")?;
+            let window_ms = b
+                .window_ms
+                .ok_or("budget.windowMs is required together with maxRejections")?;
             if !(1..=10).contains(&max_rejections) {
-                return Err(format!("budget.maxRejections must be 1..=10, got {max_rejections}"));
+                return Err(format!(
+                    "budget.maxRejections must be 1..=10, got {max_rejections}"
+                ));
             }
             if window_ms < 60_000 {
                 return Err(format!("budget.windowMs must be ≥ 60000, got {window_ms}"));
             }
-            Some(Budget { max_rejections: max_rejections as u32, window_ms })
+            Some(Budget {
+                max_rejections: max_rejections as u32,
+                window_ms,
+            })
         }
     };
     Ok(Stage {
@@ -525,7 +573,9 @@ fn validate_tool(raw: RawTool) -> Result<ToolSpec, String> {
     for (i, member) in raw.command.into_iter().enumerate() {
         let expanded = expand_env(&member).map_err(|e| format!("tool.command[{i}]: {e}"))?;
         if i == 0 && !expanded.starts_with('/') {
-            return Err(format!("tool.command[0] must be absolute after expansion, got `{expanded}`"));
+            return Err(format!(
+                "tool.command[0] must be absolute after expansion, got `{expanded}`"
+            ));
         }
         argv.push(expanded);
     }
@@ -559,15 +609,23 @@ fn validate_tool(raw: RawTool) -> Result<ToolSpec, String> {
     }
     let timeout_ms = raw.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
     if timeout_ms == 0 || timeout_ms > 30_000 {
-        return Err(format!("tool.timeoutMs must be 1..=30000, got {timeout_ms}"));
+        return Err(format!(
+            "tool.timeoutMs must be 1..=30000, got {timeout_ms}"
+        ));
     }
     let kill_grace_ms = raw.kill_grace_ms.unwrap_or(DEFAULT_KILL_GRACE_MS);
     if !(50..=2_000).contains(&kill_grace_ms) {
-        return Err(format!("tool.killGraceMs must be 50..=2000, got {kill_grace_ms}"));
+        return Err(format!(
+            "tool.killGraceMs must be 50..=2000, got {kill_grace_ms}"
+        ));
     }
-    let max_output_bytes = raw.max_output_bytes.unwrap_or(DEFAULT_MAX_OUTPUT_BYTES as u64);
+    let max_output_bytes = raw
+        .max_output_bytes
+        .unwrap_or(DEFAULT_MAX_OUTPUT_BYTES as u64);
     if !(1_024..=1_048_576).contains(&max_output_bytes) {
-        return Err(format!("tool.maxOutputBytes must be 1024..=1048576, got {max_output_bytes}"));
+        return Err(format!(
+            "tool.maxOutputBytes must be 1024..=1048576, got {max_output_bytes}"
+        ));
     }
     let on_error = match raw.on_error {
         Some(RawOnError::Skip) => OnError::Skip,
@@ -586,7 +644,11 @@ fn validate_tool(raw: RawTool) -> Result<ToolSpec, String> {
         None => (false, false, false),
         Some(input) => match &input.session {
             None => (false, false, input.mcp.unwrap_or(false)),
-            Some(session) => (session.id.unwrap_or(false), session.agent.unwrap_or(false), input.mcp.unwrap_or(false)),
+            Some(session) => (
+                session.id.unwrap_or(false),
+                session.agent.unwrap_or(false),
+                input.mcp.unwrap_or(false),
+            ),
         },
     };
 
@@ -609,7 +671,9 @@ fn validate_tool(raw: RawTool) -> Result<ToolSpec, String> {
 }
 
 fn valid_sha256(s: &str) -> bool {
-    s.len() == 64 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 // ── Reload watcher (05 §5.3: poll, valid → atomic swap, invalid → last-good) ────
@@ -623,7 +687,10 @@ pub struct ConfigWatcher {
 
 impl ConfigWatcher {
     pub fn new(path: &Path) -> Self {
-        let mut w = ConfigWatcher { path: path.to_path_buf(), ..Default::default() };
+        let mut w = ConfigWatcher {
+            path: path.to_path_buf(),
+            ..Default::default()
+        };
         if let Ok(m) = std::fs::metadata(path) {
             w.last_modified = m.modified().ok();
             w.last_len = m.len();
@@ -678,7 +745,7 @@ mod tests {
         assert_eq!(cfg.stages[0].tool.on_error, OnError::Ask);
         assert_eq!(cfg.stages[0].tool.lifecycle, Lifecycle::Persistent);
         assert_eq!(cfg.stages[0].tool.timeout_ms, 1000); // fixture sets it explicitly
-        // No input block → minimal letter (command/cwd only).
+                                                         // No input block → minimal letter (command/cwd only).
         assert!(!cfg.stages[0].tool.input_session_id);
         assert!(!cfg.stages[0].tool.input_mcp);
     }
@@ -733,7 +800,10 @@ mod tests {
         assert!(parse(&ok_config(json!([s]))).is_err(), "uppercase rejected");
         let mut s = stage_json();
         s["id"] = json!("1s");
-        assert!(parse(&ok_config(json!([s]))).is_err(), "leading digit rejected");
+        assert!(
+            parse(&ok_config(json!([s]))).is_err(),
+            "leading digit rejected"
+        );
         let mut s = stage_json();
         s["id"] = json!("tool with space");
         assert!(parse(&ok_config(json!([s]))).is_err(), "space rejected");
@@ -743,7 +813,10 @@ mod tests {
         assert!(parse(&dup).is_err(), "duplicate id rejected");
         let mut s = stage_json();
         s["id"] = json!("a-9z");
-        assert!(parse(&ok_config(json!([s]))).is_ok(), "lowercase/digits/dash ok");
+        assert!(
+            parse(&ok_config(json!([s]))).is_ok(),
+            "lowercase/digits/dash ok"
+        );
     }
 
     #[test]
@@ -757,22 +830,43 @@ mod tests {
     #[test]
     fn tool_bounds_match_schema() {
         let cases: Vec<(serde_json::Value, bool)> = vec![
-            (json!({ "command": [] }), false),                       // empty argv
-            (json!({ "command": ["bin/relative"] }), false),         // relative argv0
+            (json!({ "command": [] }), false),               // empty argv
+            (json!({ "command": ["bin/relative"] }), false), // relative argv0
             (json!({ "command": ["/bin/x"], "timeoutMs": 0 }), false),
             (json!({ "command": ["/bin/x"], "timeoutMs": 30001 }), false),
             (json!({ "command": ["/bin/x"], "timeoutMs": 30000 }), true),
             (json!({ "command": ["/bin/x"], "killGraceMs": 49 }), false),
             (json!({ "command": ["/bin/x"], "killGraceMs": 2000 }), true),
-            (json!({ "command": ["/bin/x"], "maxOutputBytes": 1024 }), true),
-            (json!({ "command": ["/bin/x"], "maxOutputBytes": 1023 }), false),
-            (json!({ "command": ["/bin/x"], "idleTimeoutMs": 29999 }), false),
-            (json!({ "command": ["/bin/x"], "idleTimeoutMs": 30000 }), true),
+            (
+                json!({ "command": ["/bin/x"], "maxOutputBytes": 1024 }),
+                true,
+            ),
+            (
+                json!({ "command": ["/bin/x"], "maxOutputBytes": 1023 }),
+                false,
+            ),
+            (
+                json!({ "command": ["/bin/x"], "idleTimeoutMs": 29999 }),
+                false,
+            ),
+            (
+                json!({ "command": ["/bin/x"], "idleTimeoutMs": 30000 }),
+                true,
+            ),
             (json!({ "command": ["/bin/x"], "sha256": "ZZ" }), false),
-            (json!({ "command": ["/bin/x"], "sha256": serde_json::Value::Null }), true),
-            (json!({ "command": ["/bin/x"], "sha256": "a".repeat(64) }), true),
+            (
+                json!({ "command": ["/bin/x"], "sha256": serde_json::Value::Null }),
+                true,
+            ),
+            (
+                json!({ "command": ["/bin/x"], "sha256": "a".repeat(64) }),
+                true,
+            ),
             (json!({ "command": ["/bin/x"], "lifecycle": "spawn" }), true),
-            (json!({ "command": ["/bin/x"], "lifecycle": "zombie" }), false),
+            (
+                json!({ "command": ["/bin/x"], "lifecycle": "zombie" }),
+                false,
+            ),
         ];
         for (tool, expect_ok) in cases {
             let mut s = stage_json();
@@ -805,7 +899,9 @@ mod tests {
         let cfg = parse(&ok_config(json!([s]))).expect("valid");
         let t = &cfg.stages[0].tool;
         assert!(t.env_set.contains(&("WARDEN_MODE".into(), "strict".into())));
-        assert!(t.env_set.contains(&("WARDEN_TOKEN".into(), "/opt/tools/warden".into())));
+        assert!(t
+            .env_set
+            .contains(&("WARDEN_TOKEN".into(), "/opt/tools/warden".into())));
         assert!(t.env_unset.contains(&"GITHUB_TOKEN".to_string()));
     }
 
@@ -816,7 +912,10 @@ mod tests {
         assert!(parse(&ok_config(json!([s]))).is_err(), "windowMs missing");
         let mut s = stage_json();
         s["budget"] = json!({ "windowMs": 60_000 });
-        assert!(parse(&ok_config(json!([s]))).is_err(), "maxRejections missing");
+        assert!(
+            parse(&ok_config(json!([s]))).is_err(),
+            "maxRejections missing"
+        );
         let mut s = stage_json();
         s["budget"] = json!({ "maxRejections": 11, "windowMs": 60_000 });
         assert!(parse(&ok_config(json!([s]))).is_err(), "maxRejections > 10");
@@ -826,7 +925,13 @@ mod tests {
         let mut s = stage_json();
         s["budget"] = json!({ "maxRejections": 3, "windowMs": 1_800_000 });
         let cfg = parse(&ok_config(json!([s]))).expect("valid budget");
-        assert_eq!(cfg.stages[0].budget, Some(Budget { max_rejections: 3, window_ms: 1_800_000 }));
+        assert_eq!(
+            cfg.stages[0].budget,
+            Some(Budget {
+                max_rejections: 3,
+                window_ms: 1_800_000
+            })
+        );
     }
 
     #[test]
@@ -852,7 +957,8 @@ mod tests {
 
     #[test]
     fn defaults_action_only_accepts_ask() {
-        let v = json!({ "version": 1, "defaults": { "action": "allow" }, "stages": [stage_json()] });
+        let v =
+            json!({ "version": 1, "defaults": { "action": "allow" }, "stages": [stage_json()] });
         assert!(parse(&v.to_string()).is_err());
         let v = json!({ "version": 1, "defaults": { "action": "ask" }, "stages": [stage_json()] });
         assert!(parse(&v.to_string()).is_ok());
@@ -865,7 +971,10 @@ mod tests {
         assert!(parse(&ok_config(json!([s]))).is_err());
         let mut s = stage_json();
         s.as_object_mut().unwrap().remove("type");
-        assert!(parse(&ok_config(json!([s]))).is_err(), "type is required by schema");
+        assert!(
+            parse(&ok_config(json!([s]))).is_err(),
+            "type is required by schema"
+        );
     }
 
     #[test]

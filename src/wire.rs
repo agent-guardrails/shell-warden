@@ -46,7 +46,11 @@ pub struct FatalData {
 
 impl RpcError {
     pub fn new(code: i64, message: impl Into<String>) -> Self {
-        RpcError { code, message: truncate_chars(&message.into(), MAX_ERROR_MESSAGE), data: None }
+        RpcError {
+            code,
+            message: truncate_chars(&message.into(), MAX_ERROR_MESSAGE),
+            data: None,
+        }
     }
     pub fn fatal(code: i64, message: impl Into<String>) -> Self {
         RpcError {
@@ -280,9 +284,16 @@ pub struct AuditEvent {
 
 pub enum Incoming {
     /// Request with a valid numeric id — MUST be answered with the same id.
-    Request { id: u64, method: String, params: Option<Value> },
+    Request {
+        id: u64,
+        method: String,
+        params: Option<Value>,
+    },
     /// Notification carries no id — MUST NOT be answered (unknown ones ignored, §2.1).
-    Notification { method: String, params: Option<Value> },
+    Notification {
+        method: String,
+        params: Option<Value>,
+    },
     /// Malformed line. Answered with `id` when a valid id was present, else null.
     Malformed { id: Option<u64>, error: RpcError },
 }
@@ -291,13 +302,24 @@ pub enum Incoming {
 pub fn classify(value: Value) -> Incoming {
     let obj = match value {
         Value::Object(map) => map,
-        _ => return Incoming::Malformed { id: None, error: RpcError::new(CODE_PARSE, "parse error: not a JSON object") },
+        _ => {
+            return Incoming::Malformed {
+                id: None,
+                error: RpcError::new(CODE_PARSE, "parse error: not a JSON object"),
+            }
+        }
     };
     // jsonrpc must be the exact version member (02 §2.2).
     match obj.get("jsonrpc") {
         Some(Value::String(s)) if s == "2.0" => {}
         _ => {
-            return Incoming::Malformed { id: valid_id(obj.get("id")), error: RpcError::new(CODE_INVALID_REQUEST, "invalid request: jsonrpc must be \"2.0\"") }
+            return Incoming::Malformed {
+                id: valid_id(obj.get("id")),
+                error: RpcError::new(
+                    CODE_INVALID_REQUEST,
+                    "invalid request: jsonrpc must be \"2.0\"",
+                ),
+            }
         }
     }
     let id_member = obj.get("id");
@@ -309,7 +331,13 @@ pub fn classify(value: Value) -> Incoming {
         Some(v) => match valid_id(Some(v)) {
             Some(id) => Some(id),
             None => {
-                return Incoming::Malformed { id: None, error: RpcError::new(CODE_INVALID_REQUEST, "invalid request: id must be an integer >= 1") }
+                return Incoming::Malformed {
+                    id: None,
+                    error: RpcError::new(
+                        CODE_INVALID_REQUEST,
+                        "invalid request: id must be an integer >= 1",
+                    ),
+                }
             }
         },
     };
@@ -320,12 +348,27 @@ pub fn classify(value: Value) -> Incoming {
             let params = obj.get("params").cloned().filter(|p| !p.is_null());
             match id_opt {
                 Some(id) => Incoming::Request { id, method, params },
-                None if id_is_null_member => Incoming::Malformed { id: None, error: RpcError::new(CODE_INVALID_REQUEST, "invalid request: id must be an integer >= 1") },
+                None if id_is_null_member => Incoming::Malformed {
+                    id: None,
+                    error: RpcError::new(
+                        CODE_INVALID_REQUEST,
+                        "invalid request: id must be an integer >= 1",
+                    ),
+                },
                 None => Incoming::Notification { method, params },
             }
         }
-        (Some(_), _) => Incoming::Malformed { id, error: RpcError::new(CODE_INVALID_REQUEST, "invalid request: method must be a string") },
-        (None, _) => Incoming::Malformed { id, error: RpcError::new(CODE_INVALID_REQUEST, "invalid request: missing method") },
+        (Some(_), _) => Incoming::Malformed {
+            id,
+            error: RpcError::new(
+                CODE_INVALID_REQUEST,
+                "invalid request: method must be a string",
+            ),
+        },
+        (None, _) => Incoming::Malformed {
+            id,
+            error: RpcError::new(CODE_INVALID_REQUEST, "invalid request: missing method"),
+        },
     }
 }
 
@@ -343,17 +386,24 @@ fn valid_id(v: Option<&Value>) -> Option<u64> {
 pub struct Reply {
     pub audit: Option<AuditEvent>,
     pub body: ReplyBody,
-}pub enum ReplyBody {
+}
+pub enum ReplyBody {
     Result(Value),
     Error(RpcError),
 }
 
 impl Reply {
     pub fn result(value: Value) -> Reply {
-        Reply { audit: None, body: ReplyBody::Result(value) }
+        Reply {
+            audit: None,
+            body: ReplyBody::Result(value),
+        }
     }
     pub fn error(err: RpcError) -> Reply {
-        Reply { audit: None, body: ReplyBody::Error(err) }
+        Reply {
+            audit: None,
+            body: ReplyBody::Error(err),
+        }
     }
 }
 
@@ -388,9 +438,18 @@ pub fn dispatch(handler: &mut dyn Handler, method: &str, params: Option<Value>) 
                 None => Err(de::missing_field()),
             };
             match parsed {
-                Ok(p) if p.protocol_version == 1 => Reply::result(serde_json::to_value(handler.initialize()).expect("serialize initialize result")),
-                Ok(_) => Reply::error(RpcError::new(CODE_INVALID_PARAMS, "invalid params: protocolVersion must be 1")),
-                Err(e) => Reply::error(RpcError::new(CODE_INVALID_PARAMS, format!("invalid params: {e}"))),
+                Ok(p) if p.protocol_version == 1 => Reply::result(
+                    serde_json::to_value(handler.initialize())
+                        .expect("serialize initialize result"),
+                ),
+                Ok(_) => Reply::error(RpcError::new(
+                    CODE_INVALID_PARAMS,
+                    "invalid params: protocolVersion must be 1",
+                )),
+                Err(e) => Reply::error(RpcError::new(
+                    CODE_INVALID_PARAMS,
+                    format!("invalid params: {e}"),
+                )),
             }
         }
         "policy/check" => {
@@ -400,21 +459,36 @@ pub fn dispatch(handler: &mut dyn Handler, method: &str, params: Option<Value>) 
             };
             let params = match parsed {
                 Ok(p) => p,
-                Err(e) => return Reply::error(RpcError::new(CODE_INVALID_PARAMS, format!("invalid params: {e}"))),
+                Err(e) => {
+                    return Reply::error(RpcError::new(
+                        CODE_INVALID_PARAMS,
+                        format!("invalid params: {e}"),
+                    ))
+                }
             };
             if let Err(e) = validate_check(&params) {
-                return Reply::error(RpcError::new(CODE_INVALID_PARAMS, format!("invalid params: {e}")));
+                return Reply::error(RpcError::new(
+                    CODE_INVALID_PARAMS,
+                    format!("invalid params: {e}"),
+                ));
             }
             match handler.check(params) {
                 Ok(result) => Reply {
                     audit: handler.take_audit(),
-                    body: ReplyBody::Result(serde_json::to_value(result).expect("serialize check result")),
+                    body: ReplyBody::Result(
+                        serde_json::to_value(result).expect("serialize check result"),
+                    ),
                 },
                 Err(e) => Reply::error(e),
             }
         }
-        "ping" => Reply::result(serde_json::to_value(handler.ping()).expect("serialize ping result")),
-        other => Reply::error(RpcError::new(CODE_METHOD_NOT_FOUND, format!("method not found: {other}"))),
+        "ping" => {
+            Reply::result(serde_json::to_value(handler.ping()).expect("serialize ping result"))
+        }
+        other => Reply::error(RpcError::new(
+            CODE_METHOD_NOT_FOUND,
+            format!("method not found: {other}"),
+        )),
     }
 }
 
@@ -467,13 +541,20 @@ pub enum FrameError {
 /// Read one `\n`-terminated line, enforcing the frame cap byte-wise so an
 /// oversized line can never balloon memory. Returns `Ok(None)` on clean EOF.
 /// A partial trailing line at EOF is tolerated (05 §5.1) and returned as a line.
-pub fn read_line_capped(reader: &mut impl BufRead, cap: usize) -> Result<Option<Vec<u8>>, FrameError> {
+pub fn read_line_capped(
+    reader: &mut impl BufRead,
+    cap: usize,
+) -> Result<Option<Vec<u8>>, FrameError> {
     let mut line = Vec::new();
     loop {
         let available = match reader.fill_buf() {
             Ok(buf) if buf.is_empty() => {
                 // EOF: tolerate a partial final line, otherwise end the stream.
-                return if line.is_empty() { Ok(None) } else { Ok(Some(line)) };
+                return if line.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(line))
+                };
             }
             Ok(buf) => buf,
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -504,14 +585,25 @@ fn line_to_incoming(raw: &[u8]) -> Incoming {
     // Blank lines are not valid NDJSON (02 §2.1) — parse error, same as garbage.
     let text = match std::str::from_utf8(raw) {
         Ok(t) => t,
-        Err(_) => return Incoming::Malformed { id: None, error: RpcError::new(CODE_PARSE, "parse error: line is not UTF-8") },
+        Err(_) => {
+            return Incoming::Malformed {
+                id: None,
+                error: RpcError::new(CODE_PARSE, "parse error: line is not UTF-8"),
+            }
+        }
     };
     if text.trim().is_empty() {
-        return Incoming::Malformed { id: None, error: RpcError::new(CODE_PARSE, "parse error: blank line") };
+        return Incoming::Malformed {
+            id: None,
+            error: RpcError::new(CODE_PARSE, "parse error: blank line"),
+        };
     }
     match serde_json::from_str::<Value>(text) {
         Ok(v) => classify(v),
-        Err(_) => Incoming::Malformed { id: None, error: RpcError::new(CODE_PARSE, "parse error: line is not valid JSON") },
+        Err(_) => Incoming::Malformed {
+            id: None,
+            error: RpcError::new(CODE_PARSE, "parse error: line is not valid JSON"),
+        },
     }
 }
 
@@ -539,11 +631,20 @@ pub fn encode_response(id: Option<u64>, reply: &Reply, cap: usize) -> String {
             if let Some(verdict) = v.get("verdict") {
                 m.insert("verdict".into(), verdict.clone());
             } else {
-                return encode_response(id, &Reply::error(RpcError::new(CODE_INTERNAL, "internal error: response too large")), cap);
+                return encode_response(
+                    id,
+                    &Reply::error(RpcError::new(
+                        CODE_INTERNAL,
+                        "internal error: response too large",
+                    )),
+                    cap,
+                );
             }
             serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": Value::Object(m) })
         }
-        ReplyBody::Error(e) => serde_json::json!({ "jsonrpc": "2.0", "id": id, "error": { "code": e.code, "message": "internal error: response too large" } }),
+        ReplyBody::Error(e) => {
+            serde_json::json!({ "jsonrpc": "2.0", "id": id, "error": { "code": e.code, "message": "internal error: response too large" } })
+        }
     };
     serde_json::to_string(&minimal).expect("serialize minimal response")
 }
@@ -607,7 +708,9 @@ pub fn serve(handler: &mut dyn Handler, max_frame_bytes: usize) -> i32 {
             Ok(Some(line)) => line,
             Ok(None) => return 0, // EOF: clean exit (shim closed the pipe)
             Err(FrameError::FrameLimit) => {
-                eprintln!("shell-warden: protocol violation: frame exceeds {max_frame_bytes} bytes");
+                eprintln!(
+                    "shell-warden: protocol violation: frame exceeds {max_frame_bytes} bytes"
+                );
                 return 1;
             }
         };
@@ -678,7 +781,9 @@ mod tests {
 
     #[test]
     fn classify_notification_has_no_id_and_is_not_answered() {
-        match classify_str(r#"{"jsonrpc":"2.0","method":"session/ended","params":{"sessionID":"s1"}}"#) {
+        match classify_str(
+            r#"{"jsonrpc":"2.0","method":"session/ended","params":{"sessionID":"s1"}}"#,
+        ) {
             Incoming::Notification { method, params } => {
                 assert_eq!(method, "session/ended");
                 assert_eq!(params, Some(json!({"sessionID":"s1"})));
@@ -736,7 +841,13 @@ mod tests {
 
     #[test]
     fn blank_and_garbage_lines_are_parse_errors() {
-        for raw in [b"" as &[u8], b"   ", b"not json at all", b"[1,2,3]", b"null"] {
+        for raw in [
+            b"" as &[u8],
+            b"   ",
+            b"not json at all",
+            b"[1,2,3]",
+            b"null",
+        ] {
             match line_to_incoming(raw) {
                 Incoming::Malformed { id, error } => {
                     assert_eq!(id, None);
@@ -762,9 +873,18 @@ mod tests {
     #[test]
     fn reads_lines_and_tolerates_partial_final_line() {
         let mut input: &[u8] = b"one\ntwo\nthree";
-        assert_eq!(read_line_capped(&mut input, 100).unwrap(), Some(b"one".to_vec()));
-        assert_eq!(read_line_capped(&mut input, 100).unwrap(), Some(b"two".to_vec()));
-        assert_eq!(read_line_capped(&mut input, 100).unwrap(), Some(b"three".to_vec()));
+        assert_eq!(
+            read_line_capped(&mut input, 100).unwrap(),
+            Some(b"one".to_vec())
+        );
+        assert_eq!(
+            read_line_capped(&mut input, 100).unwrap(),
+            Some(b"two".to_vec())
+        );
+        assert_eq!(
+            read_line_capped(&mut input, 100).unwrap(),
+            Some(b"three".to_vec())
+        );
         assert_eq!(read_line_capped(&mut input, 100).unwrap(), None);
     }
 
@@ -778,7 +898,10 @@ mod tests {
         fn initialize(&mut self) -> InitializeResult {
             InitializeResult {
                 protocolVersion: 1,
-                engine: EngineInfo { name: "fake".into(), version: "0.0.0".into() },
+                engine: EngineInfo {
+                    name: "fake".into(),
+                    version: "0.0.0".into(),
+                },
                 capabilities: None,
                 config: None,
             }
@@ -794,7 +917,12 @@ mod tests {
             })
         }
         fn ping(&mut self) -> PingResult {
-            PingResult { uptimeMs: 0, checksProcessed: 0, inFlight: 0, lastErrorAt: None }
+            PingResult {
+                uptimeMs: 0,
+                checksProcessed: 0,
+                inFlight: 0,
+                lastErrorAt: None,
+            }
         }
         fn notification(&mut self, _method: &str, _params: Option<&Value>) {}
     }
@@ -810,7 +938,11 @@ mod tests {
     #[test]
     fn initialize_result_matches_wire_shape() {
         let mut h = FakeHandler { seen: None };
-        let reply = dispatch(&mut h, "initialize", Some(json!({ "protocolVersion": 1, "client": { "name": "hook", "version": "0.1.0" } })));
+        let reply = dispatch(
+            &mut h,
+            "initialize",
+            Some(json!({ "protocolVersion": 1, "client": { "name": "hook", "version": "0.1.0" } })),
+        );
         match reply.body {
             ReplyBody::Result(v) => assert_eq!(
                 v,
@@ -823,7 +955,13 @@ mod tests {
     #[test]
     fn initialize_rejects_foreign_protocol_version() {
         let mut h = FakeHandler { seen: None };
-        let reply = dispatch(&mut h, "initialize", Some(json!({ "protocolVersion": 99, "client": { "name": "hook", "version": "0.1.0" } })));
+        let reply = dispatch(
+            &mut h,
+            "initialize",
+            Some(
+                json!({ "protocolVersion": 99, "client": { "name": "hook", "version": "0.1.0" } }),
+            ),
+        );
         match reply.body {
             ReplyBody::Error(e) => assert_eq!(e.code, CODE_INVALID_PARAMS),
             _ => panic!("expected error"),
@@ -890,10 +1028,14 @@ mod tests {
         let reply = dispatch(
             &mut h,
             "policy/check",
-            Some(json!({ "invocation": { "id": "x", "sessionID": "s", "hook": "permission.evaluate" }, "action": "shell", "commands": [ { "index": 0, "raw": "ls" } ] })),
+            Some(
+                json!({ "invocation": { "id": "x", "sessionID": "s", "hook": "permission.evaluate" }, "action": "shell", "commands": [ { "index": 0, "raw": "ls" } ] }),
+            ),
         );
         match reply.body {
-            ReplyBody::Error(e) => assert!(e.message.contains("missing field `cwd`"), "{}", e.message),
+            ReplyBody::Error(e) => {
+                assert!(e.message.contains("missing field `cwd`"), "{}", e.message)
+            }
             _ => panic!("expected error"),
         }
     }

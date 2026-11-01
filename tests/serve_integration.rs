@@ -29,7 +29,10 @@ fn write_config(body: &str) -> TempDirGuard {
     let dir = std::env::temp_dir().join(format!(
         "shell-warden-test-{}-{}",
         std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     std::fs::create_dir_all(&dir).expect("create temp dir");
     std::fs::write(dir.join("config.jsonc"), body).expect("write config");
@@ -39,7 +42,7 @@ fn write_config(body: &str) -> TempDirGuard {
 impl Engine {
     fn spawn(config: TempDirGuard) -> Engine {
         let config_path = config.dir.join("config.jsonc");
-        let mut child = Command::new(env!("CARGO_BIN_EXE_shell-warden"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_shell-warden-m0-retired"))
             .arg("serve")
             .arg("--config")
             .arg(&config_path)
@@ -50,7 +53,12 @@ impl Engine {
             .expect("spawn engine");
         let stdin = child.stdin.take().unwrap();
         let reader = BufReader::new(child.stdout.take().unwrap());
-        Engine { child, stdin: Some(stdin), reader, _config: config }
+        Engine {
+            child,
+            stdin: Some(stdin),
+            reader,
+            _config: config,
+        }
     }
 
     fn send(&mut self, line: &str) {
@@ -77,7 +85,8 @@ impl Engine {
                 }
                 panic!("engine stdout closed early; stderr:\n{stderr}");
             }
-            let v: Value = serde_json::from_str(&line).unwrap_or_else(|e| panic!("non-JSON line `{line}`: {e}"));
+            let v: Value = serde_json::from_str(&line)
+                .unwrap_or_else(|e| panic!("non-JSON line `{line}`: {e}"));
             if v.get("id").is_none() {
                 assert_eq!(v["jsonrpc"], "2.0", "notification framing");
                 assert!(v.get("method").is_some(), "notification carries a method");
@@ -136,14 +145,22 @@ fn handshake_and_check_follow_the_wire_contract() {
     assert_eq!(reply["result"]["engine"]["name"], "shell-warden");
     assert!(reply["result"]["capabilities"].is_object());
     assert_eq!(reply["result"]["config"]["stages"], json!(["s1"]));
-    assert!(reply["result"]["config"]["source"].as_str().unwrap().ends_with("config.jsonc"));
-    assert!(reply["result"]["config"]["loadedAt"].as_str().unwrap().ends_with('Z'));
+    assert!(reply["result"]["config"]["source"]
+        .as_str()
+        .unwrap()
+        .ends_with("config.jsonc"));
+    assert!(reply["result"]["config"]["loadedAt"]
+        .as_str()
+        .unwrap()
+        .ends_with('Z'));
 
     // policy/check (02 §2.4): walk verdict, same id. The audit/event
     // notification (02 §2.5) precedes it (02 §2.10) — read it first.
     eng.send_value(&json!({ "jsonrpc": "2.0", "id": 7, "method": "policy/check", "params": check_params("git push origin main") }));
     let mut audit_line = String::new();
-    eng.reader.read_line(&mut audit_line).expect("read audit line");
+    eng.reader
+        .read_line(&mut audit_line)
+        .expect("read audit line");
     let audit: Value = serde_json::from_str(&audit_line).expect("audit is JSON");
     assert_eq!(audit["method"], "audit/event");
     assert!(audit.get("id").is_none(), "notifications carry no id");
@@ -166,7 +183,11 @@ fn invalid_config_is_fatal_but_never_fail_open() {
     let mut eng = Engine::spawn(write_config(INVALID_CONFIG));
 
     // Handshake still succeeds (05 §5.3: "start anyway").
-    let reply = eng.request(1, "initialize", json!({ "protocolVersion": 1, "client": { "name": "hook", "version": "0.1.0" } }));
+    let reply = eng.request(
+        1,
+        "initialize",
+        json!({ "protocolVersion": 1, "client": { "name": "hook", "version": "0.1.0" } }),
+    );
     assert_eq!(reply["result"]["protocolVersion"], 1);
     assert_eq!(reply["result"]["config"]["stages"], json!([]));
 
@@ -188,12 +209,17 @@ fn notifications_are_not_answered_and_unknown_methods_are_32601() {
 
     // Notification (no id): MUST NOT be answered (02 §2.2). The next line we
     // read must therefore be the response to the *following* request.
-    eng.send_value(&json!({ "jsonrpc": "2.0", "method": "session/ended", "params": { "sessionID": "ses_1" } }));
+    eng.send_value(
+        &json!({ "jsonrpc": "2.0", "method": "session/ended", "params": { "sessionID": "ses_1" } }),
+    );
     eng.send_value(&json!({ "jsonrpc": "2.0", "method": "totally/unknown", "params": {} }));
     let reply = eng.request(2, "ping", json!({}));
     assert_eq!(reply["id"], 2);
     assert!(reply["result"]["uptimeMs"].is_number());
-    assert!(reply.get("error").is_none(), "unknown notifications are tolerated, replies stay ordered");
+    assert!(
+        reply.get("error").is_none(),
+        "unknown notifications are tolerated, replies stay ordered"
+    );
 }
 
 #[test]
@@ -217,10 +243,12 @@ fn malformed_lines_map_to_error_codes() {
     assert_eq!(reply["error"]["code"], -32601);
 
     // Schema violation in params → -32602 (missing required cwd).
-    eng.send_value(&json!({ "jsonrpc": "2.0", "id": 4, "method": "policy/check", "params": {
+    eng.send_value(
+        &json!({ "jsonrpc": "2.0", "id": 4, "method": "policy/check", "params": {
         "invocation": { "id": "m:c", "sessionID": "s", "hook": "permission.evaluate" },
         "action": "shell",
-        "commands": [ { "index": 0, "raw": "ls" } ] } }));
+        "commands": [ { "index": 0, "raw": "ls" } ] } }),
+    );
     let reply = eng.read();
     assert_eq!(reply["id"], 4);
     assert_eq!(reply["error"]["code"], -32602);
@@ -247,7 +275,11 @@ fn stage_config() -> String {
         .and_then(|p| p.parent())
         .map(|d| d.join("warden-test-tool"))
         .expect("target dir");
-    assert!(helper.is_file(), "warden-test-tool not built at {}", helper.display());
+    assert!(
+        helper.is_file(),
+        "warden-test-tool not built at {}",
+        helper.display()
+    );
     let helper = helper.display().to_string();
     format!(
         r#"{{
@@ -264,7 +296,11 @@ fn stage_config() -> String {
 fn stage_walk_end_to_end_with_real_tools() {
     let mut eng = Engine::spawn(write_config(&stage_config()));
 
-    let reply = eng.request(1, "initialize", json!({ "protocolVersion": 1, "client": { "name": "hook", "version": "0.1.0" } }));
+    let reply = eng.request(
+        1,
+        "initialize",
+        json!({ "protocolVersion": 1, "client": { "name": "hook", "version": "0.1.0" } }),
+    );
     assert_eq!(reply["result"]["config"]["stages"], json!(["s1", "s2"]));
 
     // s1 (real tool) allows; s2 (spawn failure, onError: deny) denies ⇒ the
@@ -282,7 +318,10 @@ fn stage_walk_end_to_end_with_real_tools() {
     assert_eq!(reply["result"]["verdict"], "deny");
     assert_eq!(reply["result"]["commands"][0]["verdict"], "deny");
     assert_eq!(reply["result"]["commands"][0]["stage"], "s2");
-    assert!(reply["result"]["commands"][0]["reason"].as_str().unwrap().contains("spawn failure"));
+    assert!(reply["result"]["commands"][0]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("spawn failure"));
 }
 
 #[test]
@@ -302,7 +341,7 @@ fn check_mode_prints_the_result_json() {
     )
     .unwrap();
 
-    let out = Command::new(env!("CARGO_BIN_EXE_shell-warden"))
+    let out = Command::new(env!("CARGO_BIN_EXE_shell-warden-m0-retired"))
         .arg("check")
         .arg("--config")
         .arg(dir.join("config.jsonc"))
@@ -310,7 +349,11 @@ fn check_mode_prints_the_result_json() {
         .arg(dir.join("req.json"))
         .output()
         .expect("run check mode");
-    assert!(out.status.success(), "check mode: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "check mode: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let result: Value = serde_json::from_slice(&out.stdout).expect("result JSON on stdout");
     assert_eq!(result["invocationId"], "m:c");
     assert_eq!(result["verdict"], "deny");
@@ -318,7 +361,7 @@ fn check_mode_prints_the_result_json() {
 
     // Broken request → exit 1; broken config → exit 2; stdout stays wire-only.
     std::fs::write(dir.join("bad.json"), "{}").unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_shell-warden"))
+    let out = Command::new(env!("CARGO_BIN_EXE_shell-warden-m0-retired"))
         .arg("check")
         .arg("--config")
         .arg(dir.join("config.jsonc"))
