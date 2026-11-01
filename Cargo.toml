@@ -12,3 +12,8 @@ serde_json = "1"
 [[bin]]
 name = "shell-warden"
 path = "src/main.rs"
+
+# Test-only stage tool for the runtime contract tests (never ships).
+[[bin]]
+name = "warden-test-tool"
+path = "src/bin/warden-test-tool.rs"
