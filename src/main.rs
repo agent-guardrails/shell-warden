@@ -8,6 +8,12 @@
 
 mod clock;
 mod config;
+// Wired into the handler in HANDOFF-m0 step 4 (walk); compiled now so the
+// invoker is exercised by its own unit suite.
+#[allow(dead_code)]
+mod sha256;
+#[allow(dead_code)]
+mod stagetools;
 mod wire;
 
 use config::Config;
