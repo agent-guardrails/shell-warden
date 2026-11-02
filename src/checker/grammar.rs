@@ -148,8 +148,10 @@ pub struct Rule {
     // ── conditions (all AND together; zero conditions = match everything) ──
     #[serde(skip_serializing_if = "Option::is_none")]
     pub argv: Option<ArgvSequence>,
+    /// Positional-argument value predicates (globs, `∃token × ∃glob` — the
+    /// positional mirror of `flagValue`, 06 §6.5).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub argv_at: Option<Vec<ArgvAt>>,
+    pub arg_value: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pattern: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -158,18 +160,6 @@ pub struct Rule {
     pub flag: Option<std::collections::BTreeMap<String, FlagPresence>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub flag_value: Option<std::collections::BTreeMap<String, String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub paths: Option<PathsCondition>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-#[serde(rename_all = "camelCase")]
-pub struct ArgvAt {
-    /// 0-based argv token position.
-    pub at: usize,
-    /// The token that must match at that position.
-    pub one: ArgvToken,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -186,15 +176,4 @@ pub enum FlagPresence {
     Present,
     #[serde(rename = "absent")]
     Absent,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-#[serde(rename_all = "camelCase")]
-pub struct PathsCondition {
-    /// Every recorded path resolves inside at least one glob (`$project` allowed).
-    pub within: Vec<String>,
-    /// Every recorded path resolves inside none of the globs.
-    #[serde(default)]
-    pub not_within: Vec<String>,
 }

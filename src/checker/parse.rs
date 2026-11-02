@@ -518,14 +518,6 @@ fn read_target(
     )
 }
 
-pub fn is_pathlike(s: &str) -> bool {
-    s.starts_with('/')
-        || s.starts_with("./")
-        || s.starts_with("../")
-        || s.starts_with("~/")
-        || (s.contains('/') && !s.starts_with('-') && !s.contains("://"))
-}
-
 // ── Segment summary (consumed by split.rs) ───────────────────────────────────
 
 pub struct SegTokens {
@@ -535,10 +527,6 @@ pub struct SegTokens {
     pub targets: Vec<(String, bool)>,
     /// True iff every token in the segment is resolvable.
     pub resolvable_all: bool,
-    /// Pathlike resolvable words (07 §7.4 step 7).
-    pub pathlike_words: Vec<String>,
-    /// Pathlike resolvable redirect targets (fd-number and `&N` excluded).
-    pub pathlike_targets: Vec<String>,
 }
 
 pub fn summarize(seg: &Segment) -> SegTokens {
@@ -556,27 +544,9 @@ pub fn summarize(seg: &Segment) -> SegTokens {
             }
         }
     }
-    let pathlike_words = words
-        .iter()
-        .filter(|(t, r)| *r && is_pathlike(t) && !t.starts_with('-'))
-        .map(|(t, _)| t.clone())
-        .collect();
-    let pathlike_targets = targets
-        .iter()
-        .filter(|(t, r)| *r && !is_fd_target(t) && is_pathlike(t))
-        .map(|(t, _)| t.clone())
-        .collect();
     SegTokens {
         words,
         targets,
         resolvable_all,
-        pathlike_words,
-        pathlike_targets,
     }
-}
-
-/// `>&1`, `&2`, `2>1`-style targets: fd numbers are not paths.
-pub fn is_fd_target(s: &str) -> bool {
-    let body = s.trim_start_matches('&');
-    !body.is_empty() && body.chars().all(|c| c.is_ascii_digit())
 }

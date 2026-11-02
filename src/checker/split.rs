@@ -16,8 +16,6 @@ pub struct Part {
     pub argv: Vec<String>,
     /// Env-prefix assignments (`FOO=1 cmd`), recorded, excluded from argv.
     pub assigns: Vec<String>,
-    /// Path evidence (§7.4 step 7): pathlike argv words + redirect targets.
-    pub paths: Vec<String>,
     /// Unresolvable token textual forms (diagnostics).
     pub unknown_texts: Vec<String>,
     /// None ⇒ static; Some(reason) ⇒ opaque (07 §7.3).
@@ -37,7 +35,6 @@ pub fn split(raw: &str, depth: usize) -> Vec<Part> {
             raw: raw.to_string(),
             argv: vec![],
             assigns: vec![],
-            paths: vec![],
             unknown_texts: vec![],
             opaque_reason: Some("empty command"),
         }];
@@ -47,7 +44,6 @@ pub fn split(raw: &str, depth: usize) -> Vec<Part> {
             raw: raw.to_string(),
             argv: vec![],
             assigns: vec![],
-            paths: vec![],
             unknown_texts: vec![],
             opaque_reason: Some("split depth exceeded (Q8)"),
         }];
@@ -76,7 +72,6 @@ fn whole_opaque(seg: &Segment) -> Part {
         raw: seg.raw.clone(),
         argv: vec![],
         assigns: vec![],
-        paths: vec![],
         unknown_texts: vec![seg.raw.clone()],
         opaque_reason: Some("salvage failed (heredoc)"),
     }
@@ -127,12 +122,6 @@ fn assemble(seg: &Segment, depth: usize) -> Vec<Part> {
         raw: seg.raw.clone(),
         argv,
         assigns,
-        paths: st
-            .pathlike_words
-            .clone()
-            .into_iter()
-            .chain(st.pathlike_targets.iter().cloned())
-            .collect(),
         unknown_texts: unknown,
         opaque_reason: if st.resolvable_all {
             None

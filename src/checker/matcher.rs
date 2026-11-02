@@ -1,6 +1,6 @@
 // Matching primitives (07 §7.5, 06 §6.4) and stage-aware flag extraction.
 
-use super::grammar::{ArgvAt, ArgvSequence, ArgvToken, IndexMapLike};
+use super::grammar::{ArgvSequence, ArgvToken, IndexMapLike};
 
 #[derive(Debug, Clone, Default)]
 pub struct Flags {
@@ -91,16 +91,14 @@ fn split_flag_token(tok: &str) -> Option<(String, Option<String>)> {
     if !tok.starts_with('-') || tok == "-" || tok == "--" {
         return None;
     }
+    // inline form `--long=value` / `-f=x`: base up to '='
     if let Some(eq) = tok.find('=') {
         if eq > 1 {
             return Some((tok[..eq].to_string(), Some(tok[eq + 1..].to_string())));
         }
     }
-    if tok.starts_with("--") || tok.len() == 2 {
-        return Some((tok.to_string(), None));
-    }
-    // combined shorts (`-abc`): unsupported grouping — unknown flag base,
-    // blocks allow (07 §7.5; declared arities cannot express it)
+    // short forms `-a` and combined clusters `-rf` (the table resolves them),
+    // long forms `--any-thing`
     Some((tok.to_string(), None))
 }
 
@@ -113,15 +111,6 @@ pub fn matches_argv(seq: &[ArgvToken], argv: &[String]) -> bool {
         return false;
     }
     seq.iter().zip(argv.iter()).all(|(t, s)| t.matches(s))
-}
-
-/// Fixed-position token matches (06 §6.5 `argvAt`).
-pub fn matches_argv_at(list: &[ArgvAt], argv: &[String]) -> bool {
-    list.iter().all(|entry| {
-        argv.get(entry.at)
-            .map(|t| entry.one.matches(t))
-            .unwrap_or(false)
-    })
 }
 
 /// Raw-string glob, OpenCode-compatible (07 §7.5): `*` = zero+ chars incl.
@@ -220,12 +209,6 @@ pub struct MatchCtx<'a> {
     pub static_part: bool,
     /// Stage-flag facts.
     pub flags: &'a Flags,
-    /// Part's path evidence (lexically resolved, relative → cwd).
-    pub paths_evidence: &'a [String],
-    /// Letter `invocation.projectDir` ($project in globs).
-    pub project_dir: Option<&'a str>,
-    /// Letter command `cwd` for relative path resolution.
-    pub cwd: &'a str,
 }
 
 pub fn rule_matches(rule: &super::grammar::Rule, ctx: &MatchCtx) -> bool {
@@ -236,8 +219,13 @@ pub fn rule_matches(rule: &super::grammar::Rule, ctx: &MatchCtx) -> bool {
             return false;
         }
     }
-    if let Some(entries) = &rule.argv_at {
-        if !matches_argv_at(entries, ctx.cleaned_argv) {
+    if let Some(globs) = &rule.arg_value {
+        // `argValue` (06 §6.5): ∃ positional token × ∃ glob — the positional
+        // mirror of `flagValue`
+        let holds = globs
+            .iter()
+            .any(|g| ctx.cleaned_argv.iter().any(|t| glob(t, g)));
+        if !holds {
             return false;
         }
     }
@@ -279,99 +267,7 @@ pub fn rule_matches(rule: &super::grammar::Rule, ctx: &MatchCtx) -> bool {
             return false;
         }
     }
-    if let Some(paths) = &rule.paths {
-        if !paths_hold(ctx, paths) {
-            return false;
-        }
-    }
     true
-}
-
-fn paths_hold(ctx: &MatchCtx, paths: &super::grammar::PathsCondition) -> bool {
-    if ctx.paths_evidence.is_empty() {
-        return false; // both directions require positive evidence (fail-closed)
-    }
-    let within_matches = !paths.within.is_empty();
-    for p in ctx.paths_evidence {
-        let resolved = resolve_path(p, ctx.cwd);
-        if within_matches
-            && !paths
-                .within
-                .iter()
-                .any(|g| path_glob_matches(g, &resolved, ctx.project_dir))
-        {
-            return false;
-        }
-        if !paths.not_within.is_empty()
-            && paths
-                .not_within
-                .iter()
-                .any(|g| path_glob_matches(g, &resolved, ctx.project_dir))
-        {
-            return false;
-        }
-    }
-    true
-}
-
-/// Lexical resolution (07 §7.4): relative paths resolve against the letter's
-/// per-command `cwd`; `~`-prefixed paths are unresolvable for the checker (no
-/// environment — I1) and never match.
-fn resolve_path(path: &str, cwd: &str) -> Option<String> {
-    if path.starts_with('~') {
-        return None;
-    }
-    let joined = if path.starts_with('/') {
-        path.to_string()
-    } else {
-        format!("{cwd}/{path}")
-    };
-    Some(lexical_normalize(&joined))
-}
-
-pub fn lexical_normalize(path: &str) -> String {
-    let mut out: Vec<&str> = Vec::new();
-    for seg in path.split('/') {
-        match seg {
-            "" | "." => {}
-            ".." => {
-                out.pop();
-            }
-            s => out.push(s),
-        }
-    }
-    let mut joined = out.join("/");
-    if path.starts_with('/') {
-        joined.insert(0, '/');
-    }
-    if !joined.starts_with('/') && path.starts_with('/') {
-        joined.insert(0, '/');
-    }
-    joined
-}
-
-/// Path glob with `$project` expansion to the letter's projectDir.
-fn path_glob_matches(
-    glob_pattern: &str,
-    resolved: &Option<String>,
-    project_dir: Option<&str>,
-) -> bool {
-    let Some(resolved) = resolved else {
-        return false;
-    };
-    let Some(expanded) = expand_project(glob_pattern, project_dir) else {
-        return false;
-    };
-    glob(resolved, &expanded)
-}
-
-fn expand_project(text: &str, project_dir: Option<&str>) -> Option<String> {
-    if text.contains("$project") {
-        let dir = project_dir?;
-        Some(text.replace("$project", dir))
-    } else {
-        Some(text.to_string())
-    }
 }
 
 #[cfg(test)]
@@ -458,15 +354,5 @@ mod tests {
         assert!(!matches_argv(&seq.0, &argv(&["git", "commit"])));
         assert!(!matches_argv(&seq.0, &argv(&["git"])));
         assert!(matches_argv(&seq.0, &argv(&["git", "push"])));
-    }
-
-    #[test]
-    fn argv_at_positions() {
-        let entries = vec![ArgvAt {
-            at: 2,
-            one: ArgvToken::Word("push".into()),
-        }];
-        assert!(matches_argv_at(&entries, &argv(&["git", "-C", "push"])));
-        assert!(!matches_argv_at(&entries, &argv(&["push", "x"])));
     }
 }

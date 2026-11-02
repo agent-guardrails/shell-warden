@@ -15,7 +15,7 @@ pub fn evaluate(config: &Config, letter: &Letter) -> Verdict {
     let mut commands = Vec::new();
     let mut outcome_messages: Vec<(VerdictKind, Option<String>)> = Vec::new();
     for cmd in &letter.commands {
-        let (v, msg) = command_verdict(config, cmd, letter);
+        let (v, msg) = command_verdict(config, cmd);
         outcome_messages.push((v.verdict, msg));
         commands.push(v);
     }
@@ -58,13 +58,9 @@ struct CommandOutcome {
     facts: Option<serde_json::Value>,
 }
 
-fn command_verdict(
-    config: &Config,
-    cmd: &Command,
-    letter: &Letter,
-) -> (CommandVerdict, Option<String>) {
+fn command_verdict(config: &Config, cmd: &Command) -> (CommandVerdict, Option<String>) {
     let parts = super::split::split(&cmd.raw, 0);
-    let outcome = reduce_parts(config, &parts, cmd, letter);
+    let outcome = reduce_parts(config, &parts);
     let class = if outcome.static_command {
         Classification::Static
     } else {
@@ -83,11 +79,11 @@ fn command_verdict(
     )
 }
 
-fn reduce_parts(config: &Config, parts: &[Part], cmd: &Command, letter: &Letter) -> CommandOutcome {
+fn reduce_parts(config: &Config, parts: &[Part]) -> CommandOutcome {
     let mut static_all = true;
     let mut best: Option<PartDecision> = None;
     for part in parts {
-        let d = part_decision(config, part, cmd, letter);
+        let d = part_decision(config, part);
         static_all &= d.static_part;
         // strictly more restrictive replaces the incumbent (ties: scan order)
         if best
@@ -131,7 +127,7 @@ fn cmd_is_empty(parts: &[Part]) -> bool {
 }
 
 /// Per-part pipeline (08 §8.1–8.4).
-fn part_decision(config: &Config, part: &Part, cmd: &Command, letter: &Letter) -> PartDecision {
+fn part_decision(config: &Config, part: &Part) -> PartDecision {
     let static_part = part.classification_static();
     let mut votes: Vec<(usize, &Rule)> = Vec::new(); // (stage index, rule)
 
@@ -149,9 +145,6 @@ fn part_decision(config: &Config, part: &Part, cmd: &Command, letter: &Letter) -
             fully_parsed: flags.fully_parsed,
             static_part,
             flags: &flags,
-            paths_evidence: &part.paths,
-            project_dir: letter.invocation.project_dir.as_deref(),
-            cwd: &cmd.cwd,
         };
         for rule in &stage.rules {
             if rule.action == VerdictKind::Allow && !static_part {
@@ -243,9 +236,6 @@ fn part_facts(part: &Part, argv_match: bool) -> serde_json::Value {
     }
     if !part.assigns.is_empty() {
         facts["envPrefix"] = serde_json::json!(part.assigns);
-    }
-    if !part.paths.is_empty() {
-        facts["paths"] = serde_json::json!(part.paths);
     }
     facts
 }

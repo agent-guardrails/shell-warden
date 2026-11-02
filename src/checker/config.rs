@@ -234,35 +234,14 @@ fn validate_rule(rule: &Rule, stage: &Stage) -> Result<(), String> {
             return Err(format!("rule \"{}\": argv condition is empty", rule.id));
         }
     }
-    if let Some(list) = &rule.argv_at {
-        if list.is_empty() {
-            return Err(format!("rule \"{}\": argvAt condition is empty", rule.id));
+    // `argValue` globs must be non-empty
+    if let Some(globs) = &rule.arg_value {
+        if globs.is_empty() {
+            return Err(format!("rule \"{}\": argValue list is empty", rule.id));
         }
-    }
-    if let Some(pattern) = &rule.pattern {
-        if pattern.is_empty() {
-            return Err(format!("rule \"{}\": pattern condition is empty", rule.id));
-        }
-    }
-    if let Some(list) = &rule.argv_at {
-        for entry in list {
-            if let ArgvToken::AnyOf { any_of } = &entry.one {
-                if any_of.is_empty() {
-                    return Err(format!(
-                        "rule \"{}\": argvAt[{}] anyOf is empty",
-                        rule.id, entry.at
-                    ));
-                }
-            }
-        }
-    }
-    if let Some(within) = rule.paths.as_ref().map(|p| (&p.within, &p.not_within)) {
-        if within.0.is_empty() {
-            return Err(format!("rule \"{}\": paths.within is empty", rule.id));
-        }
-        for g in within.0.iter().chain(within.1.iter()) {
+        for g in globs {
             if g.is_empty() {
-                return Err(format!("rule \"{}\": paths glob is empty", rule.id));
+                return Err(format!("rule \"{}\": argValue glob is empty", rule.id));
             }
         }
     }
@@ -317,19 +296,25 @@ fn validate_id(id: &str, what: &str) -> Result<(), String> {
 }
 
 fn is_valid_flag_name(flag: &str) -> bool {
-    if flag.len() < 2 || !flag.starts_with('-') {
+    // short cluster `-rf` and long `--force` / `--long=x` shells; keys of the
+    // stage table are base names only (inline values are not config keys)
+    if flag == "-" || flag == "--" {
         return false;
     }
-    if flag.starts_with("--") {
-        return flag
+    let body = if let Some(rest) = flag.strip_prefix("--") {
+        rest
+    } else if let Some(rest) = flag.strip_prefix('-') {
+        rest
+    } else {
+        return false;
+    };
+    !body.is_empty()
+        && body
             .chars()
-            .nth(2)
-            .is_some_and(|c| c.is_ascii_alphanumeric());
-    }
-    flag.len() == 2
-        && flag
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        && body
             .chars()
-            .nth(1)
+            .next()
             .is_some_and(|c| c.is_ascii_alphanumeric())
 }
 

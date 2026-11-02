@@ -81,15 +81,6 @@ fn predicates_superset(refiner: &Rule, refined: &Rule) -> bool {
                 .unwrap_or(false)
         })
     });
-    let argv_at_ok = refined.argv_at.as_ref().is_none_or(|b| {
-        b.iter().all(|entry| {
-            refiner
-                .argv_at
-                .as_ref()
-                .map(|a| a.contains(entry))
-                .unwrap_or(false)
-        })
-    });
     let classification_ok = refined
         .classification
         .is_none_or(|c| refiner.classification == Some(c));
@@ -97,14 +88,16 @@ fn predicates_superset(refiner: &Rule, refined: &Rule) -> bool {
         .pattern
         .as_ref()
         .is_none_or(|p| refiner.pattern.as_ref() == Some(p));
-    let paths_ok = refined.paths.as_ref().is_none_or(|p| {
-        refiner
-            .paths
-            .as_ref()
-            .map(|rp| rp.within == p.within && rp.not_within == p.not_within)
-            .unwrap_or(false)
+    let arg_values_ok = refined.arg_value.as_ref().is_none_or(|b| {
+        b.iter().all(|g| {
+            refiner
+                .arg_value
+                .as_ref()
+                .map(|a| a.contains(g))
+                .unwrap_or(false)
+        })
     });
-    flags_ok && flag_values_ok && argv_at_ok && classification_ok && pattern_ok && paths_ok
+    flags_ok && flag_values_ok && arg_values_ok && classification_ok && pattern_ok
 }
 
 fn predicate_count(rule: &Rule) -> usize {
@@ -120,14 +113,10 @@ fn predicate_count(rule: &Rule) -> usize {
         .flag_value
         .as_ref()
         .map_or(0, std::collections::BTreeMap::len);
-    n += rule.argv_at.as_ref().map_or(0, Vec::len);
     if rule.pattern.is_some() {
         n += 1;
     }
     if rule.classification.is_some() {
-        n += 1;
-    }
-    if rule.paths.is_some() {
         n += 1;
     }
     n
@@ -151,13 +140,12 @@ mod tests {
             id: id.to_string(),
             action: VerdictKind::Allow,
             message: None,
+            arg_value: None,
             argv: Some(ArgvSequence(argv)),
-            argv_at: None,
             pattern: None,
             classification: None,
             flag: None,
             flag_value: None,
-            paths: None,
         }
     }
 
