@@ -1,0 +1,21 @@
+{
+  "letter": {
+    "version": 1,
+    "invocation": {
+      "id": "m:c",
+      "sessionID": "s1",
+      "projectDir": "/repo"
+    },
+    "action": "shell",
+    "commands": [
+      {
+        "index": 0,
+        "raw": "docker run -v /home:/work alpine",
+        "cwd": "/repo"
+      }
+    ]
+  },
+  "expect": {
+    "verdict": "ask"
+  }
+}

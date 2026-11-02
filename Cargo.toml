@@ -2,18 +2,24 @@
 name = "shell-warden"
 version = "0.1.0"
 edition = "2021"
-description = "Orchestrator engine of the shell-warden permission system: stage walk + tool invocations; decisions live in stage tools"
+description = "One-shot decision binary of the shell-warden permission system: parse → classify → match → verdict (ADR-0016); retired M0 engine kept as reference"
 license = "MIT"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# The one-shot decision binary (letter on stdin → verdict on stdout).
 [[bin]]
 name = "shell-warden"
+path = "src/bin/shell-warden.rs"
+
+# Retired M0 orchestrator engine (ADR-0002/0005/0008) — reference only, not a release artifact.
+[[bin]]
+name = "shell-warden-m0-retired"
 path = "src/main.rs"
 
-# Test-only stage tool for the runtime contract tests (never ships).
+# Test-only stage tool for the runtime contract tests of the retired engine (never ships).
 [[bin]]
 name = "warden-test-tool"
 path = "src/bin/warden-test-tool.rs"

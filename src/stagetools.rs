@@ -59,7 +59,11 @@ const MAX_VIOLATIONS: u32 = 3; // 02 §2.7 default
 
 // ── Stdin letter (06 §6.4.2 — composition fixed by the protocol) ────────────────
 
-pub fn build_letter(tool: &ToolSpec, cmd: &CheckCommand, invocation: &Invocation) -> serde_json::Value {
+pub fn build_letter(
+    tool: &ToolSpec,
+    cmd: &CheckCommand,
+    invocation: &Invocation,
+) -> serde_json::Value {
     let mut letter = serde_json::json!({
         "protocolVersion": 1,
         "command": { "raw": cmd.raw, "cwd": cmd.cwd },
@@ -67,7 +71,10 @@ pub fn build_letter(tool: &ToolSpec, cmd: &CheckCommand, invocation: &Invocation
     if tool.input_session_id || tool.input_session_agent {
         let mut session = serde_json::Map::new();
         if tool.input_session_id {
-            session.insert("id".into(), serde_json::Value::String(invocation.session_id.clone()));
+            session.insert(
+                "id".into(),
+                serde_json::Value::String(invocation.session_id.clone()),
+            );
         }
         if tool.input_session_agent {
             if let Some(agent) = &invocation.agent {
@@ -88,26 +95,43 @@ pub fn build_letter(tool: &ToolSpec, cmd: &CheckCommand, invocation: &Invocation
 fn classify_response(line: &str) -> StageOutcome {
     let parsed: serde_json::Value = match serde_json::from_str(line) {
         Ok(v) => v,
-        Err(_) => return StageOutcome::OnError { reason: "unreadable output: not JSON".into(), violation: true },
+        Err(_) => {
+            return StageOutcome::OnError {
+                reason: "unreadable output: not JSON".into(),
+                violation: true,
+            }
+        }
     };
     let Some(obj) = parsed.as_object() else {
-        return StageOutcome::OnError { reason: "unreadable output: not a JSON object".into(), violation: true };
+        return StageOutcome::OnError {
+            reason: "unreadable output: not a JSON object".into(),
+            violation: true,
+        };
     };
     // A foreign protocolVersion in a response is a contract breach (06 §6.4.4).
     if let Some(pv) = obj.get("protocolVersion") {
         if pv.as_u64() != Some(1) {
-            return StageOutcome::OnError { reason: "foreign protocolVersion in tool response".into(), violation: true };
+            return StageOutcome::OnError {
+                reason: "foreign protocolVersion in tool response".into(),
+                violation: true,
+            };
         }
     }
     let Some(verdict) = obj.get("verdict").and_then(|v| v.as_str()) else {
-        return StageOutcome::OnError { reason: "unreadable output: missing verdict".into(), violation: true };
+        return StageOutcome::OnError {
+            reason: "unreadable output: missing verdict".into(),
+            violation: true,
+        };
     };
     let verdict = match verdict {
         "allow" => Verdict::Allow,
         "ask" => Verdict::Ask,
         "deny" => Verdict::Deny,
         other => {
-            return StageOutcome::OnError { reason: format!("unreadable output: unknown verdict `{other}`"), violation: true }
+            return StageOutcome::OnError {
+                reason: format!("unreadable output: unknown verdict `{other}`"),
+                violation: true,
+            }
         }
     };
     // Caps and types (I6): over-long or wrong-typed members are garbage, not
@@ -117,17 +141,34 @@ fn classify_response(line: &str) -> StageOutcome {
         serde_json::Value::Null => false,
         _ => true,
     };
-    if obj.get("message").map(|m| bad_string(m, MESSAGE_MAX)).unwrap_or(false) {
-        return StageOutcome::OnError { reason: format!("tool message must be a string ≤ {MESSAGE_MAX} chars"), violation: true };
+    if obj
+        .get("message")
+        .map(|m| bad_string(m, MESSAGE_MAX))
+        .unwrap_or(false)
+    {
+        return StageOutcome::OnError {
+            reason: format!("tool message must be a string ≤ {MESSAGE_MAX} chars"),
+            violation: true,
+        };
     }
     for key in ["ruleId", "reason"] {
-        if obj.get(key).map(|m| bad_string(m, DIAG_MAX)).unwrap_or(false) {
-            return StageOutcome::OnError { reason: format!("tool {key} must be a string ≤ {DIAG_MAX} chars"), violation: true };
+        if obj
+            .get(key)
+            .map(|m| bad_string(m, DIAG_MAX))
+            .unwrap_or(false)
+        {
+            return StageOutcome::OnError {
+                reason: format!("tool {key} must be a string ≤ {DIAG_MAX} chars"),
+                violation: true,
+            };
         }
     }
     if let Some(ttl) = obj.get("cacheTtlMs") {
         if ttl.as_u64().is_none() {
-            return StageOutcome::OnError { reason: "unreadable output: cacheTtlMs must be a non-negative integer".into(), violation: true };
+            return StageOutcome::OnError {
+                reason: "unreadable output: cacheTtlMs must be a non-negative integer".into(),
+                violation: true,
+            };
         }
     }
     let classification = match obj.get("classification") {
@@ -135,10 +176,20 @@ fn classify_response(line: &str) -> StageOutcome {
         Some(c) => match c.as_str() {
             Some("static") => Some(Classification::Static),
             Some("opaque") => Some(Classification::Opaque),
-            _ => return StageOutcome::OnError { reason: "unreadable output: classification must be static|opaque".into(), violation: true },
+            _ => {
+                return StageOutcome::OnError {
+                    reason: "unreadable output: classification must be static|opaque".into(),
+                    violation: true,
+                }
+            }
         },
     };
-    let opt_str = |key: &str| obj.get(key).and_then(|v| v.as_str()).map(|s| s.to_string()).filter(|s| !s.is_empty());
+    let opt_str = |key: &str| {
+        obj.get(key)
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty())
+    };
     StageOutcome::Decided(ToolVerdict {
         verdict,
         message: opt_str("message"),
@@ -185,9 +236,12 @@ impl Ladder {
         self.violations = 0;
         self.violations_window_start = None;
         self.restarts.push(now);
-        self.restarts.retain(|t| now.duration_since(*t) <= RESTART_WINDOW);
+        self.restarts
+            .retain(|t| now.duration_since(*t) <= RESTART_WINDOW);
         if self.restarts.len() > MAX_VIOLATIONS as usize {
-            return LadderVerdict::Unhealthy { until: now + RESTART_WINDOW };
+            return LadderVerdict::Unhealthy {
+                until: now + RESTART_WINDOW,
+            };
         }
         // Backoff resets after a stable period (restart.resetAfterMs).
         if let Some(ready) = self.last_ready_at {
@@ -196,7 +250,11 @@ impl Ladder {
             }
         }
         let shift = self.backoff_level.min(16);
-        let delay = Duration::from_millis(BACKOFF_BASE_MS.saturating_mul(1 << shift).min(BACKOFF_MAX_MS));
+        let delay = Duration::from_millis(
+            BACKOFF_BASE_MS
+                .saturating_mul(1 << shift)
+                .min(BACKOFF_MAX_MS),
+        );
         self.backoff_level += 1;
         LadderVerdict::Restart { delay }
     }
@@ -234,7 +292,11 @@ fn spawn_reader(stdout: std::process::ChildStdout, max_output_bytes: usize) -> R
 
 /// Read one `\n`-terminated line, never buffering more than `max` bytes.
 /// `Ok(false)` = EOF.
-fn read_bounded_line(reader: &mut impl BufRead, max: usize, line: &mut Vec<u8>) -> std::io::Result<bool> {
+fn read_bounded_line(
+    reader: &mut impl BufRead,
+    max: usize,
+    line: &mut Vec<u8>,
+) -> std::io::Result<bool> {
     loop {
         let available = match reader.fill_buf() {
             Ok(b) => b,
@@ -249,7 +311,10 @@ fn read_bounded_line(reader: &mut impl BufRead, max: usize, line: &mut Vec<u8>) 
                 line.extend_from_slice(&available[..nl]);
                 reader.consume(nl + 1);
                 if line.len() > max {
-                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "output exceeds maxOutputBytes"));
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "output exceeds maxOutputBytes",
+                    ));
                 }
                 return Ok(true);
             }
@@ -258,7 +323,10 @@ fn read_bounded_line(reader: &mut impl BufRead, max: usize, line: &mut Vec<u8>) 
                 let len = available.len();
                 reader.consume(len);
                 if line.len() > max {
-                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "output exceeds maxOutputBytes"));
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "output exceeds maxOutputBytes",
+                    ));
                 }
             }
         }
@@ -351,11 +419,20 @@ fn spawn_child(spec: &ToolSpec) -> std::io::Result<LiveChild> {
     let stdout = child.stdout.take().expect("piped stdout");
     let pid = child.id();
     let lines = spawn_reader(stdout, spec.max_output_bytes);
-    Ok(LiveChild { child, stdin, lines, pid })
+    Ok(LiveChild {
+        child,
+        stdin,
+        lines,
+        pid,
+    })
 }
 
 fn write_letter(stdin: &mut ChildStdin, letter: &serde_json::Value) -> std::io::Result<()> {
-    stdin.write_all(serde_json::to_string(letter).expect("serialize letter").as_bytes())?;
+    stdin.write_all(
+        serde_json::to_string(letter)
+            .expect("serialize letter")
+            .as_bytes(),
+    )?;
     stdin.write_all(b"\n")?;
     stdin.flush()
 }
@@ -419,24 +496,39 @@ impl StageRunner {
                 .unwrap_or(false);
         if idle_expired {
             let grace = Duration::from_millis(self.spec.kill_grace_ms);
-            if let PoolState::Ready(mut live) = std::mem::replace(&mut self.state, PoolState::Cold) {
-                eprintln!("shell-warden: stage {}: idle kill pid {}", self.stage_id, live.pid);
+            if let PoolState::Ready(mut live) = std::mem::replace(&mut self.state, PoolState::Cold)
+            {
+                eprintln!(
+                    "shell-warden: stage {}: idle kill pid {}",
+                    self.stage_id, live.pid
+                );
                 drop(live.stdin);
                 grace_kill(&mut live.child, grace);
             }
         }
     }
 
-    pub fn invoke(&mut self, cmd: &CheckCommand, invocation: &Invocation, now: Instant) -> InvokeResult {
+    pub fn invoke(
+        &mut self,
+        cmd: &CheckCommand,
+        invocation: &Invocation,
+        now: Instant,
+    ) -> InvokeResult {
         self.last_used = Some(now);
         // Gates: unhealthy / cooling down → onError without a new violation
         // (the failure is already accounted for; 08 §8.2: the walk continues).
         match self.state {
             PoolState::Unhealthy { until } if now < until => {
-                return Ok(StageOutcome::OnError { reason: "stage tool unhealthy".into(), violation: false })
+                return Ok(StageOutcome::OnError {
+                    reason: "stage tool unhealthy".into(),
+                    violation: false,
+                })
             }
             PoolState::Backoff { until } if now < until => {
-                return Ok(StageOutcome::OnError { reason: "stage tool restarting".into(), violation: false })
+                return Ok(StageOutcome::OnError {
+                    reason: "stage tool restarting".into(),
+                    violation: false,
+                })
             }
             PoolState::Unhealthy { .. } | PoolState::Backoff { .. } => self.state = PoolState::Cold,
             PoolState::Cold | PoolState::Ready(_) => {}
@@ -451,8 +543,18 @@ impl StageRunner {
     /// One-shot: fresh child per call (06 §6.4.1 "spawn"). `spawn_child` hands
     /// over the piped stdin and the stdout reader — write the letter, close
     /// stdin (EOF), then wait for the single answer line.
-    fn invoke_spawn(&mut self, cmd: &CheckCommand, invocation: &Invocation, now: Instant) -> InvokeResult {
-        let LiveChild { mut child, stdin, lines, .. } = match self.ensure_spawned()? {
+    fn invoke_spawn(
+        &mut self,
+        cmd: &CheckCommand,
+        invocation: &Invocation,
+        now: Instant,
+    ) -> InvokeResult {
+        let LiveChild {
+            mut child,
+            stdin,
+            lines,
+            ..
+        } = match self.ensure_spawned()? {
             Some(live) => live,
             None => return Ok(self.failure("spawn failure", true, now)),
         };
@@ -486,22 +588,37 @@ impl StageRunner {
                         if !status.success() {
                             // Exit ≠ 0 is onError even with valid JSON — the tool
                             // reported its own failure; no violation (06 §6.4.4).
-                            result.0 = StageOutcome::OnError { reason: format!("tool exited unsuccessfully: {status}"), violation: false };
+                            result.0 = StageOutcome::OnError {
+                                reason: format!("tool exited unsuccessfully: {status}"),
+                                violation: false,
+                            };
                         }
                     }
                     None => {
                         // Answered but would not exit: protocol violation.
-                        result = (StageOutcome::OnError { reason: "tool did not exit after answering".into(), violation: true }, true);
+                        result = (
+                            StageOutcome::OnError {
+                                reason: "tool did not exit after answering".into(),
+                                violation: true,
+                            },
+                            true,
+                        );
                     }
                 }
                 result
             }
             Ok(LineOrEof::Eof) | Err(RecvTimeoutError::Disconnected) => (
-                StageOutcome::OnError { reason: "tool produced no answer".into(), violation: true },
+                StageOutcome::OnError {
+                    reason: "tool produced no answer".into(),
+                    violation: true,
+                },
                 false,
             ),
             Err(RecvTimeoutError::Timeout) => (
-                StageOutcome::OnError { reason: "deadline exceeded".into(), violation: true },
+                StageOutcome::OnError {
+                    reason: "deadline exceeded".into(),
+                    violation: true,
+                },
                 true,
             ),
         };
@@ -509,7 +626,10 @@ impl StageRunner {
             grace_kill(&mut child, Duration::from_millis(self.spec.kill_grace_ms));
         }
         let _ = child.wait();
-        if let StageOutcome::OnError { violation: true, .. } = &outcome.0 {
+        if let StageOutcome::OnError {
+            violation: true, ..
+        } = &outcome.0
+        {
             let v = self.ladder.violation(now);
             self.apply_ladder(v, now);
         }
@@ -517,7 +637,12 @@ impl StageRunner {
     }
 
     /// Persistent: reuse the live child; exactly one line per request.
-    fn invoke_persistent(&mut self, cmd: &CheckCommand, invocation: &Invocation, now: Instant) -> InvokeResult {
+    fn invoke_persistent(
+        &mut self,
+        cmd: &CheckCommand,
+        invocation: &Invocation,
+        now: Instant,
+    ) -> InvokeResult {
         // Take the child out of the state; it goes back in only on the healthy
         // path — every failure path leaves Cold/Backoff/Unhealthy behind.
         let mut live = match std::mem::replace(&mut self.state, PoolState::Cold) {
@@ -541,7 +666,10 @@ impl StageRunner {
                 Ok(LineOrEof::Line(line)) => {
                     stale += 1;
                     if !line.iter().all(|b| b.is_ascii_whitespace()) {
-                        eprintln!("shell-warden: stage {}: dropped unsolicited output", self.stage_id);
+                        eprintln!(
+                            "shell-warden: stage {}: dropped unsolicited output",
+                            self.stage_id
+                        );
                     }
                 }
                 Ok(LineOrEof::Eof) | Err(TryRecvError::Disconnected) => {
@@ -552,7 +680,10 @@ impl StageRunner {
             }
         }
         if stale > 0 {
-            eprintln!("shell-warden: stage {}: drained {stale} stale output line(s)", self.stage_id);
+            eprintln!(
+                "shell-warden: stage {}: drained {stale} stale output line(s)",
+                self.stage_id
+            );
         }
         // Child died between calls: a persistent contract breach — violation
         // (06 §6.4.4) — then a lazy respawn so this call still gets an answer.
@@ -568,15 +699,27 @@ impl StageRunner {
                 },
                 LadderVerdict::Restart { delay } => {
                     drop(live.stdin);
-                    grace_kill(&mut live.child, Duration::from_millis(self.spec.kill_grace_ms));
+                    grace_kill(
+                        &mut live.child,
+                        Duration::from_millis(self.spec.kill_grace_ms),
+                    );
                     self.state = PoolState::Backoff { until: now + delay };
-                    return Ok(StageOutcome::OnError { reason: "stage tool restarting".into(), violation: false });
+                    return Ok(StageOutcome::OnError {
+                        reason: "stage tool restarting".into(),
+                        violation: false,
+                    });
                 }
                 LadderVerdict::Unhealthy { until } => {
                     drop(live.stdin);
-                    grace_kill(&mut live.child, Duration::from_millis(self.spec.kill_grace_ms));
+                    grace_kill(
+                        &mut live.child,
+                        Duration::from_millis(self.spec.kill_grace_ms),
+                    );
                     self.state = PoolState::Unhealthy { until };
-                    return Ok(StageOutcome::OnError { reason: "stage tool unhealthy".into(), violation: false });
+                    return Ok(StageOutcome::OnError {
+                        reason: "stage tool unhealthy".into(),
+                        violation: false,
+                    });
                 }
             }
         }
@@ -586,7 +729,10 @@ impl StageRunner {
             let _ = live.child.wait();
             return Ok(self.failure("stage tool closed stdin", true, now));
         }
-        match live.lines.recv_timeout(Duration::from_millis(self.spec.timeout_ms)) {
+        match live
+            .lines
+            .recv_timeout(Duration::from_millis(self.spec.timeout_ms))
+        {
             Ok(LineOrEof::Line(line)) => {
                 let outcome = classify_response(&String::from_utf8_lossy(&line));
                 match live.child.try_wait() {
@@ -599,7 +745,11 @@ impl StageRunner {
                         // A persistent tool must not exit — contract breach even
                         // with a valid answer (06 §6.4.4: crash ⇒ onError + violation).
                         let _ = live.child.wait();
-                        Ok(self.failure(&format!("persistent tool exited ({status}) after answering"), true, now))
+                        Ok(self.failure(
+                            &format!("persistent tool exited ({status}) after answering"),
+                            true,
+                            now,
+                        ))
                     }
                     Err(_) => Ok(self.failure("cannot inspect tool process", true, now)),
                 }
@@ -610,7 +760,9 @@ impl StageRunner {
             }
             Err(RecvTimeoutError::Timeout) => {
                 let grace = Duration::from_millis(self.spec.kill_grace_ms);
-                let LiveChild { mut child, stdin, .. } = live;
+                let LiveChild {
+                    mut child, stdin, ..
+                } = live;
                 drop(stdin);
                 grace_kill(&mut child, grace);
                 Ok(self.failure("deadline exceeded", true, now))
@@ -624,7 +776,10 @@ impl StageRunner {
             let v = self.ladder.violation(now);
             self.apply_ladder(v, now);
         }
-        StageOutcome::OnError { reason: reason.to_string(), violation }
+        StageOutcome::OnError {
+            reason: reason.to_string(),
+            violation,
+        }
     }
 
     fn apply_ladder(&mut self, verdict: LadderVerdict, now: Instant) {
@@ -658,7 +813,10 @@ impl StageRunner {
     fn kill_live(&mut self) {
         if let PoolState::Ready(mut live) = std::mem::replace(&mut self.state, PoolState::Cold) {
             drop(live.stdin);
-            grace_kill(&mut live.child, Duration::from_millis(self.spec.kill_grace_ms));
+            grace_kill(
+                &mut live.child,
+                Duration::from_millis(self.spec.kill_grace_ms),
+            );
         }
     }
 
@@ -681,7 +839,10 @@ impl StageRunner {
                     }
                     Err(e) => {
                         return Err(FatalPin {
-                            reason: format!("stage `{}` binary unreadable for sha256 pin: {e}", self.stage_id),
+                            reason: format!(
+                                "stage `{}` binary unreadable for sha256 pin: {e}",
+                                self.stage_id
+                            ),
                         });
                     }
                 }
@@ -735,18 +896,33 @@ impl StagePools {
             .iter()
             .map(|s| (s.id.clone(), StageRunner::new(s.id.clone(), s.tool.clone())))
             .collect();
-        StagePools { runners, max_concurrent }
+        StagePools {
+            runners,
+            max_concurrent,
+        }
     }
 
-    pub fn invoke(&mut self, stage: &crate::config::Stage, cmd: &CheckCommand, invocation: &Invocation, now: Instant) -> InvokeResult {
+    pub fn invoke(
+        &mut self,
+        stage: &crate::config::Stage,
+        cmd: &CheckCommand,
+        invocation: &Invocation,
+        now: Instant,
+    ) -> InvokeResult {
         // Persistent-process cap (06 §6.2 maxConcurrentTools). Serial loop ⇒
         // at most one in-flight call, but persistent children accumulate.
         let active = self.runners.values().filter(|r| r.is_active()).count();
         let Some(runner) = self.runners.get_mut(&stage.id) else {
-            return Ok(StageOutcome::OnError { reason: "stage has no runner".into(), violation: false });
+            return Ok(StageOutcome::OnError {
+                reason: "stage has no runner".into(),
+                violation: false,
+            });
         };
         if !runner.is_active() && active >= self.max_concurrent {
-            return Ok(StageOutcome::OnError { reason: "maxConcurrentTools exceeded".into(), violation: false });
+            return Ok(StageOutcome::OnError {
+                reason: "maxConcurrentTools exceeded".into(),
+                violation: false,
+            });
         }
         runner.invoke(cmd, invocation, now)
     }
@@ -760,7 +936,13 @@ impl StagePools {
 
 /// The real pools drive the walk (walk::StageInvoker).
 impl crate::walk::StageInvoker for StagePools {
-    fn invoke(&mut self, stage: &crate::config::Stage, cmd: &CheckCommand, invocation: &Invocation, now: Instant) -> InvokeResult {
+    fn invoke(
+        &mut self,
+        stage: &crate::config::Stage,
+        cmd: &CheckCommand,
+        invocation: &Invocation,
+        now: Instant,
+    ) -> InvokeResult {
         StagePools::invoke(self, stage, cmd, invocation, now)
     }
 }

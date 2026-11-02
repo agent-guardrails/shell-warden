@@ -1,11 +1,12 @@
-// shell-warden — orchestrator engine (ADR-0008 rev; decisions live in stage tools).
-// Implementation plan: agent-guardrails/docs/spec/shell-warden/HANDOFF-m0.md
-//
-// HANDOFF-m0 steps 1–4 complete: NDJSON wire loop (02-protocol), strict config
-// loader with the -32001 fatal path (05 §5.3), stage invoker with deadlines
-// and ladders (06 §6.4), and the stage walk (08-request-processing). The core
-// holds zero decision logic: it walks stages, invokes their tools and
-// aggregates verdicts — most-restrictive-wins, the first deny stops the walk.
+#![allow(clippy::all, unused)] // retired M0 reference implementation — lint debt accepted by ADR-0016
+                               // shell-warden — orchestrator engine (ADR-0008 rev; decisions live in stage tools).
+                               // Implementation plan: agent-guardrails/docs/spec/shell-warden/HANDOFF-m0.md
+                               //
+                               // HANDOFF-m0 steps 1–4 complete: NDJSON wire loop (02-protocol), strict config
+                               // loader with the -32001 fatal path (05 §5.3), stage invoker with deadlines
+                               // and ladders (06 §6.4), and the stage walk (08-request-processing). The core
+                               // holds zero decision logic: it walks stages, invokes their tools and
+                               // aggregates verdicts — most-restrictive-wins, the first deny stops the walk.
 
 mod clock;
 mod config;
@@ -45,11 +46,15 @@ fn main() {
 
 /// `--config FILE` flag; default path per 06 §6.1/§6.8.
 fn config_path(args: &[String]) -> PathBuf {
-    str_flag(args, "--config").map(PathBuf::from).unwrap_or_else(config::default_path)
+    str_flag(args, "--config")
+        .map(PathBuf::from)
+        .unwrap_or_else(config::default_path)
 }
 
 fn str_flag(args: &[String], flag: &str) -> Option<String> {
-    args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1).cloned())
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1).cloned())
 }
 
 fn print_usage() {
@@ -107,16 +112,27 @@ fn check_mode(args: &[String]) -> i32 {
     let started = Instant::now();
     let mut pools = stagetools::StagePools::build(&cfg.stages, cfg.limits.max_concurrent_tools);
     let mut budgets = walk::BudgetTable::default();
-    match walk::walk(&cfg.stages, &params, &mut pools, &mut budgets, Instant::now()) {
+    match walk::walk(
+        &cfg.stages,
+        &params,
+        &mut pools,
+        &mut budgets,
+        Instant::now(),
+    ) {
         Ok(outcome) => {
             let result = CheckResult {
                 invocationId: params.invocation.id,
                 verdict: outcome.verdict,
                 message: outcome.message,
                 commands: Some(outcome.commands),
-                engine: Some(EngineTelemetry { checkMs: started.elapsed().as_millis() as u64 }),
+                engine: Some(EngineTelemetry {
+                    checkMs: started.elapsed().as_millis() as u64,
+                }),
             };
-            println!("{}", serde_json::to_string(&result).expect("serialize result"));
+            println!(
+                "{}",
+                serde_json::to_string(&result).expect("serialize result")
+            );
             0
         }
         Err(pin) => {
@@ -163,7 +179,10 @@ impl WardenHandler {
             Err(reason) => {
                 // Never fail open (05 §5.3): stay up, answer checks fatally.
                 eprintln!("shell-warden v{VERSION}: {reason} — serving -32001 fatal until the config is fixed");
-                ConfigState::Fatal { reason, at: clock::now_rfc3339() }
+                ConfigState::Fatal {
+                    reason,
+                    at: clock::now_rfc3339(),
+                }
             }
         };
         WardenHandler {
@@ -186,19 +205,33 @@ impl WardenHandler {
         let started = Instant::now();
         let outcome = {
             // Disjoint field borrows: state (shared), pools (mut), budgets (mut).
-            let WardenHandler { state, pools, budgets, .. } = self;
+            let WardenHandler {
+                state,
+                pools,
+                budgets,
+                ..
+            } = self;
             let ConfigState::Loaded(cfg) = state else {
                 unreachable!("the fatal branch is handled below")
             };
             if pools.is_none() {
-                *pools = Some(stagetools::StagePools::build(&cfg.stages, cfg.limits.max_concurrent_tools));
+                *pools = Some(stagetools::StagePools::build(
+                    &cfg.stages,
+                    cfg.limits.max_concurrent_tools,
+                ));
             }
-            walk::walk(&cfg.stages, &params, pools.as_mut().expect("built above"), budgets, Instant::now())
+            walk::walk(
+                &cfg.stages,
+                &params,
+                pools.as_mut().expect("built above"),
+                budgets,
+                Instant::now(),
+            )
         };
         match outcome {
             Ok(mut o) => {
                 // Defensive (I3): the lookahead branch of an empty walk is
-               // always fail-closed ask — never allow from nothing.
+                // always fail-closed ask — never allow from nothing.
                 if !o.contributed && o.verdict == wire::Verdict::Allow {
                     o.verdict = wire::Verdict::Ask;
                 }
@@ -208,13 +241,18 @@ impl WardenHandler {
                     verdict: o.verdict,
                     message: o.message,
                     commands: Some(o.commands),
-                    engine: Some(EngineTelemetry { checkMs: started.elapsed().as_millis() as u64 }),
+                    engine: Some(EngineTelemetry {
+                        checkMs: started.elapsed().as_millis() as u64,
+                    }),
                 })
             }
             Err(pin) => {
                 self.last_error_at = Some(clock::now_rfc3339());
                 eprintln!("shell-warden: fatal: {}", pin.reason);
-                self.state = ConfigState::Fatal { reason: pin.reason.clone(), at: clock::now_rfc3339() };
+                self.state = ConfigState::Fatal {
+                    reason: pin.reason.clone(),
+                    at: clock::now_rfc3339(),
+                };
                 self.pools = None; // Drop kills the spawned tools now
                 Err(RpcError::fatal(CODE_CONFIG_INVALID, pin.reason))
             }
@@ -238,7 +276,10 @@ impl Handler for WardenHandler {
         };
         InitializeResult {
             protocolVersion: 1,
-            engine: EngineInfo { name: "shell-warden".into(), version: VERSION.into() },
+            engine: EngineInfo {
+                name: "shell-warden".into(),
+                version: VERSION.into(),
+            },
             capabilities: Some(Capabilities {
                 // Wire schema maxItems for commands[]; the shim clamps lower locally.
                 maxCommandsPerCheck: 128,
@@ -285,7 +326,11 @@ impl Handler for WardenHandler {
                         ConfigState::Fatal { .. } => true,
                     };
                     if changed {
-                        eprintln!("shell-warden: config reloaded: {} ({} stages)", new.source.display(), new.stages.len());
+                        eprintln!(
+                            "shell-warden: config reloaded: {} ({} stages)",
+                            new.source.display(),
+                            new.stages.len()
+                        );
                         self.state = ConfigState::Loaded(Box::new(new));
                         // Stage pools restart as needed (§5.3); derived per-session
                         // state goes with them.

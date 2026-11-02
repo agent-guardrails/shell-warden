@@ -10,13 +10,21 @@
 
 use crate::config::{MessageMode, Stage};
 use crate::stagetools::{FatalPin, InvokeResult, StageOutcome, ToolVerdict};
-use crate::wire::{AuditEvent, CheckCommand, CheckCommandResult, CheckParams, Classification, Invocation, Verdict};
+use crate::wire::{
+    AuditEvent, CheckCommand, CheckCommandResult, CheckParams, Classification, Invocation, Verdict,
+};
 use std::collections::HashMap;
 use std::time::Instant;
 
 /// Who executes a stage: the real pools in production, a script in tests.
 pub trait StageInvoker {
-    fn invoke(&mut self, stage: &Stage, cmd: &CheckCommand, invocation: &Invocation, now: Instant) -> InvokeResult;
+    fn invoke(
+        &mut self,
+        stage: &Stage,
+        cmd: &CheckCommand,
+        invocation: &Invocation,
+        now: Instant,
+    ) -> InvokeResult;
 }
 
 /// `existing — reason` (08 §8.3 / 06 §6.5).
@@ -65,7 +73,9 @@ impl BudgetTable {
     /// returns true exactly once per suspension so the walk composes the
     /// suspension notice into the message only on the first bypass (§8.4).
     fn is_suspended(&self, stage: &Stage, session: &str, now: Instant) -> bool {
-        let Some(budget) = &stage.budget else { return false };
+        let Some(budget) = &stage.budget else {
+            return false;
+        };
         self.entry(stage, session, now)
             .map(|e| e.rejections >= budget.max_rejections)
             .unwrap_or(false)
@@ -79,13 +89,23 @@ impl BudgetTable {
     /// Charge one deny; no-op for stages without a budget. Returns the fresh
     /// denial count when the stage is budgeted.
     fn charge_deny(&mut self, stage: &Stage, session: &str, now: Instant) -> u32 {
-        let Some(budget) = stage.budget.as_ref() else { return 0 };
+        let Some(budget) = stage.budget.as_ref() else {
+            return 0;
+        };
         let key = (stage.id.clone(), session.to_string());
         let e = match self.entries.get(&key) {
-            Some(e) if now.duration_since(e.window_start).as_millis() as u64 <= budget.window_ms => {
-                BudgetEntry { rejections: e.rejections + 1, window_start: e.window_start }
+            Some(e)
+                if now.duration_since(e.window_start).as_millis() as u64 <= budget.window_ms =>
+            {
+                BudgetEntry {
+                    rejections: e.rejections + 1,
+                    window_start: e.window_start,
+                }
             }
-            _ => BudgetEntry { rejections: 1, window_start: now },
+            _ => BudgetEntry {
+                rejections: 1,
+                window_start: now,
+            },
         };
         self.entries.insert(key.clone(), e);
         e.rejections
@@ -214,10 +234,15 @@ pub fn walk(
                 contributed = true;
                 let takes = per_command[i]
                     .verdict
-                    .map_or(true, |prev| action.rank() > prev.rank());
+                    .is_none_or(|prev| action.rank() > prev.rank());
                 if takes {
                     let (rule_id, reason, classification, cache_ttl_ms) = match decided {
-                        Some(v) => (v.rule_id.clone(), v.reason.clone(), v.classification, v.cache_ttl_ms),
+                        Some(v) => (
+                            v.rule_id.clone(),
+                            v.reason.clone(),
+                            v.classification,
+                            v.cache_ttl_ms,
+                        ),
                         None => {
                             // onError: the core supplies the stage id and the reason.
                             let reason = match &outcome {
@@ -287,7 +312,9 @@ pub fn walk(
             ruleId: pc.rule_id.clone(),
             reason: pc.reason.clone(),
             classification: pc.classification,
-            cacheTtlMs: pc.cache_ttl_ms.filter(|_| !matches!(pc.verdict, Some(Verdict::Deny))),
+            cacheTtlMs: pc
+                .cache_ttl_ms
+                .filter(|_| !matches!(pc.verdict, Some(Verdict::Deny))),
         })
         .collect();
 
@@ -295,7 +322,13 @@ pub fn walk(
         // No stage contributed → defaults.action (§8.3; ask in v1.1).
         aggregate = Verdict::Ask;
     }
-    Ok(WalkOutcome { verdict: aggregate, message, commands: commands_out, decisive_stage, contributed })
+    Ok(WalkOutcome {
+        verdict: aggregate,
+        message,
+        commands: commands_out,
+        decisive_stage,
+        contributed,
+    })
 }
 
 /// The engine → shim audit event for a decision (02 §2.5, 08 §8.1).

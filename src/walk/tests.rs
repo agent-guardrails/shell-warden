@@ -6,9 +6,9 @@ use super::*;
 use crate::config::{Budget, Stage, ToolSpec};
 use crate::wire::{CheckCommand, Invocation};
 
-use crate::config::OnError;
 use crate::config::Lifecycle;
 use crate::config::MessageMode;
+use crate::config::OnError;
 
 /// Scripted invoker: pops one outcome per call; records the stage order.
 struct Mock {
@@ -17,7 +17,13 @@ struct Mock {
 }
 
 impl StageInvoker for Mock {
-    fn invoke(&mut self, stage: &Stage, _cmd: &CheckCommand, _invocation: &Invocation, _now: Instant) -> InvokeResult {
+    fn invoke(
+        &mut self,
+        stage: &Stage,
+        _cmd: &CheckCommand,
+        _invocation: &Invocation,
+        _now: Instant,
+    ) -> InvokeResult {
         self.calls.push(stage.id.clone());
         let item = self
             .script
@@ -75,7 +81,12 @@ fn decided(verdict: Verdict) -> StageOutcome {
     })
 }
 
-fn decided_with(verdict: Verdict, message: Option<&str>, rule_id: Option<&str>, ttl: Option<u64>) -> StageOutcome {
+fn decided_with(
+    verdict: Verdict,
+    message: Option<&str>,
+    rule_id: Option<&str>,
+    ttl: Option<u64>,
+) -> StageOutcome {
     StageOutcome::Decided(ToolVerdict {
         verdict,
         message: message.map(str::to_string),
@@ -87,11 +98,17 @@ fn decided_with(verdict: Verdict, message: Option<&str>, rule_id: Option<&str>, 
 }
 
 fn on_error(reason: &str) -> StageOutcome {
-    StageOutcome::OnError { reason: reason.into(), violation: false }
+    StageOutcome::OnError {
+        reason: reason.into(),
+        violation: false,
+    }
 }
 
 fn error_result(reason: &str, violation: bool) -> StageOutcome {
-    StageOutcome::OnError { reason: reason.into(), violation }
+    StageOutcome::OnError {
+        reason: reason.into(),
+        violation,
+    }
 }
 
 fn invocation(session: &str) -> Invocation {
@@ -106,7 +123,12 @@ fn invocation(session: &str) -> Invocation {
 }
 
 fn one_command() -> CheckCommand {
-    CheckCommand { index: 0, raw: "ls".into(), argv: None, cwd: "/w".into() }
+    CheckCommand {
+        index: 0,
+        raw: "ls".into(),
+        argv: None,
+        cwd: "/w".into(),
+    }
 }
 
 fn params(session: &str, commands: Vec<CheckCommand>) -> CheckParams {
@@ -122,11 +144,22 @@ fn run(mock: &mut Mock, stages: &[Stage], session: &str, budgets: &mut BudgetTab
     run_with(mock, stages, session, budgets, vec![one_command()])
 }
 
-fn run_all(mock: &mut Mock, stages: &[Stage], session: &str, budgets: &mut BudgetTable) -> WalkOutcome {
+fn run_all(
+    mock: &mut Mock,
+    stages: &[Stage],
+    session: &str,
+    budgets: &mut BudgetTable,
+) -> WalkOutcome {
     run_with(mock, stages, session, budgets, vec![one_command()])
 }
 
-fn run_with(mock: &mut Mock, stages: &[Stage], session: &str, budgets: &mut BudgetTable, commands: Vec<CheckCommand>) -> WalkOutcome {
+fn run_with(
+    mock: &mut Mock,
+    stages: &[Stage],
+    session: &str,
+    budgets: &mut BudgetTable,
+    commands: Vec<CheckCommand>,
+) -> WalkOutcome {
     let p = params(session, commands);
     walk(stages, &p, mock, budgets, Instant::now()).expect("no pin")
 }
@@ -135,7 +168,10 @@ fn run_with(mock: &mut Mock, stages: &[Stage], session: &str, budgets: &mut Budg
 
 #[test]
 fn no_stage_contributed_falls_to_defaults_ask() {
-    let mut mock = Mock { script: vec![], calls: vec![] };
+    let mut mock = Mock {
+        script: vec![],
+        calls: vec![],
+    };
     let mut budgets = BudgetTable::default();
     let out = run(&mut mock, &[], "s1", &mut budgets);
     assert_eq!(out.verdict, Verdict::Ask, "defaults.action");
@@ -150,7 +186,10 @@ fn no_stage_contributed_falls_to_defaults_ask() {
 fn aggregate_is_most_restrictive_across_stages() {
     let stages = [stage("s1"), stage("s2")];
     let mut mock = Mock {
-        script: vec![("s1".into(), Ok(decided(Verdict::Allow))), ("s2".into(), Ok(decided(Verdict::Ask)))],
+        script: vec![
+            ("s1".into(), Ok(decided(Verdict::Allow))),
+            ("s2".into(), Ok(decided(Verdict::Ask))),
+        ],
         calls: vec![],
     };
     let mut budgets = BudgetTable::default();
@@ -165,7 +204,10 @@ fn aggregate_is_most_restrictive_across_stages() {
 fn allow_verdicts_aggregate_to_allow() {
     let stages = [stage("s1"), stage("s2")];
     let mut mock = Mock {
-        script: vec![("s1".into(), Ok(decided(Verdict::Allow))), ("s2".into(), Ok(decided(Verdict::Allow)))],
+        script: vec![
+            ("s1".into(), Ok(decided(Verdict::Allow))),
+            ("s2".into(), Ok(decided(Verdict::Allow))),
+        ],
         calls: vec![],
     };
     let mut budgets = BudgetTable::default();
@@ -179,7 +221,10 @@ fn the_first_deny_stops_the_walk() {
     let stages = [stage("s1"), stage("s2"), stage("s3")];
     let mut mock = Mock {
         script: vec![
-            ("s1".into(), Ok(decided_with(Verdict::Deny, Some("no"), Some("s1/r"), None))),
+            (
+                "s1".into(),
+                Ok(decided_with(Verdict::Deny, Some("no"), Some("s1/r"), None)),
+            ),
             ("s2".into(), panic_marker()),
             ("s3".into(), panic_marker()),
         ],
@@ -191,7 +236,11 @@ fn the_first_deny_stops_the_walk() {
     assert_eq!(out.message.as_deref(), Some("no"));
     assert_eq!(out.commands[0].stage.as_deref(), Some("s1"));
     assert_eq!(out.commands[0].ruleId.as_deref(), Some("s1/r"));
-    assert_eq!(mock.calls, vec!["s1".to_string()], "later stages must not be invoked (ADR-0012)");
+    assert_eq!(
+        mock.calls,
+        vec!["s1".to_string()],
+        "later stages must not be invoked (ADR-0012)"
+    );
 }
 
 fn panic_marker() -> InvokeResult {
@@ -202,7 +251,10 @@ fn panic_marker() -> InvokeResult {
 fn enabled_filter_skips_disabled_stages() {
     let stages = [stage("s1"), enabled(stage("s2"), false), stage("s3")];
     let mut mock = Mock {
-        script: vec![("s1".into(), Ok(decided(Verdict::Allow))), ("s3".into(), Ok(decided(Verdict::Allow)))],
+        script: vec![
+            ("s1".into(), Ok(decided(Verdict::Allow))),
+            ("s3".into(), Ok(decided(Verdict::Allow))),
+        ],
         calls: vec![],
     };
     let mut budgets = BudgetTable::default();
@@ -220,8 +272,19 @@ fn append_composes_in_stage_order() {
     s2.message_mode = MessageMode::Append;
     let mut mock = Mock {
         script: vec![
-            ("s1".into(), Ok(decided_with(Verdict::Ask, Some("first reason"), None, None))),
-            ("s2".into(), Ok(decided_with(Verdict::Allow, Some("extra context"), None, None))),
+            (
+                "s1".into(),
+                Ok(decided_with(Verdict::Ask, Some("first reason"), None, None)),
+            ),
+            (
+                "s2".into(),
+                Ok(decided_with(
+                    Verdict::Allow,
+                    Some("extra context"),
+                    None,
+                    None,
+                )),
+            ),
         ],
         calls: vec![],
     };
@@ -238,8 +301,19 @@ fn replace_replaces_the_accumulated_message() {
     s2.message_mode = MessageMode::Replace; // redirect family (06 §6.3)
     let mut mock = Mock {
         script: vec![
-            ("s1".into(), Ok(decided_with(Verdict::Allow, Some("old text"), None, None))),
-            ("s2".into(), Ok(decided_with(Verdict::Ask, Some("use the API instead"), None, None))),
+            (
+                "s1".into(),
+                Ok(decided_with(Verdict::Allow, Some("old text"), None, None)),
+            ),
+            (
+                "s2".into(),
+                Ok(decided_with(
+                    Verdict::Ask,
+                    Some("use the API instead"),
+                    None,
+                    None,
+                )),
+            ),
         ],
         calls: vec![],
     };
@@ -255,7 +329,10 @@ fn on_error_skip_is_silent_and_falls_to_defaults() {
     let mut s1 = stage("s1");
     s1.tool.on_error = OnError::Skip;
     let stages = [s1];
-    let mut mock = Mock { script: vec![("s1".into(), Ok(error_result("hook crashed", true)))], calls: vec![] };
+    let mut mock = Mock {
+        script: vec![("s1".into(), Ok(error_result("hook crashed", true)))],
+        calls: vec![],
+    };
     let mut budgets = BudgetTable::default();
     let out = run(&mut mock, &stages, "s1", &mut budgets);
     // A skipped stage contributes nothing → defaults.action (ask).
@@ -272,7 +349,10 @@ fn on_error_skip_is_silent_and_falls_to_defaults() {
 fn on_error_ask_contributes_ask_with_stage_diagnostics() {
     let mut s1 = stage("s1");
     s1.tool.on_error = OnError::Ask;
-    let mut mock = Mock { script: vec![("s1".into(), Ok(error_result("tool stall", true)))], calls: vec![] };
+    let mut mock = Mock {
+        script: vec![("s1".into(), Ok(error_result("tool stall", true)))],
+        calls: vec![],
+    };
     let mut budgets = BudgetTable::default();
     let out = run(&mut mock, &[s1], "s1", &mut budgets);
     assert_eq!(out.verdict, Verdict::Ask);
@@ -287,7 +367,10 @@ fn on_error_deny_stops_the_walk() {
     s1.tool.on_error = OnError::Deny;
     let stages = [s1, stage("s2")];
     let mut mock = Mock {
-        script: vec![("s1".into(), Ok(on_error("unreadable"))), ("s2".into(), panic_marker())],
+        script: vec![
+            ("s1".into(), Ok(on_error("unreadable"))),
+            ("s2".into(), panic_marker()),
+        ],
         calls: vec![],
     };
     let mut budgets = BudgetTable::default();
@@ -305,12 +388,19 @@ fn exclusive_claim_absorbs_the_command() {
     s1.exclusive = true;
     let stages = [s1, stage("s2")];
     let mut mock = Mock {
-        script: vec![("s1".into(), Ok(decided(Verdict::Allow))), ("s2".into(), panic_marker())],
+        script: vec![
+            ("s1".into(), Ok(decided(Verdict::Allow))),
+            ("s2".into(), panic_marker()),
+        ],
         calls: vec![],
     };
     let mut budgets = BudgetTable::default();
     let out = run(&mut mock, &stages, "s1", &mut budgets);
-    assert_eq!(mock.calls, vec!["s1".to_string()], "a definite response claims the command");
+    assert_eq!(
+        mock.calls,
+        vec!["s1".to_string()],
+        "a definite response claims the command"
+    );
     assert_eq!(out.verdict, Verdict::Allow);
 }
 
@@ -321,7 +411,10 @@ fn exclusive_skip_does_not_claim() {
     s1.tool.on_error = OnError::Skip;
     let stages = [s1, stage("s2")];
     let mut mock = Mock {
-        script: vec![("s1".into(), Ok(on_error("broken"))), ("s2".into(), Ok(decided(Verdict::Ask)))],
+        script: vec![
+            ("s1".into(), Ok(on_error("broken"))),
+            ("s2".into(), Ok(decided(Verdict::Ask))),
+        ],
         calls: vec![],
     };
     let mut budgets = BudgetTable::default();
@@ -334,11 +427,24 @@ fn exclusive_skip_does_not_claim() {
 #[test]
 fn commands_are_judged_independently() {
     let stages = [stage("s1")];
-    let c0 = CheckCommand { index: 0, raw: "a".into(), argv: None, cwd: "/w".into() };
-    let c1 = CheckCommand { index: 1, raw: "b".into(), argv: None, cwd: "/w".into() };
+    let c0 = CheckCommand {
+        index: 0,
+        raw: "a".into(),
+        argv: None,
+        cwd: "/w".into(),
+    };
+    let c1 = CheckCommand {
+        index: 1,
+        raw: "b".into(),
+        argv: None,
+        cwd: "/w".into(),
+    };
     // First call → allow, second call → deny (same stage, later statement).
     let mut mock = Mock {
-        script: vec![("s1".into(), Ok(decided(Verdict::Allow))), ("s1".into(), Ok(decided(Verdict::Deny)))],
+        script: vec![
+            ("s1".into(), Ok(decided(Verdict::Allow))),
+            ("s1".into(), Ok(decided(Verdict::Deny))),
+        ],
         calls: vec![],
     };
     let mut budgets = BudgetTable::default();
@@ -353,7 +459,10 @@ fn commands_are_judged_independently() {
 
 fn budgeted_stage(id: &str, max_rejections: u32) -> Stage {
     let mut s = stage(id);
-    s.budget = Some(Budget { max_rejections, window_ms: 1_800_000 });
+    s.budget = Some(Budget {
+        max_rejections,
+        window_ms: 1_800_000,
+    });
     s
 }
 
@@ -364,12 +473,24 @@ fn budget_exhaustion_bypasses_the_stage_with_a_notice() {
     let mut budgets = BudgetTable::default();
 
     // Check 1: deny #1.
-    let mut mock = Mock { script: vec![("s1".into(), Ok(decided_with(Verdict::Deny, Some("deny you"), None, None)))], calls: vec![] };
+    let mut mock = Mock {
+        script: vec![(
+            "s1".into(),
+            Ok(decided_with(Verdict::Deny, Some("deny you"), None, None)),
+        )],
+        calls: vec![],
+    };
     let out = run(&mut mock, &stages, "s1", &mut budgets);
     assert_eq!(out.verdict, Verdict::Deny);
 
     // Check 2: deny #2 → budget exhausted.
-    let mut mock = Mock { script: vec![("s1".into(), Ok(decided_with(Verdict::Deny, Some("deny you"), None, None)))], calls: vec![] };
+    let mut mock = Mock {
+        script: vec![(
+            "s1".into(),
+            Ok(decided_with(Verdict::Deny, Some("deny you"), None, None)),
+        )],
+        calls: vec![],
+    };
     let out = run(&mut mock, &stages, "s1", &mut budgets);
     assert_eq!(out.verdict, Verdict::Deny);
 
@@ -380,12 +501,18 @@ fn budget_exhaustion_bypasses_the_stage_with_a_notice() {
         calls: vec![],
     };
     let out = run(&mut mock, &stages, "s1", &mut budgets);
-    assert!(out.message.unwrap_or_default().contains("suspended for this session after 2 rejections"),);
+    assert!(out
+        .message
+        .unwrap_or_default()
+        .contains("suspended for this session after 2 rejections"),);
     assert!(!out.contributed);
     assert_eq!(out.verdict, Verdict::Ask);
 
     // Check 4: still bypassed, and the notice does not repeat.
-    let mut mock = Mock { script: vec![("s1".into(), panic_marker())], calls: vec![] };
+    let mut mock = Mock {
+        script: vec![("s1".into(), panic_marker())],
+        calls: vec![],
+    };
     let out = run(&mut mock, &stages, "s1", &mut budgets);
     assert_eq!(out.message, None, "suspension notice is composed once");
     assert_eq!(out.verdict, Verdict::Ask);
@@ -398,17 +525,29 @@ fn non_deny_verdict_resets_the_budget() {
     let mut budgets = BudgetTable::default();
     // deny (count 1) → allow resets → deny (count 1) → deny (count 2 = max,
     // suspended) → next check is bypassed.
-    let mut mock = Mock { script: vec![("s1".into(), Ok(decided(Verdict::Deny)))], calls: vec![] };
+    let mut mock = Mock {
+        script: vec![("s1".into(), Ok(decided(Verdict::Deny)))],
+        calls: vec![],
+    };
     let out = run(&mut mock, &stages, "s1", &mut budgets);
     assert_eq!(out.verdict, Verdict::Deny);
-    let mut mock = Mock { script: vec![("s1".into(), Ok(decided(Verdict::Ask)))], calls: vec![] };
+    let mut mock = Mock {
+        script: vec![("s1".into(), Ok(decided(Verdict::Ask)))],
+        calls: vec![],
+    };
     run(&mut mock, &stages, "s1", &mut budgets);
     for _ in 0..2 {
-        let mut mock = Mock { script: vec![("s1".into(), Ok(decided(Verdict::Deny)))], calls: vec![] };
+        let mut mock = Mock {
+            script: vec![("s1".into(), Ok(decided(Verdict::Deny)))],
+            calls: vec![],
+        };
         let out = run(&mut mock, &stages, "s1", &mut budgets);
         assert_eq!(out.verdict, Verdict::Deny);
     }
-    let mut mock = Mock { script: vec![("s1".into(), panic_marker())], calls: vec![] };
+    let mut mock = Mock {
+        script: vec![("s1".into(), panic_marker())],
+        calls: vec![],
+    };
     let out = run(&mut mock, &stages, "s1", &mut budgets);
     assert!(out.message.as_deref().unwrap().contains("suspended"));
 }
@@ -419,12 +558,18 @@ fn budget_is_per_session() {
     let stages = [s1.clone()];
     let mut budgets = BudgetTable::default();
     for _ in 0..2 {
-        let mut mock = Mock { script: vec![("s1".into(), Ok(decided(Verdict::Deny)))], calls: vec![] };
+        let mut mock = Mock {
+            script: vec![("s1".into(), Ok(decided(Verdict::Deny)))],
+            calls: vec![],
+        };
         run(&mut mock, &stages, "sesA", &mut budgets);
     }
     // sesA exhausted; sesB still served normally.
     let mut mock = Mock {
-        script: vec![("s1".into(), Ok(decided_with(Verdict::Ask, Some("normal"), None, None)))],
+        script: vec![(
+            "s1".into(),
+            Ok(decided_with(Verdict::Ask, Some("normal"), None, None)),
+        )],
         calls: vec![],
     };
     let out = run(&mut mock, &stages, "sesB", &mut budgets);
@@ -438,7 +583,12 @@ fn budget_is_per_session() {
 fn sha_pin_failure_propagates_from_the_walk() {
     let stages = [stage("s1")];
     let mut mock = Mock {
-        script: vec![("s1".into(), Err(crate::stagetools::FatalPin { reason: "pin mismatch".into() }))],
+        script: vec![(
+            "s1".into(),
+            Err(crate::stagetools::FatalPin {
+                reason: "pin mismatch".into(),
+            }),
+        )],
         calls: vec![],
     };
     let mut budgets = BudgetTable::default();
@@ -450,7 +600,10 @@ fn sha_pin_failure_propagates_from_the_walk() {
 #[test]
 fn audit_decision_reports_type_and_verdict() {
     let stages = [stage("s1")];
-    let mut mock = Mock { script: vec![("s1".into(), Ok(decided(Verdict::Deny)))], calls: vec![] };
+    let mut mock = Mock {
+        script: vec![("s1".into(), Ok(decided(Verdict::Deny)))],
+        calls: vec![],
+    };
     let mut budgets = BudgetTable::default();
     let out = run(&mut mock, &stages, "ses1", &mut budgets);
     let p = params("ses1", vec![one_command()]);

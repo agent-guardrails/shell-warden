@@ -1,0 +1,29 @@
+{
+  "letter": {
+    "version": 1,
+    "invocation": {
+      "id": "m:c",
+      "sessionID": "s1",
+      "projectDir": "/repo"
+    },
+    "action": "shell",
+    "commands": [
+      {
+        "index": 0,
+        "raw": "git status",
+        "cwd": "/repo"
+      }
+    ]
+  },
+  "expect": {
+    "verdict": "allow",
+    "commands": [
+      {
+        "index": 0,
+        "verdict": "allow",
+        "ruleId": "vcs/allow-inspection",
+        "match": "argv"
+      }
+    ]
+  }
+}
