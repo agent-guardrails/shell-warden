@@ -38,23 +38,6 @@ fn command(v: &serde_json::Value) -> serde_json::Value {
 }
 
 #[test]
-fn dbg_split_parts() {
-    let raws: [&str; 3] = ["echo hello world", "git push --force", "push"];
-    for raw in raws {
-        let parts = shell_warden::checker::split::split(raw, 0);
-        for (i, part) in parts.iter().enumerate() {
-            eprintln!(
-                "raw={raw:?} part{i}: argv={:?} static={} reason={:?} unknown={:?}",
-                part.argv,
-                part.classification_static(),
-                part.opaque_reason,
-                part.unknown_texts
-            );
-        }
-    }
-}
-
-#[test]
 fn force_push_denied() {
     let cfg = load_str(SKETCH).unwrap();
     let v = evaluate(&cfg, &letter("git push --force origin main"));
@@ -67,18 +50,6 @@ fn force_push_denied() {
     assert_eq!(command(&c)["ruleId"], "vcs/no-force-push");
     assert_eq!(command(&c)["classification"], "static");
     assert_eq!(command(&c)["match"], "argv");
-}
-
-#[test]
-fn dbg_plain_msg() {
-    let cfg = load_str(SKETCH).unwrap();
-    let v = evaluate(&cfg, &letter("git push origin main"));
-    eprintln!(
-        "MSG={:?} verdict={:?} cmd0={:?}",
-        v.message,
-        v.verdict,
-        serde_json::to_value(&v).unwrap()["commands"][0]
-    );
 }
 
 #[test]
