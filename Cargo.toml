@@ -1,6 +1,6 @@
 [package]
 name = "shell-warden"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "One-shot decision binary of the shell-warden permission system: parse → classify → match → verdict (ADR-0016); retired M0 engine kept as reference"
 license = "MIT"
