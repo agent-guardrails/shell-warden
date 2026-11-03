@@ -88,6 +88,21 @@ fn case_matches(actual: &Value, expect: &Value) -> bool {
 }
 
 #[test]
+fn version_flag_matches_crate() {
+    let out = Command::new(BIN)
+        .arg("--version")
+        .output()
+        .expect("spawn shell-warden --version");
+    assert!(out.status.success(), "--version must exit 0");
+    let line = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        line,
+        format!("shell-warden {}\n", env!("CARGO_PKG_VERSION")),
+        "--version must print exactly \"shell-warden <crate version>\"; the tap formula test matches on this"
+    );
+}
+
+#[test]
 fn golden_cases() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/cases");
     let mut entries: Vec<_> = std::fs::read_dir(&dir)

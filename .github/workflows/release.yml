@@ -1,0 +1,110 @@
+name: release
+
+# Builds the one-shot decision binary for the four tap-supported targets and
+# publishes a GitHub Release with the artifacts named per the "Release artifact
+# convention" in agent-guardrails/homebrew-tap README:
+#   shell-warden_<version>_darwin_arm64.tar.gz | ..._darwin_amd64.tar.gz
+#   shell-warden_<version>_linux_arm64.tar.gz  | ..._linux_amd64.tar.gz
+#   checksums.txt
+# Archives unpack the binary at their top level as `shell-warden`.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (${{ matrix.target }})
+        run: |
+          rustup toolchain install stable --profile minimal --target ${{ matrix.target }}
+          rustup default stable
+
+      - name: Install cross (aarch64 linux cross-build)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: cargo install cross --locked
+
+      - name: Build
+        run: |
+          if [ -x ~/.cargo/bin/cross ]; then
+            ~/.cargo/bin/cross build --release --bin shell-warden --target ${{ matrix.target }}
+          else
+            cargo build --release --bin shell-warden --target ${{ matrix.target }}
+          fi
+
+      - name: Package
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          case "$TARGET" in
+            aarch64-apple-darwin)   short=darwin_arm64 ;;
+            x86_64-apple-darwin)    short=darwin_amd64 ;;
+            aarch64-unknown-linux-gnu) short=linux_arm64 ;;
+            x86_64-unknown-linux-gnu)  short=linux_amd64 ;;
+            *) echo "unmapped target $TARGET"; exit 1 ;;
+          esac
+          name="shell-warden_${version}_${short}"
+          mkdir -p dist
+          tar -czf "dist/${name}.tar.gz" -C "target/${TARGET}/release" shell-warden
+          # sha256sum is absent on macOS runners; shasum is the BSD equivalent
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "dist/${name}.tar.gz" >> dist/checksums.txt.part
+          else
+            shasum -a 256 "dist/${name}.tar.gz" >> dist/checksums.txt.part
+          fi
+
+      - name: Upload archive and checksum fragment
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: dist-*
+          merge-multiple: true
+
+      - name: Assemble checksums.txt
+        run: |
+          sort dist/checksums.txt.part > dist/checksums.txt
+          rm dist/checksums.txt.part
+          cat dist/checksums.txt
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/shell-warden_*.tar.gz dist/checksums.txt \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            --verify-tag
