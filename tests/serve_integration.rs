@@ -42,7 +42,7 @@ fn write_config(body: &str) -> TempDirGuard {
 impl Engine {
     fn spawn(config: TempDirGuard) -> Engine {
         let config_path = config.dir.join("config.jsonc");
-        let mut child = Command::new(env!("CARGO_BIN_EXE_shell-warden"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_shell-warden-serve"))
             .arg("serve")
             .arg("--config")
             .arg(&config_path)
@@ -341,7 +341,7 @@ fn check_mode_prints_the_result_json() {
     )
     .unwrap();
 
-    let out = Command::new(env!("CARGO_BIN_EXE_shell-warden"))
+    let out = Command::new(env!("CARGO_BIN_EXE_shell-warden-serve"))
         .arg("check")
         .arg("--config")
         .arg(dir.join("config.jsonc"))
@@ -361,7 +361,7 @@ fn check_mode_prints_the_result_json() {
 
     // Broken request → exit 1; broken config → exit 2; stdout stays wire-only.
     std::fs::write(dir.join("bad.json"), "{}").unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_shell-warden"))
+    let out = Command::new(env!("CARGO_BIN_EXE_shell-warden-serve"))
         .arg("check")
         .arg("--config")
         .arg(dir.join("config.jsonc"))

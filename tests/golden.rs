@@ -12,7 +12,7 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
-const BIN: &str = env!("CARGO_BIN_EXE_shell-warden-letter");
+const BIN: &str = env!("CARGO_BIN_EXE_shell-warden");
 const CONFIG: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/examples/configs/shell-warden.example.jsonc"
