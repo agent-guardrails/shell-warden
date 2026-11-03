@@ -68,12 +68,17 @@ jobs:
           name="shell-warden_${version}_${short}"
           mkdir -p dist
           tar -czf "dist/${name}.tar.gz" -C "target/${TARGET}/release" shell-warden
-          # sha256sum is absent on macOS runners; shasum is the BSD equivalent
-          if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum "dist/${name}.tar.gz" >> dist/checksums.txt.part
-          else
-            shasum -a 256 "dist/${name}.tar.gz" >> dist/checksums.txt.part
-          fi
+          # sha256sum is absent on macOS runners; shasum is the BSD equivalent.
+          # Hash inside dist/ so checksums.txt carries bare file names, and use a
+          # per-target fragment name: upload-artifact archives use flat file names.
+          (
+            cd dist
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "${name}.tar.gz" >> "checksums_${short}.txt"
+            else
+              shasum -a 256 "${name}.tar.gz" >> "checksums_${short}.txt"
+            fi
+          )
 
       - name: Upload archive and checksum fragment
         uses: actions/upload-artifact@v4
@@ -96,9 +101,10 @@ jobs:
 
       - name: Assemble checksums.txt
         run: |
-          sort dist/checksums.txt.part > dist/checksums.txt
-          rm dist/checksums.txt.part
-          cat dist/checksums.txt
+          cat dist/checksums_*.txt > dist/checksums.txt
+          rm dist/checksums_*.txt
+          diff <(ls dist/*.tar.gz | xargs -n1 basename | sort) <(cut -d' ' -f3- dist/checksums.txt | sort) \
+            && echo "checksums cover every artifact"
 
       - name: Create the release
         env:
