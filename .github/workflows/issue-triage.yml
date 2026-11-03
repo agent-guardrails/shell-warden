@@ -15,7 +15,7 @@ jobs:
   triage:
     uses: agent-guardrails/.github/.github/workflows/issue-triage.yml@main
     with:
-      issue_number: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.issue_number || '' }}
+      issue_number: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.issue_number || github.event.issue.number }}
     permissions:
       issues: write
       contents: read

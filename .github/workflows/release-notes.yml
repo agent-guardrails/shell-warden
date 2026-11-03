@@ -15,7 +15,7 @@ jobs:
   notes:
     uses: agent-guardrails/.github/.github/workflows/release-notes.yml@main
     with:
-      tag: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || '' }}
+      tag: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.event.release.tag_name }}
     permissions:
       contents: write
     secrets: inherit
