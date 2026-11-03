@@ -24,6 +24,10 @@ fn run() -> i32 {
                     return 1;
                 }
             },
+            "--version" => {
+                println!("shell-warden {}", env!("CARGO_PKG_VERSION"));
+                return 0;
+            }
             other => {
                 eprintln!("unknown argument \"{other}\" — usage: shell-warden [--config FILE]");
                 return 1;
