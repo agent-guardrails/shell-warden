@@ -1,25 +1,27 @@
 [package]
 name = "shell-warden"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
-description = "One-shot decision binary of the shell-warden permission system: parse → classify → match → verdict (ADR-0016); retired M0 engine kept as reference"
+description = "Orchestrator engine of the shell-warden permission system (stage walk; decisions live in stage tools per docs/adr/0008)"
 license = "MIT"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# The one-shot decision binary (letter on stdin → verdict on stdout).
+# The release artifact: persistent NDJSON JSON-RPC engine (02-protocol +
+# 05-engine-runtime) — the wire the published shim speaks (HANDOFF-m0).
 [[bin]]
 name = "shell-warden"
-path = "src/bin/shell-warden.rs"
-
-# Retired M0 orchestrator engine (ADR-0002/0005/0008) — reference only, not a release artifact.
-[[bin]]
-name = "shell-warden-m0-retired"
 path = "src/main.rs"
 
-# Test-only stage tool for the runtime contract tests of the retired engine (never ships).
+# Retired v1.0 one-shot letter checker (pre-v1.1 "02-letter-verdict" wire).
+# Reference only; drives the legacy golden suite, never ships in releases.
+[[bin]]
+name = "shell-warden-letter"
+path = "src/bin/shell-warden-letter.rs"
+
+# Test-only stage tool for the runtime contract tests (never ships).
 [[bin]]
 name = "warden-test-tool"
 path = "src/bin/warden-test-tool.rs"

@@ -1,4 +1,7 @@
-// Golden suite (10-testing.md §10.2): checker CLI — letter JSON in, verdict
+// Golden suite: letter checker CLI — legacy letter JSON in, verdict JSON out.
+// Repointed to the shell-warden-letter bin (see #16); migrating the golden
+// table to the orchestrator `check --file` single-shot mode per 10-testing
+// §10.2 is tracked separately.
 // JSON out, subset diffed against the case's `expect`. Every case lives in
 // tests/golden/cases/*.json referencing examples/configs. Spawn latency is
 // recorded per case (10 §10.6); the 10 ms p95 gate is checked on the runner
@@ -9,7 +12,7 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
-const BIN: &str = env!("CARGO_BIN_EXE_shell-warden");
+const BIN: &str = env!("CARGO_BIN_EXE_shell-warden-letter");
 const CONFIG: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/examples/configs/shell-warden.example.jsonc"
