@@ -1,4 +1,4 @@
-// shell-warden — the one-shot decision binary (02-letter-verdict.md).
+// shell-warden-letter — the one-shot decision binary (02-letter-verdict.md).
 // Letter in on stdin, verdict out on stdout. Exit codes: 0 verdict; 1 usage
 // failure; 2 config invalid (message on stderr; stdout stays empty).
 

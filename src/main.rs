@@ -29,8 +29,14 @@ const DEFAULT_MAX_FRAME_BYTES: usize = wire::DEFAULT_MAX_FRAME_BYTES;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("shell-warden v{VERSION}");
+        return;
+    }
+    // serve is the default mode: leading flags (a bare `--config …` invocation)
+    // are not modes; only explicit sub-commands change the behavior.
     let exit = match args.first().map(String::as_str) {
-        None | Some("serve") => serve(&config_path(&args)),
+        None | Some("serve") | Some("--config") => serve(&config_path(&args)),
         Some("check") => check_mode(&args),
         Some("--help") | Some("-h") | Some("help") => {
             print_usage();
