@@ -270,7 +270,7 @@ fn exit_nonzero_is_onerror_without_violation() {
             on_error(r.invoke(&cmd(), &invocation(), Instant::now()).unwrap());
         assert!(
             !violation,
-            "exit != 0 is the tool's own failure, not a violation"
+            "exit != 0 is the tool's own failure, not a violation; reason: {reason}"
         );
         assert!(reason.contains("exited"), "{reason}");
     }
@@ -295,15 +295,28 @@ fn garbage_and_oversize_output_violate() {
 
 #[test]
 fn foreign_pv_and_overlong_message_violate() {
+    // Spawn lifecycle: the one-shot children exit right after answering; the
+    // spawn path reaps them, so every outcome below is deterministic.
     {
-        let (_g, mut r) = runner(test_tool("foreign-pv", None));
+        let (_g, mut r) = runner({
+            let mut s = test_tool("foreign-pv", None);
+            s.lifecycle = Lifecycle::Spawn;
+            s
+        });
         let (reason, violation) =
             on_error(r.invoke(&cmd(), &invocation(), Instant::now()).unwrap());
-        assert!(violation);
-        assert!(reason.contains("protocolVersion"));
+        assert!(violation, "foreign-pv: expected violation, reason: {reason}");
+        assert!(
+            reason.contains("protocolVersion"),
+            "foreign-pv: reason was: {reason}"
+        );
     }
     {
-        let (_g, mut r) = runner(test_tool("long-message", None));
+        let (_g, mut r) = runner({
+            let mut s = test_tool("long-message", None);
+            s.lifecycle = Lifecycle::Spawn;
+            s
+        });
         let (_, violation) = on_error(r.invoke(&cmd(), &invocation(), Instant::now()).unwrap());
         assert!(violation, "message above 512 chars is garbage (I6)");
     }
