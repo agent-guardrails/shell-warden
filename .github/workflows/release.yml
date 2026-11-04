@@ -103,7 +103,7 @@ jobs:
         run: |
           cat dist/checksums_*.txt > dist/checksums.txt
           rm dist/checksums_*.txt
-          diff <(ls dist/*.tar.gz | xargs -n1 basename | sort) <(cut -d' ' -f3- dist/checksums.txt | sort) \
+          diff <(basename -a dist/*.tar.gz | sort) <(cut -d' ' -f3- dist/checksums.txt | sort) \
             && echo "checksums cover every artifact"
 
       - name: Create the release
