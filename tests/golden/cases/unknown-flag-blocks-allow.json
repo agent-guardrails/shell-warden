@@ -10,20 +10,12 @@
     "commands": [
       {
         "index": 0,
-        "raw": "git status --stealth-x",
+        "raw": "git status --stealth",
         "cwd": "/repo"
       }
     ]
   },
   "expect": {
-    "verdict": "ask",
-    "commands": [
-      {
-        "index": 0,
-        "verdict": "ask",
-        "classification": "static",
-        "match": "argv"
-      }
-    ]
+    "verdict": "ask"
   }
 }

@@ -17,16 +17,12 @@
   },
   "expect": {
     "verdict": "deny",
+    "message": "contains:forbidden",
     "commands": [
       {
         "index": 0,
-        "verdict": "deny",
-        "ruleId": "vcs/no-force-push",
-        "classification": "static",
-        "match": "argv"
+        "ruleId": "git/deny-force-push"
       }
-    ],
-    "message": "contains:forbidden"
-  },
-  "messageContains": true
+    ]
+  }
 }

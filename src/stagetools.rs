@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
-use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, TryRecvError};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError, channel};
 use std::time::{Duration, Instant};
 
 // ── Outcomes ────────────────────────────────────────────────────────────────────
@@ -99,7 +99,7 @@ fn classify_response(line: &str) -> StageOutcome {
             return StageOutcome::OnError {
                 reason: "unreadable output: not JSON".into(),
                 violation: true,
-            }
+            };
         }
     };
     let Some(obj) = parsed.as_object() else {
@@ -131,7 +131,7 @@ fn classify_response(line: &str) -> StageOutcome {
             return StageOutcome::OnError {
                 reason: format!("unreadable output: unknown verdict `{other}`"),
                 violation: true,
-            }
+            };
         }
     };
     // Caps and types (I6): over-long or wrong-typed members are garbage, not
@@ -180,7 +180,7 @@ fn classify_response(line: &str) -> StageOutcome {
                 return StageOutcome::OnError {
                     reason: "unreadable output: classification must be static|opaque".into(),
                     violation: true,
-                }
+                };
             }
         },
     };
@@ -340,7 +340,7 @@ struct LiveChild {
     pid: u32,
 }
 
-extern "C" {
+unsafe extern "C" {
     fn kill(pid: i32, sig: i32) -> i32;
 }
 
@@ -522,13 +522,13 @@ impl StageRunner {
                 return Ok(StageOutcome::OnError {
                     reason: "stage tool unhealthy".into(),
                     violation: false,
-                })
+                });
             }
             PoolState::Backoff { until } if now < until => {
                 return Ok(StageOutcome::OnError {
                     reason: "stage tool restarting".into(),
                     violation: false,
-                })
+                });
             }
             PoolState::Unhealthy { .. } | PoolState::Backoff { .. } => self.state = PoolState::Cold,
             PoolState::Cold | PoolState::Ready(_) => {}
