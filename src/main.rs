@@ -1,12 +1,12 @@
 #![allow(clippy::all, unused)] // retired M0 reference implementation — lint debt accepted by ADR-0016
-                               // shell-warden — orchestrator engine (ADR-0008 rev; decisions live in stage tools).
-                               // Implementation plan: agent-guardrails/docs/spec/shell-warden/HANDOFF-m0.md
-                               //
-                               // HANDOFF-m0 steps 1–4 complete: NDJSON wire loop (02-protocol), strict config
-                               // loader with the -32001 fatal path (05 §5.3), stage invoker with deadlines
-                               // and ladders (06 §6.4), and the stage walk (08-request-processing). The core
-                               // holds zero decision logic: it walks stages, invokes their tools and
-                               // aggregates verdicts — most-restrictive-wins, the first deny stops the walk.
+// shell-warden — orchestrator engine (ADR-0008 rev; decisions live in stage tools).
+// Implementation plan: agent-guardrails/docs/spec/shell-warden/HANDOFF-m0.md
+//
+// HANDOFF-m0 steps 1–4 complete: NDJSON wire loop (02-protocol), strict config
+// loader with the -32001 fatal path (05 §5.3), stage invoker with deadlines
+// and ladders (06 §6.4), and the stage walk (08-request-processing). The core
+// holds zero decision logic: it walks stages, invokes their tools and
+// aggregates verdicts — most-restrictive-wins, the first deny stops the walk.
 
 mod clock;
 mod config;
@@ -20,8 +20,8 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use wire::{
-    AuditEvent, Capabilities, CheckParams, CheckResult, ConfigEcho, EngineInfo, EngineTelemetry,
-    Handler, InitializeResult, PingResult, RpcError, CODE_CONFIG_INVALID,
+    AuditEvent, CODE_CONFIG_INVALID, Capabilities, CheckParams, CheckResult, ConfigEcho,
+    EngineInfo, EngineTelemetry, Handler, InitializeResult, PingResult, RpcError,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -67,8 +67,12 @@ fn print_usage() {
     println!("shell-warden v{VERSION} — orchestrator engine of the shell-warden permission system");
     println!();
     println!("USAGE:");
-    println!("  shell-warden serve [--config FILE]                      NDJSON loop on stdio (default mode)");
-    println!("  shell-warden check --config FILE --file REQ.json        single-shot golden mode (10 §10.2)");
+    println!(
+        "  shell-warden serve [--config FILE]                      NDJSON loop on stdio (default mode)"
+    );
+    println!(
+        "  shell-warden check --config FILE --file REQ.json        single-shot golden mode (10 §10.2)"
+    );
     println!();
     println!("Config: $XDG_CONFIG_HOME/shell-warden/config.jsonc (default: ~/.config/…), 06 §6.1");
 }
@@ -184,7 +188,9 @@ impl WardenHandler {
             }
             Err(reason) => {
                 // Never fail open (05 §5.3): stay up, answer checks fatally.
-                eprintln!("shell-warden v{VERSION}: {reason} — serving -32001 fatal until the config is fixed");
+                eprintln!(
+                    "shell-warden v{VERSION}: {reason} — serving -32001 fatal until the config is fixed"
+                );
                 ConfigState::Fatal {
                     reason,
                     at: clock::now_rfc3339(),

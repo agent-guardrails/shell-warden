@@ -1,126 +1,33 @@
-// Matching primitives (07 §7.5, 06 §6.4) and stage-aware flag extraction.
+// Action-sensitive matching (design/shell-warden-config-v2.md §Action-sensitive
+// matching and emitted votes + §Lattice reduction):
+//
+//   ask/deny — `match` asks whether its supplied predicates hold; predicates
+//              may be existential or conjunctive and need not account for
+//              unrelated evidence (e.g. a deny for force push matches a
+//              `force` option without describing every argument);
+//   allow    — `match` is both the shape constraint and the total coverage
+//              proof: every observed security-relevant item must be
+//              universally covered; a rejected allow emits no vote and
+//              records its coverage failure.
+//
+// Internal phases stay separate even though config has one selector object:
+// predicate satisfaction, allow coverage validation, then vote emission.
 
-use super::grammar::{ArgvSequence, ArgvToken, IndexMapLike};
+use super::evidence::reason;
+use super::evidence::{ArgToken, EnvAssign, EvidenceState, FactObs, Part, RedirectObs};
+use super::grammar::{
+    self, EnvironmentTest, EvidenceClass, FactTest, OptionCoverage, PathCoordinateSelector,
+    PathPolicy, RedirectTest, RemainderPolicy, TokenSelector, ValuesCoverage, VerdictKind,
+};
 
-#[derive(Debug, Clone, Default)]
-pub struct Flags {
-    /// base flag → consumed value tokens in argv order (empty for arity 0).
-    pub present: std::collections::BTreeMap<String, Vec<String>>,
-    /// flag bases not declared in a stage's table (unknown flag ⇒ not fully
-    /// parsed ⇒ allow blocked, 08 §8.2).
-    pub unrecognized: Vec<String>,
-    /// argv with flag tokens and their consumed value tokens removed.
-    pub cleaned_argv: Vec<String>,
-    pub fully_parsed: bool,
-}
+// ── Raw-text glob (07 §7.5, OpenCode-compatible) ─────────────────────────────
+// `*` = zero+ chars incl. spaces; `?` = one char; trailing `" *"` also matches
+// the bare command.
 
-/// Per-stage flag parse (06 §6.4): base-flag identity, `--long=value` inline,
-/// arity N consumes next N tokens, `--` terminates flags; values parse raw.
-pub fn flags_of(argv: &[String], arity: &IndexMapLike) -> Flags {
-    if argv.is_empty() {
-        return Flags {
-            cleaned_argv: Vec::new(),
-            fully_parsed: true,
-            ..Default::default()
-        };
-    }
-    let mut present = std::collections::BTreeMap::new();
-    let mut unrecognized = Vec::new();
-    let mut cleaned: Vec<String> = vec![argv[0].clone()];
-    let mut i = 1usize;
-    let mut terminated = false;
-    while i < argv.len() {
-        if terminated {
-            cleaned.push(argv[i].clone());
-            i += 1;
-            continue;
-        }
-        let tok = &argv[i];
-        if tok == "--" {
-            terminated = true;
-            i += 1;
-            continue;
-        }
-        match split_flag_token(tok) {
-            Some((base, inline)) => match arity.get(&base) {
-                Some(a) => {
-                    let mut values = Vec::new();
-                    let mut consumed = 0usize;
-                    if let Some(v) = inline {
-                        if *a == 0 {
-                            values.push(v); // `--long=value` with declared arity 0
-                        } else {
-                            // inline form supplies the whole value set
-                            values.push(v);
-                        }
-                    } else {
-                        while consumed < *a as usize {
-                            match argv.get(i + 1 + consumed) {
-                                Some(v) => values.push(v.clone()),
-                                None => break, // under-supplied arity ends the scan
-                            }
-                            consumed += 1;
-                        }
-                    }
-                    present.insert(base, values);
-                    i += 1 + consumed;
-                    continue;
-                }
-                None => {
-                    unrecognized.push(base);
-                    cleaned.push(tok.clone()); // stays visible as a positional
-                    i += 1;
-                }
-            },
-            None => {
-                cleaned.push(argv[i].clone());
-                i += 1;
-            }
-        }
-    }
-    let fully_parsed = unrecognized.is_empty();
-    Flags {
-        present,
-        unrecognized,
-        cleaned_argv: cleaned,
-        fully_parsed,
-    }
-}
-
-fn split_flag_token(tok: &str) -> Option<(String, Option<String>)> {
-    if !tok.starts_with('-') || tok == "-" || tok == "--" {
-        return None;
-    }
-    // inline form `--long=value` / `-f=x`: base up to '='
-    if let Some(eq) = tok.find('=') {
-        if eq > 1 {
-            return Some((tok[..eq].to_string(), Some(tok[eq + 1..].to_string())));
-        }
-    }
-    // short forms `-a` and combined clusters `-rf` (the table resolves them),
-    // long forms `--any-thing`
-    Some((tok.to_string(), None))
-}
-
-// ── Condition matching ──────────────────────────────────────────────────────
-
-/// Ordered equality on the first N tokens (06 §6.4): strings compare
-/// literally, `{anyOf}` matches one alternative; contiguous from position 0.
-pub fn matches_argv(seq: &[ArgvToken], argv: &[String]) -> bool {
-    if seq.len() > argv.len() {
-        return false;
-    }
-    seq.iter().zip(argv.iter()).all(|(t, s)| t.matches(s))
-}
-
-/// Raw-string glob, OpenCode-compatible (07 §7.5): `*` = zero+ chars incl.
-/// spaces; `?` = one char; trailing `" *"` also matches the bare command.
 pub fn glob(raw: &str, pattern: &str) -> bool {
     if pattern == "*" {
         return true;
     }
-    // trailing " *" also matches the bare command (07 §7.5); the standard
-    // glob covers the suffixed forms on its own
     if pattern.len() > 2 && pattern.ends_with(" *") {
         let bare = &pattern[..pattern.len() - 2];
         if raw == bare {
@@ -138,8 +45,6 @@ fn glob_inner(
         match pc {
             '*' => {
                 p.next();
-                // `*` matches everything when it is the last pattern char;
-                // otherwise every candidate prefix position is tried
                 if p.peek().is_none() {
                     return true;
                 }
@@ -168,172 +73,985 @@ fn glob_inner(
     s.peek().is_none()
 }
 
-/// Scope entry (06 §6.3): returns the anchor length — how many cleaned argv
-/// tokens the matched `argv` condition consumed (pattern conditions anchor at
-/// 0). Rules then match against the stage tail `cleaned_argv[anchor..]`.
-pub fn stage_anchor(stage: &super::grammar::Stage, cleaned: &[String], raw: &str) -> usize {
-    stage
-        .scope
-        .any_of
-        .iter()
-        .filter_map(|cond| {
-            if let Some(seq) = &cond.argv {
-                matches_argv(&seq.0, cleaned).then_some(seq.0.len())
-            } else if let Some(pattern) = &cond.pattern {
-                glob(raw, pattern).then_some(0_usize)
-            } else {
-                None
+// ── Evidence view supplied by the pipeline ──────────────────────────────────
+
+/// One runtime path coordinate produced from profile `pathSources`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PathCoordinateObs {
+    pub source: PathSourceTag,
+    pub path: String,
+    pub resolvable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PathSourceTag {
+    Argument {
+        index: u32,
+    },
+    OptionValue {
+        canonical: String,
+        occurrence: u32,
+        value_ordinal: u32,
+    },
+    Environment {
+        occurrence: u32,
+    },
+    AnalyzerFact {
+        analyzer: &'static str,
+        name: String,
+        occurrence: u32,
+    },
+}
+
+/// Reduced result of one nested (child) part.
+#[derive(Debug, Clone)]
+pub struct NestedResult {
+    pub part_id: usize,
+    pub relation: grammar::Relation,
+    pub relation_ordinal: u32,
+    pub executable: Option<String>,
+    pub profile_id: Option<String>,
+    pub analyzer: Option<&'static str>,
+    pub state: EvidenceState,
+    pub verdict: VerdictKind,
+}
+
+/// One option occurrence as seen by the matcher.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OptionOccurrenceView {
+    pub ordinal: u32,
+    pub values: Vec<(String, bool)>, // (decoded text, resolvable)
+}
+
+/// Everything a predicate or coverage check may consult about one part.
+pub struct PartFacts<'a> {
+    pub part: &'a Part,
+    pub profile_id: Option<&'a str>,
+    /// Positional arguments after option parsing.
+    pub positionals: &'a [ArgToken],
+    /// Canonical option ID → occurrences (source order).
+    pub canonical: std::collections::BTreeMap<String, Vec<OptionOccurrenceView>>,
+    pub path_coords: &'a [PathCoordinateObs],
+    pub nested: &'a [NestedResult],
+}
+
+// ── Lexical path comparison (design §Lexical path policy) ───────────────────
+
+pub fn lexical_components(path: &str, cwd: &str) -> Vec<String> {
+    let joined = if path.starts_with('/') {
+        path.to_string()
+    } else if cwd.is_empty() {
+        format!("/{path}")
+    } else {
+        format!("{cwd}/{path}")
+    };
+    let mut out: Vec<String> = Vec::new();
+    for comp in joined.split('/') {
+        match comp {
+            "" | "." => {}
+            ".." => {
+                out.pop();
             }
-        })
-        .max()
-        .filter(|_| true)
-        .unwrap_or_else(|| usize::MAX.saturating_sub(0)) // sentinel: no entry ⇒ no match
-}
-
-/// Sequence-condition matching against a part (legacy single-condition form).
-pub fn matches_scope(argv_seq: &ArgvSequence, cleaned: &[String]) -> bool {
-    matches_argv(&argv_seq.0, cleaned)
-}
-
-// ── Rule-condition evaluation on a part ──────────────────────────────────────
-
-/// Evaluation context of one (part × stage) cell.
-pub struct MatchCtx<'a> {
-    /// Stage-cleaned argv (flags + consumed values removed).
-    pub cleaned_argv: &'a [String],
-    /// The part's raw text.
-    pub raw: &'a str,
-    /// True when the part is fully parsed (all tokens resolvable, no unknown
-    /// flags against this stage — 08 §8.2).
-    pub fully_parsed: bool,
-    pub static_part: bool,
-    /// Stage-flag facts.
-    pub flags: &'a Flags,
-}
-
-pub fn rule_matches(rule: &super::grammar::Rule, ctx: &MatchCtx) -> bool {
-    use super::grammar::FlagPresence::Present;
-
-    if let Some(seq) = &rule.argv {
-        if !matches_argv(&seq.0, ctx.cleaned_argv) {
-            return false;
+            other => out.push(other.to_string()),
         }
     }
-    if let Some(globs) = &rule.arg_value {
-        // `argValue` (06 §6.5): ∃ positional token × ∃ glob — the positional
-        // mirror of `flagValue`
-        let holds = globs
+    out
+}
+
+/// `/work/repo2` is NOT within `/work/repo` (component-wise).
+pub fn path_within(path: &str, root: &str, cwd: &str) -> bool {
+    let p = lexical_components(path, cwd);
+    let r = lexical_components(root, "");
+    r.len() <= p.len() && p[..r.len()] == r[..]
+}
+
+pub fn path_matches_policy(text_path: &str, policy: &PathPolicy, cwd: &str) -> bool {
+    if let Some(exact) = &policy.exact {
+        return exact.as_str() == text_path;
+    }
+    if let Some(within_root) = &policy.within {
+        return path_within(text_path, within_root, cwd);
+    }
+    if let Some(outside_root) = &policy.outside {
+        return !path_within(text_path, outside_root, cwd);
+    }
+    false
+}
+
+// ── Ordinary predicate satisfaction (ask/deny) ──────────────────────────────
+
+fn state_class(state: EvidenceState) -> EvidenceClass {
+    match state {
+        EvidenceState::Complete => EvidenceClass::Complete,
+        EvidenceState::Opaque(_) => EvidenceClass::Opaque,
+        EvidenceState::Invalid(_) => EvidenceClass::Invalid,
+    }
+}
+
+pub fn predicate_holds(m: &grammar::Match, f: &PartFacts) -> bool {
+    let classification = m.classification;
+    let raw = m.raw.as_ref();
+    let arguments = m.arguments.as_ref();
+    let options = m.options.as_ref();
+    let environment = m.environment.as_ref();
+    let redirects = m.redirects.as_ref();
+    let paths = m.paths.as_ref();
+    let facts = m.facts.as_ref();
+    let nested_parts = m.nested_parts.as_ref();
+
+    if let Some(cls) = classification
+        && cls != state_class(f.part.state)
+    {
+        return false;
+    }
+    if let Some(pattern) = raw
+        && !glob(&f.part.raw, pattern)
+    {
+        return false;
+    }
+    if let Some(a) = arguments
+        && !arguments_holds(a, f.positionals)
+    {
+        return false;
+    }
+    if let Some(o) = options
+        && !options_holds(o, f)
+    {
+        return false;
+    }
+    if let Some(e) = environment
+        && !environment_holds(e, &f.part.assigns)
+    {
+        return false;
+    }
+    if let Some(r) = redirects
+        && !redirects_holds(r, &f.part.redirects)
+    {
+        return false;
+    }
+    if let Some(p) = paths
+        && !paths_matcher_holds(p, f.path_coords)
+    {
+        return false;
+    }
+    if let Some(fm) = facts
+        && !facts_matcher_holds(fm, &f.part.facts)
+    {
+        return false;
+    }
+    if let Some(np) = nested_parts
+        && !nested_matcher_holds(np, f.nested)
+    {
+        return false;
+    }
+    true
+}
+
+/// Design's argument predicates (ordinary ask/deny): `exact` = anchored
+/// positional-token sequence (the listed tokens match positionally from 0,
+/// unrelated trailing evidence is absent from the predicate — denies need
+/// not describe every argument); `prefix` = same anchored semantics kept
+/// for vocabulary symmetry; `containsAny` = ∃ token × ∃ glob.
+/// For allow, `exact` means total coverage of the positional list (see
+/// allow_covers) — the action-sensitive meaning of one selector object.
+fn arguments_holds(a: &grammar::ArgumentsMatcher, positionals: &[ArgToken]) -> bool {
+    if a.exact.is_some() && (a.prefix.is_some() || a.remainder.is_some()) {
+        return false;
+    }
+    if let Some(exact) = &a.exact {
+        if positionals.len() < exact.len() {
+            return false;
+        }
+        if positionals[..exact.len()]
             .iter()
-            .any(|g| ctx.cleaned_argv.iter().any(|t| glob(t, g)));
-        if !holds {
+            .map(|t| t.text.as_str())
+            .ne(exact.iter().map(|s| s.as_str()))
+        {
             return false;
         }
     }
-    if let Some(pattern) = &rule.pattern {
-        if !glob(ctx.raw, pattern) {
-            return false;
-        }
+    if let Some(prefix) = &a.prefix
+        && (positionals.len() < prefix.len()
+            || positionals[..prefix.len()]
+                .iter()
+                .map(|t| t.text.as_str())
+                .ne(prefix.iter().map(|s| s.as_str())))
+    {
+        return false;
     }
-    if let Some(class) = rule.classification {
-        let is_static = super::grammar::Classification::Static == class;
-        if ctx.static_part != is_static {
-            return false;
-        }
+    if let Some(globs) = &a.contains_any
+        && !globs
+            .iter()
+            .any(|g| positionals.iter().any(|t| glob(&t.text, g)))
+    {
+        return false;
     }
-    if let Some(flags) = &rule.flag {
-        for (name, presence) in flags {
-            let found = ctx.flags.present.contains_key(name);
-            let holds = match presence {
-                Present => found,
-                super::grammar::FlagPresence::Absent => !found,
+    true
+}
+
+fn options_holds(o: &grammar::OptionsMatcher, f: &PartFacts) -> bool {
+    if let Some(none) = o.none
+        && none
+        && !f.canonical.is_empty()
+    {
+        return false;
+    }
+    if let Some(present_all) = &o.present_all
+        && !present_all.iter().all(|id| f.canonical.contains_key(id))
+    {
+        return false;
+    }
+    if let Some(present_any) = &o.present_any
+        && !present_any.iter().any(|id| f.canonical.contains_key(id))
+    {
+        return false;
+    }
+    if let Some(absent_all) = &o.absent_all
+        && absent_all.iter().any(|id| f.canonical.contains_key(id))
+    {
+        return false;
+    }
+    if let Some(values) = &o.values
+        && !values.iter().all(|(id, globs)| {
+            f.canonical.get(id).map(|occs| {
+                occs.iter().any(|occ| {
+                    occ.values
+                        .iter()
+                        .any(|(v, _)| globs.iter().any(|g| glob(v, g)))
+                })
+            }) == Some(true)
+        })
+    {
+        return false;
+    }
+    // positional `containsAny` in the design maps to arguments, and an
+    // `allowed` policy never participates in ordinary matching
+    true
+}
+
+fn env_value_text(a: &EnvAssign) -> &str {
+    match a.text.split_once('=') {
+        Some((_, v)) => v,
+        None => "",
+    }
+}
+
+fn env_test_matches(test: &EnvironmentTest, a: &EnvAssign) -> bool {
+    if test.name != a.name {
+        return false;
+    }
+    if let Some(v) = &test.value
+        && !glob(env_value_text(a), v)
+    {
+        return false;
+    }
+    if let Some(true) = test.prefix {
+        // every recorded assignment is a command-prefix assignment
+    }
+    true
+}
+
+fn environment_holds(e: &grammar::EnvironmentMatcher, assigns: &[EnvAssign]) -> bool {
+    stress_none_env(e, assigns) && existentials(e, assigns) && universals(e, assigns)
+}
+
+fn stress_none_env(e: &grammar::EnvironmentMatcher, assigns: &[EnvAssign]) -> bool {
+    if let Some(true) = e.none
+        && !assigns.is_empty()
+    {
+        return false;
+    }
+    true
+}
+
+fn existentials(e: &grammar::EnvironmentMatcher, assigns: &[EnvAssign]) -> bool {
+    let Some(any) = &e.any else { return true };
+    if !any
+        .iter()
+        .any(|test| assigns.iter().any(|a| env_test_matches(test, a)))
+    {
+        return false;
+    }
+    true
+}
+
+fn universals(e: &grammar::EnvironmentMatcher, assigns: &[EnvAssign]) -> bool {
+    let Some(all) = &e.all else { return true };
+    all.iter()
+        .all(|test| assigns.iter().any(|a| env_test_matches(test, a)))
+}
+
+/// `any`/`all`/`none` semantics: none = zero items; any = ∃ item × ∃ entry;
+/// all = ∀ item ∃ entry.
+fn redirects_holds(r: &grammar::RedirectMatcher, redirects: &[RedirectObs]) -> bool {
+    if let Some(true) = r.none
+        && !redirects.is_empty()
+    {
+        return false;
+    }
+    if let Some(any) = &r.any
+        && !redirects
+            .iter()
+            .any(|o| any.iter().any(|test| redirect_test_holds(test, o)))
+    {
+        return false;
+    }
+    if let Some(all) = &r.all
+        && !redirects
+            .iter()
+            .all(|o| any_of(all, |test| redirect_test_holds(test, o)))
+    {
+        return false;
+    }
+    true
+}
+
+fn redirect_test_holds(test: &RedirectTest, o: &RedirectObs) -> bool {
+    let op_ok = match test.operator {
+        Some(op) => Some(op) == o.op,
+        None => true,
+    };
+    let fd_ok = match test.source_fd {
+        Some(sel) => {
+            let want = match sel {
+                grammar::FdSelector::Default => None,
+                grammar::FdSelector::Number(n) => Some(n),
             };
-            if !holds {
-                return false;
+            want == o.source_fd
+        }
+        None => true,
+    };
+    let kind_ok = match test.target_kind {
+        Some(grammar::TargetKindKind::LiteralPath) => !o.is_fd_target,
+        Some(grammar::TargetKindKind::Fd) => o.is_fd_target,
+        None => true,
+    };
+    op_ok && fd_ok && kind_ok
+}
+
+/// Coordinate selector (static, from config) vs one runtime coordinate tag.
+pub fn coordinate_matches(sel: &PathCoordinateSelector, tag: &PathSourceTag) -> bool {
+    match tag {
+        PathSourceTag::Argument { index } => match &sel.argument {
+            Some(pc) => match pc {
+                grammar::PositionalCoordinate::N {
+                    index: n,
+                    remainder,
+                } => *n == *index || *remainder,
+                grammar::PositionalCoordinate::All { all: true } => true,
+                grammar::PositionalCoordinate::All { all: false } => false,
+            },
+            None => false,
+        },
+        PathSourceTag::OptionValue {
+            canonical,
+            occurrence,
+            value_ordinal,
+        } => match &sel.option_value {
+            Some(oc) => {
+                oc.option.as_str() == canonical.as_str()
+                    && oc
+                        .occurrence
+                        .map(|o| o.selects(*occurrence))
+                        .unwrap_or(true)
+                    && oc
+                        .value_ordinal
+                        .map(|o| o.selects(*value_ordinal))
+                        .unwrap_or(true)
             }
+            None => false,
+        },
+        PathSourceTag::Environment { occurrence } => match &sel.environment {
+            Some(o) => o.selects(*occurrence),
+            None => false,
+        },
+        PathSourceTag::AnalyzerFact {
+            analyzer,
+            name,
+            occurrence,
+        } => match &sel.analyzer_fact {
+            Some(fc) => {
+                fc.name.as_str() == *name
+                    && fc
+                        .occurrence
+                        .map(|o| o.selects(*occurrence))
+                        .unwrap_or(true)
+                    && fc
+                        .analyzer
+                        .as_deref()
+                        .map(|a| a == *analyzer)
+                        .unwrap_or(true)
+            }
+            None => false,
+        },
+    }
+}
+
+/// Ask/deny path predicates over the runtime coordinates they may select.
+pub fn paths_matcher_holds(p: &grammar::PathsMatcher, coords: &[PathCoordinateObs]) -> bool {
+    if let Some(true) = p.none
+        && !coords.is_empty()
+    {
+        return false;
+    }
+    if let Some(any) = &p.any {
+        if !any.is_empty()
+            && !any.iter().any(|entry| {
+                coords
+                    .iter()
+                    .any(|c| coordinate_matches(&entry.coordinate, &c.source))
+            })
+        {
+            return false;
+        }
+        if any.is_empty() {
+            return false;
         }
     }
-    if let Some(flag_values) = &rule.flag_value {
-        // `flagValue` keys are anyOf across their map: each entry checks that
-        // the named flag (whichever alias carried it) has A value matching the
-        // glob — the same predicate expressed through alias spellings.
-        let holds = flag_values.iter().any(|(name, value_glob)| {
-            ctx.flags
-                .present
-                .get(name)
-                .map(|values| values.iter().any(|v| glob(v, value_glob)))
-                .unwrap_or(false)
-        });
-        if !holds {
+    if let Some(all) = &p.all {
+        if all.is_empty() {
+            return false;
+        }
+        if !coords.is_empty()
+            && !coords.iter().all(|c| {
+                all.iter()
+                    .any(|entry| coordinate_matches(&entry.coordinate, &c.source))
+            })
+        {
             return false;
         }
     }
     true
 }
 
+pub fn facts_matcher_holds(fm: &grammar::FactsMatcher, facts: &[FactObs]) -> bool {
+    let matches_entry = |e: &FactTest, fact: &FactObs| -> bool {
+        e.name == fact.fact_name
+            && e.analyzer
+                .as_ref()
+                .map(|a| a.as_str() == fact.analyzer_id)
+                .unwrap_or(true)
+            && e.value
+                .as_ref()
+                .map(|v| glob(&fact.value, v))
+                .unwrap_or(true)
+    };
+    if let Some(true) = fm.none
+        && !facts.is_empty()
+    {
+        return false;
+    }
+    if let Some(any) = &fm.any
+        && !any
+            .iter()
+            .any(|e| facts.iter().any(|f| matches_entry(e, f)))
+    {
+        return false;
+    }
+    if let Some(all) = &fm.all {
+        if all.is_empty() {
+            return false;
+        }
+        if !facts.iter().all(|f| any_of(all, |e| matches_entry(e, f))) {
+            return false;
+        }
+    }
+    true
+}
+
+fn nested_test(e: &grammar::NestedPartTest, n: &NestedResult) -> bool {
+    if let Some(relation) = e.relation
+        && relation != n.relation
+    {
+        return false;
+    }
+    if let Some(exec) = &e.executable
+        && n.executable.as_deref() != Some(exec.as_str())
+    {
+        return false;
+    }
+    if let Some(profile) = &e.profile
+        && n.profile_id.as_deref() != Some(profile.as_str())
+    {
+        return false;
+    }
+    if let Some(analyzer) = &e.analyzer
+        && n.analyzer.map(|a| a != analyzer.as_str()).unwrap_or(true)
+    {
+        return false;
+    }
+    if let Some(state) = e.state
+        && state_class(n.state) != state
+    {
+        return false;
+    }
+    if let Some(verdict) = e.verdict
+        && verdict != n.verdict
+    {
+        return false;
+    }
+    if let Some(occ) = e.occurrence
+        && !occ.selects(n.relation_ordinal)
+    {
+        return false;
+    }
+    true
+}
+
+pub fn nested_matcher_holds(np: &grammar::NestedPartsMatcher, nested: &[NestedResult]) -> bool {
+    if let Some(true) = np.none
+        && !nested.is_empty()
+    {
+        return false;
+    }
+    if let Some(any) = &np.any
+        && !any.iter().any(|e| nested.iter().any(|n| nested_test(e, n)))
+    {
+        return false;
+    }
+    if let Some(all) = &np.all {
+        if all.is_empty() {
+            return false;
+        }
+        if !nested.iter().all(|n| any_of(all, |e| nested_test(e, n))) {
+            return false;
+        }
+    }
+    true
+}
+
+fn any_of<T, F: Fn(&T) -> bool>(entries: &[T], f: F) -> bool {
+    !entries.is_empty() && entries.iter().any(f)
+}
+
+// ── Allow coverage validation (only reached for action = allow) ─────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoverageCode {
+    AllowEvidenceNotComplete,
+    AllowCoverageMissing,
+    UnknownOption,
+    RequiredOptionMissing,
+    OptionNotRepeatable,
+    OptionNotAllowed,
+    OptionValuesUncovered,
+    RemainderUncovered,
+    RedirectPolicyUncovered,
+}
+
+impl CoverageCode {
+    pub fn stable_code(self) -> &'static str {
+        match self {
+            CoverageCode::AllowEvidenceNotComplete => reason::ALLOW_EVIDENCE_NOT_COMPLETE,
+            CoverageCode::AllowCoverageMissing => reason::ALLOW_COVERAGE_MISSING,
+            CoverageCode::UnknownOption => reason::UNKNOWN_OPTION,
+            CoverageCode::RequiredOptionMissing => reason::REQUIRED_OPTION_MISSING,
+            CoverageCode::OptionNotRepeatable => reason::OPTION_NOT_REPEATABLE,
+            CoverageCode::OptionNotAllowed => reason::OPTION_NOT_ALLOWED,
+            CoverageCode::OptionValuesUncovered => reason::OPTION_VALUES_UNCOVERED,
+            CoverageCode::RemainderUncovered => reason::REMAINDER_UNCOVERED,
+            CoverageCode::RedirectPolicyUncovered => reason::REDIRECT_POLICY_UNCOVERED,
+        }
+    }
+}
+
+/// Validate the total coverage proof of an allow `match`.
+///
+/// Statically validated preconditions: `classification: "complete"`, no `raw`
+/// predicate, no `redirects` matcher, explicit policy for every other
+/// dimension, `prefix` always has an explicit `remainder`, `exact` has none.
+///
+/// `effective_redirect` is the resolved policy bundle (config default →
+/// profile override → allow-rule override); `cwd` is the letter command cwd.
+#[allow(clippy::too_many_lines)]
+pub fn allow_covers(
+    m: &grammar::Match,
+    ctx: &PartFacts,
+    effective_redirect: &grammar::RedirectPolicy,
+    cwd: &str,
+) -> Result<(), Vec<CoverageCode>> {
+    let mut failures: Vec<CoverageCode> = Vec::new();
+
+    if !ctx.part.state.can_allow() {
+        failures.push(CoverageCode::AllowEvidenceNotComplete);
+        return Err(failures);
+    }
+    if !matches!(m.classification, Some(EvidenceClass::Complete)) {
+        failures.push(CoverageCode::AllowEvidenceNotComplete);
+        return Err(failures);
+    }
+
+    // ── arguments ──
+    match &m.arguments {
+        Some(a) if a.exact.is_some() => {
+            match exact_covers_args(a.exact.as_ref().unwrap(), ctx.positionals) {
+                Ok(()) => {}
+                Err(code) => failures.push(code),
+            }
+        }
+        Some(a) if a.prefix.is_some() && a.remainder.is_some() => {
+            let prefix = a.prefix.as_ref().unwrap();
+            let prefix_ok = ctx.prefix_matches_literal(prefix);
+            match prefix_ok {
+                Ok(()) => {
+                    let rest = &ctx.positionals[prefix.len()..];
+                    match &a.remainder.as_ref().unwrap() {
+                        RemainderPolicy::None { none: true } => {
+                            if !rest.is_empty() {
+                                failures.push(CoverageCode::RemainderUncovered);
+                            }
+                        }
+                        RemainderPolicy::None { none: false } => {
+                            failures.push(CoverageCode::AllowCoverageMissing);
+                        }
+                        RemainderPolicy::Each { each } => {
+                            if rest.iter().any(|t| !remainder_fits(each, t, cwd)) {
+                                failures.push(CoverageCode::RemainderUncovered);
+                            }
+                        }
+                    }
+                }
+                Err(code) => failures.push(code),
+            }
+        }
+        _ => failures.push(CoverageCode::AllowCoverageMissing),
+    }
+
+    // ── options ──
+    match &m.options {
+        Some(o) if o.none == Some(true) && o.allowed.is_none() => {
+            if !ctx.canonical.is_empty() {
+                failures.push(CoverageCode::OptionNotAllowed);
+            }
+        }
+        Some(o) if o.allowed.is_some() => {
+            let allowed = o.allowed.as_ref().unwrap();
+            // every observed occurrence satisfied by exactly one entry shape
+            for (canonical, occs) in &ctx.canonical {
+                match allowed
+                    .iter()
+                    .find(|c| c.option.as_str() == canonical.as_str())
+                {
+                    None => failures.push(CoverageCode::OptionNotAllowed),
+                    Some(entry) => {
+                        if occs.len() > 1 && !entry.repeatable {
+                            failures.push(CoverageCode::OptionNotRepeatable);
+                        }
+                        if !option_values_covers(entry, occs) {
+                            failures.push(CoverageCode::OptionValuesUncovered);
+                        }
+                    }
+                }
+            }
+            // required entries must actually occur
+            for entry in allowed {
+                let seen = ctx
+                    .canonical
+                    .get(&entry.option)
+                    .map(|v| !v.is_empty())
+                    .unwrap_or(false);
+                if entry.required && !seen {
+                    failures.push(CoverageCode::RequiredOptionMissing);
+                }
+            }
+        }
+        _ => failures.push(CoverageCode::AllowCoverageMissing),
+    }
+
+    // ── environment ──
+    match &m.environment {
+        Some(e) if e.none == Some(true) && e.any.is_none() && e.all.is_none() => {
+            if !ctx.part.assigns.is_empty() {
+                failures.push(CoverageCode::AllowCoverageMissing);
+            }
+        }
+        Some(e) if e.all.is_some() => {
+            let entries = e.all.as_ref().unwrap();
+            for assign in &ctx.part.assigns {
+                let covered = assign.resolvable
+                    && entries.iter().any(|test: &EnvironmentTest| {
+                        test.name == assign.name
+                            && test
+                                .value
+                                .as_ref()
+                                .map(|v| v.as_str() == env_value_text(assign))
+                                .unwrap_or(true)
+                            && test.prefix.unwrap_or(true)
+                    });
+                if !covered {
+                    failures.push(CoverageCode::AllowCoverageMissing);
+                    break;
+                }
+            }
+        }
+        _ => failures.push(CoverageCode::AllowCoverageMissing),
+    }
+
+    // ── redirects: resolved effective policy covers every occurrence ──
+    if let Err(code) = redirect_policy_covers(&effective_redirect.redirects, &ctx.part.redirects) {
+        failures.push(code);
+    }
+    if let Err(code) = redirect_paths_covers(&effective_redirect.paths, &ctx.part.redirects, cwd) {
+        failures.push(code);
+    }
+
+    // ── non-redirect paths ──
+    match &m.paths {
+        Some(p) if p.none == Some(true) && p.any.is_none() && p.all.is_none() => {
+            if !ctx.path_coords.is_empty() {
+                failures.push(CoverageCode::AllowCoverageMissing);
+            }
+        }
+        Some(p) if p.all.is_some() => {
+            let entries = p.all.as_ref().unwrap();
+            for coord in ctx.path_coords {
+                let covered = coord.resolvable
+                    && entries.iter().any(|entry: &grammar::PathEntry| {
+                        coordinate_matches(&entry.coordinate, &coord.source)
+                            && path_matches_policy(&coord.path, &entry.policy(), cwd)
+                    });
+                if !covered {
+                    failures.push(CoverageCode::AllowCoverageMissing);
+                    break;
+                }
+            }
+        }
+        _ => failures.push(CoverageCode::AllowCoverageMissing),
+    }
+
+    // ── facts ──
+    match &m.facts {
+        Some(fm) if fm.none == Some(true) && fm.any.is_none() && fm.all.is_none() => {
+            if !ctx.part.facts.is_empty() {
+                failures.push(CoverageCode::AllowCoverageMissing);
+            }
+        }
+        Some(fm) if fm.all.is_some() => {
+            let entries = fm.all.as_ref().unwrap();
+            for fact in &ctx.part.facts {
+                let covered = entries.iter().any(|e: &FactTest| {
+                    e.name == fact.fact_name
+                        && e.analyzer
+                            .as_ref()
+                            .map(|a| a.as_str() == fact.analyzer_id)
+                            .unwrap_or(true)
+                        && e.value
+                            .as_ref()
+                            .map(|v| v.as_str() == fact.value)
+                            .unwrap_or(true)
+                });
+                if !covered {
+                    failures.push(CoverageCode::AllowCoverageMissing);
+                    break;
+                }
+            }
+        }
+        _ => failures.push(CoverageCode::AllowCoverageMissing),
+    }
+
+    // ── nested parts ──
+    match &m.nested_parts {
+        Some(np) if np.none == Some(true) && np.any.is_none() && np.all.is_none() => {
+            if !ctx.nested.is_empty() {
+                failures.push(CoverageCode::AllowCoverageMissing);
+            }
+        }
+        Some(np) if np.all.is_some() => {
+            let entries = np.all.as_ref().unwrap();
+            for n in ctx.nested {
+                if !entries
+                    .iter()
+                    .any(|e: &grammar::NestedPartTest| nested_test(e, n))
+                {
+                    failures.push(CoverageCode::AllowCoverageMissing);
+                    break;
+                }
+            }
+        }
+        _ => failures.push(CoverageCode::AllowCoverageMissing),
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(dedupe(failures))
+    }
+}
+
+fn dedupe(v: Vec<CoverageCode>) -> Vec<CoverageCode> {
+    let mut out: Vec<CoverageCode> = Vec::new();
+    for c in v {
+        if !out.contains(&c) {
+            out.push(c);
+        }
+    }
+    out
+}
+
+impl<'a> PartFacts<'a> {
+    fn prefix_matches_literal(&self, prefix: &[String]) -> Result<(), CoverageCode> {
+        if self.positionals.len() < prefix.len()
+            || self.positionals[..prefix.len()]
+                .iter()
+                .zip(prefix.iter())
+                .any(|(t, e)| t.text != e.as_str() || !t.resolvable)
+        {
+            return Err(CoverageCode::AllowCoverageMissing);
+        }
+        Ok(())
+    }
+}
+
+fn exact_covers_args(exact: &[String], positionals: &[ArgToken]) -> Result<(), CoverageCode> {
+    if positionals.len() != exact.len()
+        || positionals
+            .iter()
+            .zip(exact.iter())
+            .any(|(t, e)| t.text != e.as_str() || !t.resolvable)
+    {
+        return Err(CoverageCode::AllowCoverageMissing);
+    }
+    Ok(())
+}
+
+fn option_values_covers(entry: &OptionCoverage, occs: &[OptionOccurrenceView]) -> bool {
+    let Some(coverage) = &entry.values else {
+        // consumed/inline values must be selected when any exist
+        return !occs.iter().any(|o| !o.values.is_empty());
+    };
+    match coverage {
+        ValuesCoverage::Each { each } => occs.iter().all(|o| {
+            o.values
+                .iter()
+                .all(|(v, resolvable)| *resolvable && each.iter().any(|want| want == v))
+        }),
+        ValuesCoverage::None { none: true } => occs.iter().all(|o| o.values.is_empty()),
+        ValuesCoverage::None { none: false } => false,
+    }
+}
+
+fn remainder_fits(selector: &TokenSelector, token: &ArgToken, cwd: &str) -> bool {
+    match selector {
+        TokenSelector::Exact(list) => {
+            token.resolvable && list.iter().any(|t| t.as_str() == token.text)
+        }
+        TokenSelector::Within(root) => token.resolvable && path_within(&token.text, root, cwd),
+    }
+}
+
+/// Every redirect occurrence is covered by some redirect entry (structure).
+fn redirect_policy_covers(
+    coverage: &grammar::RedirectCoverage,
+    redirects: &[RedirectObs],
+) -> Result<(), CoverageCode> {
+    let entries = match coverage {
+        grammar::RedirectCoverage::None { none: true } => {
+            return if redirects.is_empty() {
+                Ok(())
+            } else {
+                Err(CoverageCode::RedirectPolicyUncovered)
+            };
+        }
+        grammar::RedirectCoverage::None { none: false } => {
+            return Err(CoverageCode::RedirectPolicyUncovered);
+        }
+        grammar::RedirectCoverage::All { all } => all,
+    };
+    for o in redirects {
+        // unsupported operator form or dynamic target can never allow
+        if o.op.is_none() || !o.target_resolvable {
+            return Err(CoverageCode::RedirectPolicyUncovered);
+        }
+        let op = o.op.unwrap();
+        if !any_of(entries, |e: &grammar::RedirectEntry| {
+            e.operator == op
+                && e.occurrence.selects(o.ordinal)
+                && fd_matches(&e.source_fd, o.source_fd)
+                && target_kind_matches(e.target.kind, o)
+        }) {
+            return Err(CoverageCode::RedirectPolicyUncovered);
+        }
+    }
+    Ok(())
+}
+
+fn fd_matches(selector: &grammar::FdSelector, observed: Option<u32>) -> bool {
+    match selector {
+        grammar::FdSelector::Default => observed.is_none(),
+        grammar::FdSelector::Number(n) => observed == Some(*n),
+    }
+}
+
+fn target_kind_matches(kind: grammar::TargetKindKind, o: &RedirectObs) -> bool {
+    if o.op.is_none() || !o.target_resolvable {
+        return false;
+    }
+    match kind {
+        grammar::TargetKindKind::LiteralPath => !o.is_fd_target,
+        grammar::TargetKindKind::Fd => o.is_fd_target,
+    }
+}
+
+/// Every literal redirect target satisfies the policy's redirect-path entries.
+fn redirect_paths_covers(
+    coverage: &grammar::PathCoverage,
+    redirects: &[RedirectObs],
+    cwd: &str,
+) -> Result<(), CoverageCode> {
+    let entries = match coverage {
+        grammar::PathCoverage::None { none: true } => {
+            return if redirects
+                .iter()
+                .all(|o| o.is_fd_target || !o.target_resolvable || o.op.is_none())
+            {
+                Ok(())
+            } else {
+                Err(CoverageCode::RedirectPolicyUncovered)
+            };
+        }
+        grammar::PathCoverage::None { none: false } => {
+            return Err(CoverageCode::RedirectPolicyUncovered);
+        }
+        grammar::PathCoverage::All { all } => all,
+    };
+    for o in redirects {
+        if o.op.is_none() || !o.target_resolvable || o.is_fd_target {
+            continue; // fd targets and dynamic targets are structural (above)
+        }
+        let op = o.op.unwrap();
+        if !any_of(entries, |e: &grammar::PathEntry| {
+            redirect_coordinate_matches(&e.coordinate, op, o.source_fd, o.ordinal)
+                && path_matches_policy(&o.target, &e.policy(), cwd)
+        }) {
+            return Err(CoverageCode::RedirectPolicyUncovered);
+        }
+    }
+    Ok(())
+}
+
+fn redirect_coordinate_matches(
+    sel: &PathCoordinateSelector,
+    op: grammar::RedirectOp,
+    fd: Option<u32>,
+    ordinal: u32,
+) -> bool {
+    sel.redirect
+        .as_ref()
+        .map(|rc| {
+            rc.operator == op
+                && fd_matches(&rc.source_fd, fd)
+                && rc.occurrence.map(|o| o.selects(ordinal)).unwrap_or(true)
+        })
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn argv(items: &[&str]) -> Vec<String> {
-        items.iter().map(|s| s.to_string()).collect()
-    }
-
-    #[test]
-    fn flags_with_arity_values() {
-        let arity: IndexMapLike = [
-            ("-C".to_string(), 1),
-            ("--force".to_string(), 0),
-            ("-m".to_string(), 1),
-        ]
-        .into_iter()
-        .collect();
-        let f = flags_of(
-            &argv(&["git", "-C", "/repo", "push", "--force", "origin", "main"]),
-            &arity,
-        );
-        assert!(f.present.contains_key("-C"));
-        assert_eq!(f.present.get("-C").unwrap().len(), 1);
-        assert_eq!(f.present.get("-C").unwrap()[0], "/repo");
-        assert!(f.present.contains_key("--force"));
-        // cleaned: flag tokens + consumed values removed
-        assert_eq!(f.cleaned_argv, argv(&["git", "push", "origin", "main"]));
-        assert!(f.fully_parsed);
-    }
-
-    #[test]
-    fn unknown_flag_blocks_fully_parsed() {
-        let arity: IndexMapLike = [("--force".to_string(), 0)].into_iter().collect();
-        let f = flags_of(&argv(&["git", "push", "--stealth-x"]), &arity);
-        assert_eq!(f.unrecognized, vec!["--stealth-x".to_string()]);
-        assert!(!f.fully_parsed);
-    }
-
-    #[test]
-    fn combined_shorts_are_unknown() {
-        let arity: IndexMapLike = [("-f".to_string(), 0)].into_iter().collect();
-        let f = flags_of(&argv(&["echo", "-abc"]), &arity);
-        assert_eq!(f.unrecognized, vec!["-abc".to_string()]);
-    }
-
-    #[test]
-    fn dash_dash_terminates() {
-        let arity: IndexMapLike = [("-f".to_string(), 0)].into_iter().collect();
-        let f = flags_of(&argv(&["cmd", "--", "-f"]), &arity);
-        assert!(f.present.is_empty());
-        assert_eq!(f.cleaned_argv, argv(&["cmd", "-f"]));
-        assert!(f.fully_parsed);
-    }
-
-    #[test]
-    fn inline_value_form() {
-        let arity: IndexMapLike = [("--long".to_string(), 0)].into_iter().collect();
-        let f = flags_of(&argv(&["cmd", "--long=x"]), &arity);
-        assert_eq!(f.present.get("--long").unwrap(), &vec!["x".to_string()]);
-    }
-
     #[test]
     fn glob_basics() {
-        assert!(glob("git status", "git status *")); // trailing " *" bare-form
+        assert!(glob("git status", "git status *"));
         assert!(glob("git status -v", "git status *"));
         assert!(glob("docker push foo", "docker *"));
         assert!(!glob("cat docker", "docker *"));
@@ -343,16 +1061,11 @@ mod tests {
     }
 
     #[test]
-    fn argv_sequence_prefix() {
-        let seq = ArgvSequence(vec![
-            ArgvToken::Word("git".into()),
-            ArgvToken::AnyOf {
-                any_of: vec!["push".into(), "pull".into()],
-            },
-        ]);
-        assert!(matches_argv(&seq.0, &argv(&["git", "push", "origin"])));
-        assert!(!matches_argv(&seq.0, &argv(&["git", "commit"])));
-        assert!(!matches_argv(&seq.0, &argv(&["git"])));
-        assert!(matches_argv(&seq.0, &argv(&["git", "push"])));
+    fn componeent_prefix_semantics() {
+        assert!(path_within("/work/repo", "/work/repo", "/"));
+        assert!(path_within("/work/repo/x", "/work/repo", "/"));
+        assert!(!path_within("/work/repo2", "/work/repo", "/"));
+        assert!(path_within("reports/a.txt", "/tmp", "/tmp/work"));
+        assert!(!path_within("reports/a.txt", "/var", "/tmp/work"));
     }
 }

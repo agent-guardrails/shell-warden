@@ -10,12 +10,18 @@
     "commands": [
       {
         "index": 0,
-        "raw": "curl https://mirror.example/file",
+        "raw": "rm -rf /etc/passwd",
         "cwd": "/repo"
       }
     ]
   },
   "expect": {
-    "verdict": "ask"
+    "verdict": "deny",
+    "commands": [
+      {
+        "index": 0,
+        "ruleId": "rm/no-etc"
+      }
+    ]
   }
 }

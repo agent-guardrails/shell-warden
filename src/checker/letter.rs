@@ -120,9 +120,11 @@ mod tests {
     #[test]
     fn rejects_wrong_version() {
         let s = sample().replace("\"version\":1", "\"version\":2");
-        assert!(Letter::from_bytes(s.as_bytes())
-            .unwrap_err()
-            .contains("version"));
+        assert!(
+            Letter::from_bytes(s.as_bytes())
+                .unwrap_err()
+                .contains("version")
+        );
     }
 
     #[test]
@@ -135,24 +137,30 @@ mod tests {
     #[test]
     fn rejects_unknown_field() {
         let s = sample().replace("\"raw\":", "\"argv\":[],\"raw\":");
-        assert!(Letter::from_bytes(s.as_bytes())
-            .unwrap_err()
-            .contains("schema violation"));
+        assert!(
+            Letter::from_bytes(s.as_bytes())
+                .unwrap_err()
+                .contains("schema violation")
+        );
     }
 
     #[test]
     fn rejects_index_mismatch() {
         let s = sample().replace("\"index\":0", "\"index\":3");
-        assert!(Letter::from_bytes(s.as_bytes())
-            .unwrap_err()
-            .contains("must equal position"));
+        assert!(
+            Letter::from_bytes(s.as_bytes())
+                .unwrap_err()
+                .contains("must equal position")
+        );
     }
 
     #[test]
     fn rejects_multiple_json_values() {
         let s = sample() + "{\"version\":1}";
-        assert!(Letter::from_bytes(s.as_bytes())
-            .unwrap_err()
-            .contains("not one JSON value"));
+        assert!(
+            Letter::from_bytes(s.as_bytes())
+                .unwrap_err()
+                .contains("not one JSON value")
+        );
     }
 }

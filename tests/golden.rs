@@ -76,16 +76,16 @@ fn subset_matches(actual: &Value, expect: &Value) -> bool {
 /// expect.message supports a `contains:` prefix (substring comparison, 10 §10.2
 /// runner behavior documented in tests/golden/_schema.txt).
 fn case_matches(actual: &Value, expect: &Value) -> bool {
-    if let Some(msg) = expect.get("message").and_then(Value::as_str) {
-        if let Some(needle) = msg.strip_prefix("contains:") {
-            let ok = actual["message"]
-                .as_str()
-                .map(|m| m.contains(needle))
-                .unwrap_or(false);
-            let mut e2 = expect.clone();
-            e2.as_object_mut().unwrap().remove("message");
-            return ok && subset_matches(actual, &e2);
-        }
+    if let Some(msg) = expect.get("message").and_then(Value::as_str)
+        && let Some(needle) = msg.strip_prefix("contains:")
+    {
+        let ok = actual["message"]
+            .as_str()
+            .map(|m| m.contains(needle))
+            .unwrap_or(false);
+        let mut e2 = expect.clone();
+        e2.as_object_mut().unwrap().remove("message");
+        return ok && subset_matches(actual, &e2);
     }
     subset_matches(actual, expect)
 }

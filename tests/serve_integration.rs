@@ -3,7 +3,7 @@
 // are held against the shim's expectations (opencode-shell-warden-hook,
 // test/helpers/mock-engine.mjs and src/supervisor.ts route()).
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 
@@ -145,14 +145,18 @@ fn handshake_and_check_follow_the_wire_contract() {
     assert_eq!(reply["result"]["engine"]["name"], "shell-warden");
     assert!(reply["result"]["capabilities"].is_object());
     assert_eq!(reply["result"]["config"]["stages"], json!(["s1"]));
-    assert!(reply["result"]["config"]["source"]
-        .as_str()
-        .unwrap()
-        .ends_with("config.jsonc"));
-    assert!(reply["result"]["config"]["loadedAt"]
-        .as_str()
-        .unwrap()
-        .ends_with('Z'));
+    assert!(
+        reply["result"]["config"]["source"]
+            .as_str()
+            .unwrap()
+            .ends_with("config.jsonc")
+    );
+    assert!(
+        reply["result"]["config"]["loadedAt"]
+            .as_str()
+            .unwrap()
+            .ends_with('Z')
+    );
 
     // policy/check (02 §2.4): walk verdict, same id. The audit/event
     // notification (02 §2.5) precedes it (02 §2.10) — read it first.
@@ -318,10 +322,12 @@ fn stage_walk_end_to_end_with_real_tools() {
     assert_eq!(reply["result"]["verdict"], "deny");
     assert_eq!(reply["result"]["commands"][0]["verdict"], "deny");
     assert_eq!(reply["result"]["commands"][0]["stage"], "s2");
-    assert!(reply["result"]["commands"][0]["reason"]
-        .as_str()
-        .unwrap()
-        .contains("spawn failure"));
+    assert!(
+        reply["result"]["commands"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("spawn failure")
+    );
 }
 
 #[test]
