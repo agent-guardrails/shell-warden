@@ -305,7 +305,10 @@ fn foreign_pv_and_overlong_message_violate() {
         });
         let (reason, violation) =
             on_error(r.invoke(&cmd(), &invocation(), Instant::now()).unwrap());
-        assert!(violation, "foreign-pv: expected violation, reason: {reason}");
+        assert!(
+            violation,
+            "foreign-pv: expected violation, reason: {reason}"
+        );
         assert!(
             reason.contains("protocolVersion"),
             "foreign-pv: reason was: {reason}"
