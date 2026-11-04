@@ -1,31 +1,52 @@
-// Parsing: tokenizer, classification and normalization (07 §§7.2–7.4).
+// Parsing: tokenizer and classification (07 §§7.2–7.4 + design/shell-warden-
+// config-v2.md §Parsing, parts, and evidence states).
 //
-// One scanner turns a raw command into segments per operator; segments carry
-// resolved tokens plus captured substitution texts for the recursive splitter
-// (split.rs). Anything unresolvable (expansions, brace/process substitution,
-// heredocs, malformed quoting, residual unknown operators) marks the affected
-// tokens non-resolvable ⇒ the part is `opaque` (07 §7.3). `allow` never
-// originates from opaque parts (I10).
+// One scanner turns raw command text into segments per operator. Segments
+// carry decoded literal tokens, redirect records (operator + source FD +
+// target), and captured substitution texts for the recursive splitter.
+//
+// Literal-vs-active word classes (design §Parsing): single quotes are literal;
+// escaped metacharacters are literal; double quotes stay literal without an
+// active expansion; active `$VAR`/`${…}`/`$(…)`/backticks/arith/process
+// substitution, unquoted glob syntax, unquoted brace expansion, and any tilde
+// a shell would expand are opaque (⇒ the affected token is not resolvable).
+// A literal regex `$` inside quotes, or `\$`, is literal.
+
+use super::grammar::RedirectOp;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokKind {
     /// Normal argv word.
     Word,
-    /// Redirect target (excluded from argv; joins path evidence when pathlike).
+    /// Redirect target (excluded from argv; joins redirect path evidence).
     RedirectTarget,
+}
+
+/// Token span in the raw source (byte offsets).
+pub type Span = (usize, usize);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Quoting {
+    None,
+    Single,
+    Double,
+    Escaped,
 }
 
 #[derive(Debug, Clone)]
 pub struct Tok {
     pub kind: TokKind,
-    /// Decoded text (quotes resolved). Unresolvable tokens keep the raw textual
-    /// form for diagnostics/raw matching; decision logic must consult
-    /// `resolvable` first.
+    /// Decoded text (quotes resolved). Unresolvable tokens keep the raw
+    /// textual form for diagnostics; decision logic must consult `resolvable`.
     pub text: String,
+    /// Fully known literal value (no active expansion / glob / brace / tilde /
+    /// broken quoting).
     pub resolvable: bool,
-    /// Inner texts of executions found inside this token: `$(…)`, backticks,
-    /// process substitution, `-c` operands (split recursively).
-    pub subtexts: Vec<String>,
+    pub quoting: Quoting,
+    /// Inner texts of active executions/expansions found inside this token
+    /// (`$(…)`, backticks, process substitution) — split recursively.
+    pub subtexts: Vec<(String, Span)>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,70 +56,123 @@ pub enum Operator {
     And,
     Semi,
     Amp,
-    Redirect,
 }
 
 #[derive(Debug, Clone)]
 pub enum Item {
-    Op(Operator),
     Tok(Tok),
+}
+
+/// Catalog-exact redirect operator plus raw unsupported markers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RawRedirOp {
+    Supported(RedirectOp),
+    Unsupported,
+}
+
+#[derive(Debug, Clone)]
+pub struct RedirectRecord {
+    pub op: RawRedirOp,
+    /// Explicit source FD digits (`2>`), None = default FD.
+    pub source_fd: Option<u32>,
+    pub target: Tok,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]
 pub struct Segment {
-    /// Raw slice this segment covers (for `pattern` matching).
+    /// Raw slice including the leading separator (for pattern matching).
     pub raw: String,
+    pub span: Span,
+    /// Operator directly before this segment (None = first segment).
+    pub sep: Option<Operator>,
     pub items: Vec<Item>,
+    /// Redirects found in this segment, source order.
+    pub redirects: Vec<RedirectRecord>,
+    /// Heredoc / here-string encountered: the part is invalid (closed until a
+    /// later design adds typed support — design §Action-sensitive matching).
+    pub heredoc: bool,
 }
 
 #[derive(Debug)]
 pub struct ScanResult {
     pub segments: Vec<Segment>,
-    /// Constructs even segment recovery refused (heredocs): whole input turns
-    /// opaque and raw-pattern matching only (§7.4 step 4 posture).
-    pub salvage_failed: bool,
+    /// True when a supported structure cannot be established for the whole
+    /// input (heredoc/body): every part ⇒ invalid (fail-closed).
+    pub malformed: bool,
 }
 
-// The scanner maintains a defensive state machine: some assignments are
-// overwritten before read on early-exit paths; clippy cannot see the loop
-// structure. Accepted at this function level.
-#[allow(unused_assignments)]
 pub fn scan(raw: &str) -> ScanResult {
     let chars: Vec<char> = raw.chars().collect();
+    match scan_chars(raw, &chars) {
+        Some(result) => result,
+        None => ScanResult {
+            segments: vec![Segment {
+                raw: raw.to_string(),
+                span: (0, raw.len()),
+                sep: None,
+                items: Vec::new(),
+                redirects: Vec::new(),
+                heredoc: true,
+            }],
+            malformed: true,
+        },
+    }
+}
+
+#[allow(unused_assignments)]
+fn scan_chars(_raw: &str, chars: &[char]) -> Option<ScanResult> {
     let n = chars.len();
     let mut segments: Vec<Segment> = Vec::new();
-    let mut items: Vec<Item> = Vec::new();
-    let mut salvage_failed = false;
+    let _items: Vec<Item> = Vec::new();
+    let mut redirects: Vec<RedirectRecord> = Vec::new();
+    let mut malformed = false;
 
-    let mut seg_start = 0usize;
+    let mut seg_start = 0usize; // byte offset
+    let mut seg_items: Vec<Item> = Vec::new();
+    let mut pending_sep: Option<Operator> = None;
+
     let mut cur_text = String::new();
+    let mut cur_start: Option<usize> = None;
     let mut cur_resolvable = true;
-    let mut cur_sub: Vec<String> = Vec::new();
+    let mut cur_quoting = Quoting::None;
+    let mut cur_sub: Vec<(String, Span)> = Vec::new();
+    let mut trailing_empty = false; // last op chain saw a redirect target
+
+    macro_rules! finish_token {
+        ($kind:expr) => {
+            if !cur_text.is_empty() {
+                // Spans are diagnostic bookkeeping only: end = decode length
+                // from the token start (never security-relevant).
+                let end = cur_start.unwrap_or(0) + cur_text.len().max(1);
+                seg_items.push(Item::Tok(Tok {
+                    kind: $kind,
+                    text: std::mem::take(&mut cur_text),
+                    resolvable: cur_resolvable,
+                    quoting: cur_quoting,
+                    subtexts: std::mem::take(&mut cur_sub),
+                    span: (cur_start.unwrap_or(0), end),
+                }));
+                cur_resolvable = true;
+                cur_quoting = Quoting::None;
+                cur_start = None;
+            }
+        };
+    }
 
     macro_rules! new_segment {
-        ($op:expr, $upto:expr) => {{
-            items.push(Item::Op($op));
-            let raw = chars[seg_start..$upto].iter().collect();
+        ($upto:expr) => {{
+            let rawslice: String = chars[seg_start..$upto].iter().collect();
             segments.push(Segment {
-                raw,
-                items: std::mem::take(&mut items),
+                raw: rawslice,
+                span: (seg_start, $upto),
+                sep: pending_sep.take(),
+                items: std::mem::take(&mut seg_items),
+                redirects: std::mem::take(&mut redirects),
+                heredoc: false,
             });
             seg_start = $upto;
         }};
-    }
-
-    macro_rules! finish_token_impl {
-        ($kind:expr) => {
-            if !cur_text.is_empty() {
-                items.push(Item::Tok(Tok {
-                    kind: $kind,
-                    text: std::mem::take(&mut cur_text),
-                    resolvable: cur_resolvable, // note: take() would reset bool to false
-                    subtexts: std::mem::take(&mut cur_sub),
-                }));
-                cur_resolvable = true;
-            }
-        };
     }
 
     let mut i = 0usize;
@@ -106,33 +180,45 @@ pub fn scan(raw: &str) -> ScanResult {
         let c = chars[i];
         match c {
             ' ' | '\t' | '\r' => {
-                finish_token_impl!(TokKind::Word);
+                finish_token!(TokKind::Word);
                 i += 1;
             }
             '\n' => {
-                finish_token_impl!(TokKind::Word);
-                new_segment!(Operator::Semi, i);
+                finish_token!(TokKind::Word);
+                trailing_empty = false;
+                new_segment!(i);
+                pending_sep = Some(Operator::Semi);
                 i += 1;
             }
             '#' if cur_text.is_empty() => {
-                // comment: the rest of the segment is decoration
-                finish_token_impl!(TokKind::Word);
-                new_segment!(Operator::Semi, i);
-                i = n; // discard the comment tail
+                // comment: the rest of the input is decoration
+                finish_token!(TokKind::Word);
+                new_segment!(i);
+                i = n;
                 break;
             }
-            '\'' => match (i + 1..n).find(|&j| chars[j] == '\'') {
-                Some(end) => {
-                    cur_text.extend(chars[i + 1..end].iter());
-                    i = end + 1;
+            '\'' => {
+                cur_quoting = Quoting::Single;
+                cur_start.get_or_insert(i);
+                match (i + 1..n).find(|&j| chars[j] == '\'') {
+                    Some(end) => {
+                        // single quotes are literal and fully resolved
+                        cur_text.extend(chars[i + 1..end].iter());
+                        cur_quoting = Quoting::None;
+                        cur_start = None;
+                        i = end + 1;
+                    }
+                    None => {
+                        // unterminated single quote: glued literal fragment
+                        cur_text.extend(chars[i..].iter());
+                        cur_resolvable = false;
+                        i = n;
+                    }
                 }
-                None => {
-                    cur_resolvable = false;
-                    cur_text.extend(chars[i..].iter());
-                    i = n;
-                }
-            },
+            }
             '"' => {
+                cur_quoting = Quoting::Double;
+                cur_start.get_or_insert(i);
                 let mut j = i + 1;
                 let mut tail = String::new();
                 let mut escaped = false;
@@ -155,15 +241,16 @@ pub fn scan(raw: &str) -> ScanResult {
                         break;
                     }
                     if ch == '$' || ch == '`' {
-                        // Expansions inside double quotes: unresolvable, inner
+                        // Active expansion inside double quotes: opaque; inner
                         // text captured for the recursive splitter.
                         cur_resolvable = false;
                         cur_text.push_str(&tail);
                         tail.clear();
-                        let (inner, next) = capture_expand(&chars, j, &cur_text, &mut cur_sub);
+                        let site_start = tail.len();
+                        let _ = site_start;
+                        let (inner, next) = capture_expand(chars, j, &mut cur_sub, i);
                         let _ = inner;
-                        cur_text.push('\u{fffd}'); // placeholder: the substitution site
-                        cur_resolvable = false;
+                        cur_text.push('\u{fffd}'); // §[replacement] site marker
                         j = next;
                         continue;
                     }
@@ -172,39 +259,48 @@ pub fn scan(raw: &str) -> ScanResult {
                 }
                 if ok {
                     cur_text.push_str(&tail);
+                    cur_quoting = Quoting::None;
+                    cur_start = None;
                     i = j + 1;
                 } else {
-                    cur_resolvable = false;
                     cur_text.extend(chars[i..].iter());
+                    cur_resolvable = false;
+                    cur_quoting = Quoting::None;
+                    cur_start = None;
                     i = n;
                 }
             }
             '\\' if i + 1 < n => {
+                cur_start.get_or_insert(i);
+                cur_quoting = Quoting::Escaped;
                 cur_text.push(unescape(chars[i + 1]));
                 i += 2;
             }
             '\\' => {
                 // dangling escape
-                cur_resolvable = false;
+                cur_start.get_or_insert(i);
                 cur_text.push('\\');
+                cur_resolvable = false;
                 i = n;
             }
             '$' => {
+                cur_start.get_or_insert(i);
                 cur_resolvable = false;
-                let (inner, next) = capture_expand(&chars, i, &cur_text, &mut cur_sub);
+                let (inner, next) = capture_expand(chars, i, &mut cur_sub, i);
                 let _ = inner;
                 cur_text.push('\u{fffd}');
                 i = next;
             }
             '`' => match (i + 1..n).find(|&j| chars[j] == '`') {
                 Some(end) => {
+                    cur_start.get_or_insert(i);
                     cur_resolvable = false;
-                    let _ = &cur_text;
-                    cur_sub.push(chars[i + 1..end].iter().collect());
+                    cur_sub.push((chars[i + 1..end].iter().collect::<String>(), (i, end + 1)));
                     cur_text.push('\u{fffd}');
                     i = end + 1;
                 }
                 None => {
+                    cur_start.get_or_insert(i);
                     cur_resolvable = false;
                     cur_text.extend(chars[i..].iter());
                     i = n;
@@ -212,104 +308,215 @@ pub fn scan(raw: &str) -> ScanResult {
             },
             '<' if i + 1 < n && chars[i + 1] == '(' => {
                 // process substitution <( … )
+                cur_start.get_or_insert(i);
                 cur_resolvable = false;
-                let close = find_balanced(&chars, i + 1, '(', ')');
-                cur_sub.push(chars[i + 2..close].iter().collect());
+                let close = find_balanced(chars, i + 1, '(', ')');
+                cur_sub.push((
+                    chars[i + 2..close].iter().collect::<String>(),
+                    (i, close + 1),
+                ));
                 cur_text.push('\u{fffd}');
                 i = close + 1;
             }
             '>' if i + 1 < n && chars[i + 1] == '(' => {
                 // process substitution >( … )
+                cur_start.get_or_insert(i);
                 cur_resolvable = false;
-                let close = find_balanced(&chars, i + 1, '(', ')');
-                cur_sub.push(chars[i + 2..close].iter().collect());
+                let close = find_balanced(chars, i + 1, '(', ')');
+                cur_sub.push((
+                    chars[i + 2..close].iter().collect::<String>(),
+                    (i, close + 1),
+                ));
                 cur_text.push('\u{fffd}');
                 i = close + 1;
             }
-            '{' if is_brace_expand(&chars, i) => {
+            '{' if is_brace_expand(chars, i) => {
+                cur_start.get_or_insert(i);
                 cur_resolvable = false;
                 cur_text.push('{');
                 i += 1;
             }
+            '*' | '?' | '[' | '~' => {
+                // unquoted glob metachar / tilde expansion: opaque
+                cur_start.get_or_insert(i);
+                cur_resolvable = false;
+                cur_text.push(c);
+                i += 1;
+            }
             '|' if i + 1 < n && chars[i + 1] == '|' => {
-                finish_token_impl!(TokKind::Word);
-                new_segment!(Operator::Or, i + 2);
+                finish_token!(TokKind::Word);
+                new_segment!(i + 2);
+                pending_sep = Some(Operator::Or);
                 i += 2;
             }
             '|' => {
-                finish_token_impl!(TokKind::Word);
-                new_segment!(Operator::Pipe, i + 1);
+                finish_token!(TokKind::Word);
+                new_segment!(i + 1);
+                pending_sep = Some(Operator::Pipe);
                 i += 1;
             }
             ';' => {
-                finish_token_impl!(TokKind::Word);
-                new_segment!(Operator::Semi, i + 1);
+                finish_token!(TokKind::Word);
+                new_segment!(i + 1);
+                pending_sep = Some(Operator::Semi);
                 i += 1;
             }
             '&' if i + 1 < n && chars[i + 1] == '&' => {
-                finish_token_impl!(TokKind::Word);
-                new_segment!(Operator::And, i + 2);
+                finish_token!(TokKind::Word);
+                new_segment!(i + 2);
+                pending_sep = Some(Operator::And);
                 i += 2;
             }
-            '&' if i + 1 < n && chars[i + 1] == '>' => {
-                finish_token_impl!(TokKind::Word);
-                i = skip_after_amp_redirect(&chars, i + 2);
-                // &> / &>>: redirect; target follows
-                let (tok, next) =
-                    read_target(&chars, i, &mut cur_text, &mut cur_resolvable, &mut cur_sub);
-                items.push(Item::Tok(tok));
-                i = next;
-            }
             '&' => {
-                finish_token_impl!(TokKind::Word);
-                new_segment!(Operator::Amp, i + 1);
+                // `&` (async) or `&>` / `&>>` redirects
+                finish_token!(TokKind::Word);
+                let mut j = i + 1;
+                let mut ngt = 0usize;
+                while j < n && chars[j] == '>' {
+                    ngt += 1;
+                    j += 1;
+                }
+                if ngt >= 1 {
+                    // &> / &>> are unsupported redirect operators in v2
+                    redirects.push(RedirectRecord {
+                        op: RawRedirOp::Unsupported,
+                        source_fd: None,
+                        target: dummy_target(chars.len()),
+                        span: (i, j),
+                    });
+                    let (tok, next) = read_target(chars, j);
+                    if let Some(t) = tok {
+                        redirects.last_mut().unwrap().target = t;
+                    }
+                    i = next;
+                    continue;
+                }
+                new_segment!(i + 1);
+                pending_sep = Some(Operator::Amp);
                 i += 1;
             }
             '>' | '<' => {
-                // fd-prefixed redirections (`2>`, `1<`): a pure-digit pending token
-                // belongs to the operator, not argv.
+                // possibly FD-prefixed redirect (`2>`, `2>>`, `1<`): a pure
+                // digit pending token belongs to the operator, not argv.
+                let mut source_fd: Option<u32> = None;
                 if !cur_text.is_empty() && cur_text.chars().all(|ch| ch.is_ascii_digit()) {
+                    source_fd = cur_text.parse::<u32>().ok();
                     cur_text.clear();
                     cur_resolvable = true;
                     cur_sub.clear();
+                    cur_start = None;
+                    cur_quoting = Quoting::None;
                 }
-                finish_token_impl!(TokKind::Word);
-                i = skip_redir(&chars, i);
-                if i < n && chars[i] == '<' {
-                    // heredoc: unresolvable rest of the segment (fail-closed)
-                    salvage_failed = true;
-                    cur_resolvable = false;
-                    cur_text.extend(chars[i..].iter());
-                    finish_token_impl!(TokKind::RedirectTarget);
-                    let raw = chars[seg_start..n].iter().collect();
-                    segments.push(Segment {
-                        raw,
-                        items: std::mem::take(&mut items),
-                    });
-                    return ScanResult {
-                        segments,
-                        salvage_failed: true,
-                    };
+                finish_token!(TokKind::Word);
+                let op_start = i;
+                let mut nlt = 0usize;
+                let mut ngt = 0usize;
+                while i < n && (chars[i] == '<' || chars[i] == '>') {
+                    if chars[i] == '<' {
+                        nlt += 1;
+                    } else {
+                        ngt += 1;
+                    }
+                    i += 1;
                 }
-                let (tok, next) =
-                    read_target(&chars, i, &mut cur_text, &mut cur_resolvable, &mut cur_sub);
-                items.push(Item::Tok(tok));
-                i = next;
+                let (op, span_end) = match (nlt, ngt) {
+                    (0, 1) => (Some(RedirectOp::Out), i),
+                    (0, 2) => (Some(RedirectOp::AppendOut), i),
+                    (1, 0) => (Some(RedirectOp::In), i),
+                    _ => {
+                        // heredoc / here-string / `<>`: unsupported in v2
+                        malformed = true;
+                        return None;
+                    }
+                };
+                let op = op.unwrap();
+                {
+                    // duplication form: `<&N` / `>&N` (+ `&-` close)
+                    match chars.get(i) {
+                        Some('&') => {
+                            i += 1;
+                            let dup = match op {
+                                RedirectOp::Out => RedirectOp::DupOut,
+                                RedirectOp::In => RedirectOp::DupIn,
+                                other => other,
+                            };
+                            let (tok, next) = read_target(chars, i);
+                            let digits = tok.as_ref().map(|t| t.text.parse::<i32>().is_ok());
+                            match (dup, digits) {
+                                (RedirectOp::DupOut | RedirectOp::DupIn, Some(true)) => {
+                                    let t = tok.unwrap();
+                                    redirects.push(RedirectRecord {
+                                        op: RawRedirOp::Supported(dup),
+                                        source_fd,
+                                        target: t,
+                                        span: (op_start, i),
+                                    });
+                                    i = next;
+                                }
+                                _ => {
+                                    // `<&-` (FD close) and non-numeric dup targets
+                                    redirects.push(RedirectRecord {
+                                        op: RawRedirOp::Unsupported,
+                                        source_fd,
+                                        target: tok.unwrap_or_else(|| dummy_target(next)),
+                                        span: (op_start, i),
+                                    });
+                                    i = next;
+                                }
+                            }
+                        }
+                        _ => {
+                            let op = if matches!(chars.get(i), Some(':') | Some(',') | Some('?')) {
+                                None
+                            } else {
+                                Some(op)
+                            };
+                            let (tok, next) = read_target(chars, i);
+                            redirects.push(RedirectRecord {
+                                op: RawRedirOp::Supported(op.unwrap()),
+                                source_fd,
+                                target: tok.unwrap_or_else(|| dummy_target(next)),
+                                span: (op_start, span_end.max(i)),
+                            });
+                            i = next;
+                        }
+                    }
+                }
+                trailing_empty = true;
             }
             _ => {
+                cur_start.get_or_insert(i);
                 cur_text.push(c);
                 i += 1;
             }
         }
     }
-    finish_token_impl!(TokKind::Word);
-    if !items.is_empty() {
-        let raw = chars[seg_start..].iter().collect();
-        segments.push(Segment { raw, items });
+    finish_token!(TokKind::Word);
+    if trailing_empty || !seg_items.is_empty() || !redirects.is_empty() {
+        let rawslice: String = chars[seg_start..].iter().collect();
+        segments.push(Segment {
+            raw: rawslice,
+            span: (seg_start, n),
+            sep: pending_sep,
+            items: seg_items,
+            redirects,
+            heredoc: false,
+        });
     }
-    ScanResult {
+    Some(ScanResult {
         segments,
-        salvage_failed,
+        malformed,
+    })
+}
+
+fn dummy_target(n: usize) -> Tok {
+    Tok {
+        kind: TokKind::RedirectTarget,
+        text: String::new(),
+        resolvable: false,
+        quoting: Quoting::None,
+        subtexts: Vec::new(),
+        span: (n, n),
     }
 }
 
@@ -324,43 +531,42 @@ fn unescape(c: char) -> char {
 
 /// Capture `$…` at position `start`: records the inner text into `subtexts`
 /// and returns the next index after the construct. Handles `$(`, `$((`,
-/// `${}`, `$NAME`, bare `$` and backticks.
+/// `${}`, `$NAME`, bare `$` (and callers use the same for backticks).
+#[allow(clippy::too_many_arguments)]
 fn capture_expand(
     chars: &[char],
     start: usize,
-    _ctx: &str,
-    subtexts: &mut Vec<String>,
+    subtexts: &mut Vec<(String, Span)>,
+    _quote_start: usize,
 ) -> (Option<String>, usize) {
     let n = chars.len();
     let first = *chars.get(start + 1).unwrap_or(&'\0');
     if first == '(' {
         if chars.get(start + 2) == Some(&'(') {
             let close = find_balanced(chars, start + 1, '(', ')');
-            subtexts.push(
-                chars[start + 3..close.max(start + 3).saturating_sub(1)]
-                    .iter()
-                    .collect(),
+            return (
+                Some(chars[start..=close].iter().collect::<String>()),
+                close + 1,
             );
-            subtexts.pop();
-            subtexts.push(chars[start..=close].iter().collect());
-            let _ = 0; // arithmetic: whole $(…) form is unresolvable
-            return (Some(chars[start..=close].iter().collect()), close + 1);
         }
         let close = find_balanced(chars, start + 1, '(', ')');
-        subtexts.push(chars[start + 2..close].iter().collect());
+        subtexts.push((
+            chars[start + 2..close].iter().collect::<String>(),
+            (start, close + 1),
+        ));
         return (
-            Some(format!(
-                "$({})",
-                chars[start + 2..close].iter().collect::<String>()
-            )),
+            Some(chars[start..=close].iter().collect::<String>()),
             close + 1,
         );
     }
     if first == '{' {
         match (start + 1..n).find(|&j| chars[j] == '}') {
             Some(end) => {
-                subtexts.push(chars[start..=end].iter().collect());
-                return (Some(chars[start..=end].iter().collect()), end + 1);
+                subtexts.push((
+                    chars[start..=end].iter().collect::<String>(),
+                    (start, end + 1),
+                ));
+                return (Some(chars[start..=end].iter().collect::<String>()), end + 1);
             }
             None => return (None, n),
         }
@@ -370,11 +576,11 @@ fn capture_expand(
         while end < n && (chars[end].is_ascii_alphanumeric() || chars[end] == '_') {
             end += 1;
         }
-        subtexts.push(chars[start..end].iter().collect());
-        return (Some(chars[start..end].iter().collect()), end);
+        subtexts.push((chars[start..end].iter().collect::<String>(), (start, end)));
+        return (Some(chars[start..end].iter().collect::<String>()), end);
     }
-    // bare $: unresolvable noise
-    (Some("$".to_string()), start + 2)
+    // bare $: opaque noise
+    (Some("$".to_string()), (start + 2).min(n))
 }
 
 fn find_balanced(chars: &[char], open_at: usize, open: char, close: char) -> usize {
@@ -404,53 +610,31 @@ fn find_balanced(chars: &[char], open_at: usize, open: char, close: char) -> usi
 fn is_brace_expand(chars: &[char], i: usize) -> bool {
     match (i..chars.len()).find(|&j| chars[j] == '}') {
         Some(end) if end > i => {
+            let _ = chars[i];
             let inner: String = chars[i + 1..end].iter().collect();
-            let has_space = inner.chars().any(|c| c == ' ');
-            (!has_space && inner.contains(',')) || inner.contains("..")
+            let _ = inner.clone();
+            (!inner.contains(' ') && inner.contains(',')) || inner.contains("..")
         }
         _ => false,
     }
 }
 
-/// After `<` / `>`: skip `>`, `<`, `>>`, `<<`, `&>`-like and fd digits (`2>`).
-fn skip_redir(chars: &[char], mut i: usize) -> usize {
-    let n = chars.len();
-    while i < n && (chars[i] == '<' || chars[i] == '>') {
-        if chars[i] == '<' && is_heredoc(chars, i) {
-            return i;
-        }
-        // fd prefix (2>, 2>>): count digits immediately left? they are already consumed by caller
-        i += 1;
-    }
-    i
-}
-
-fn is_heredoc(chars: &[char], i: usize) -> bool {
-    chars.get(i) == Some(&'<')
-}
-
-fn skip_after_amp_redirect(chars: &[char], mut i: usize) -> usize {
-    while i < chars.len() && chars[i] == '>' {
-        i += 1;
-    }
-    i
-}
-
-/// Read the redirect target starting at `i`: quote-aware until top-level
-/// whitespace or an operator. Targets that are fd numbers (`2>&1` form: `&1`)
-/// still yield a token; matcher treats pure `&N` as no path evidence.
-fn read_target(
-    chars: &[char],
-    i: usize,
-    _cur: &mut String,
-    _res: &mut bool,
-    _sub: &mut Vec<String>,
-) -> (Tok, usize) {
+/// Read the redirect target starting at `i`: quote-aware until a top-level
+/// delimiter or operator. Mildest failure: opaque (expansion), invalid stays
+/// with the redirect operator decision.
+fn read_target(chars: &[char], i: usize) -> (Option<Tok>, usize) {
     let n = chars.len();
     let mut j = i;
+    // optional blanks between the operator and its target (`cmd > file`)
+    while j < n && (chars[j] == ' ' || chars[j] == '\t' || chars[j] == '\n') {
+        j += 1;
+    }
+    let text_start = j;
     let mut text = String::new();
     let mut resolvable = true;
-    let mut subtexts = Vec::new();
+    let mut quoting = Quoting::None;
+    let mut subtexts: Vec<(String, Span)> = Vec::new();
+    let mut sub_believable = false;
     while j < n {
         let c = chars[j];
         if c == ' '
@@ -468,6 +652,7 @@ fn read_target(
         }
         if c == '\\' && j + 1 < n {
             text.push(unescape(chars[j + 1]));
+            quoting = Quoting::Escaped;
             j += 2;
             continue;
         }
@@ -475,6 +660,14 @@ fn read_target(
             match (j + 1..n).find(|&k| chars[k] == c) {
                 Some(end) => {
                     text.extend(chars[j + 1..end].iter());
+                    if !matches!(quoting, Quoting::Escaped) {
+                        quoting = if c == '\'' {
+                            Quoting::Single
+                        } else {
+                            Quoting::Double
+                        };
+                    }
+                    sub_believable = false;
                     j = end + 1;
                     continue;
                 }
@@ -488,65 +681,45 @@ fn read_target(
         }
         if c == '$' || c == '`' {
             resolvable = false;
-            let (inner, next) = capture_expand(chars, j, &text, &mut subtexts);
-            let _ = inner;
+            let (_inner, next) = capture_expand(chars, j, &mut subtexts, j);
             text.push('\u{fffd}');
+            sub_believable = true;
             j = next;
             continue;
         }
         if c == '<' && chars.get(j + 1) == Some(&'(') {
-            // process substitution inside the target
             resolvable = false;
             let close = find_balanced(chars, j + 1, '(', ')');
-            subtexts.push(chars[j + 2..close].iter().collect());
+            subtexts.push((
+                chars[j + 2..close.min(n.saturating_sub(1))]
+                    .iter()
+                    .collect::<String>(),
+                (j, close + 1),
+            ));
+            let _ = sub_believable;
             text.push('\u{fffd}');
             j = close + 1;
             continue;
         }
+        if matches!(c, '*' | '?' | '[' | '~' | '{') {
+            resolvable = false;
+        }
         text.push(c);
         j += 1;
     }
-    let _ = i;
-    (
-        Tok {
-            kind: TokKind::RedirectTarget,
-            text,
-            resolvable,
-            subtexts,
-        },
-        j,
-    )
-}
-
-// ── Segment summary (consumed by split.rs) ───────────────────────────────────
-
-pub struct SegTokens {
-    /// Word tokens in order: (decoded text, resolvable).
-    pub words: Vec<(String, bool)>,
-    /// Redirect targets in order: (decoded text, resolvable).
-    pub targets: Vec<(String, bool)>,
-    /// True iff every token in the segment is resolvable.
-    pub resolvable_all: bool,
-}
-
-pub fn summarize(seg: &Segment) -> SegTokens {
-    let mut words = Vec::new();
-    let mut targets = Vec::new();
-    let mut resolvable_all = true;
-    for it in &seg.items {
-        if let Item::Tok(t) = it {
-            match t.kind {
-                TokKind::Word => words.push((t.text.clone(), t.resolvable)),
-                TokKind::RedirectTarget => targets.push((t.text.clone(), t.resolvable)),
-            }
-            if !t.resolvable {
-                resolvable_all = false;
-            }
-        }
-    }
-    SegTokens {
-        words,
-        targets,
-        resolvable_all,
+    if text.is_empty() {
+        (None, j)
+    } else {
+        (
+            Some(Tok {
+                kind: TokKind::RedirectTarget,
+                text,
+                resolvable,
+                quoting,
+                subtexts,
+                span: (text_start, j),
+            }),
+            j,
+        )
     }
 }

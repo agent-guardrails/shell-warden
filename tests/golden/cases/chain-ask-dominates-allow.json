@@ -10,19 +10,12 @@
     "commands": [
       {
         "index": 0,
-        "raw": "git status; rm -rf /",
+        "raw": "git status | cat",
         "cwd": "/repo"
       }
     ]
   },
   "expect": {
-    "verdict": "ask",
-    "commands": [
-      {
-        "index": 0,
-        "verdict": "ask",
-        "classification": "static"
-      }
-    ]
+    "verdict": "ask"
   }
 }

@@ -98,11 +98,7 @@ impl Verdict {
         }
     }
     pub fn most_restrictive(a: Verdict, b: Verdict) -> Verdict {
-        if a.rank() >= b.rank() {
-            a
-        } else {
-            b
-        }
+        if a.rank() >= b.rank() { a } else { b }
     }
 }
 
@@ -306,7 +302,7 @@ pub fn classify(value: Value) -> Incoming {
             return Incoming::Malformed {
                 id: None,
                 error: RpcError::new(CODE_PARSE, "parse error: not a JSON object"),
-            }
+            };
         }
     };
     // jsonrpc must be the exact version member (02 §2.2).
@@ -319,7 +315,7 @@ pub fn classify(value: Value) -> Incoming {
                     CODE_INVALID_REQUEST,
                     "invalid request: jsonrpc must be \"2.0\"",
                 ),
-            }
+            };
         }
     }
     let id_member = obj.get("id");
@@ -337,7 +333,7 @@ pub fn classify(value: Value) -> Incoming {
                         CODE_INVALID_REQUEST,
                         "invalid request: id must be an integer >= 1",
                     ),
-                }
+                };
             }
         },
     };
@@ -463,7 +459,7 @@ pub fn dispatch(handler: &mut dyn Handler, method: &str, params: Option<Value>) 
                     return Reply::error(RpcError::new(
                         CODE_INVALID_PARAMS,
                         format!("invalid params: {e}"),
-                    ))
+                    ));
                 }
             };
             if let Err(e) = validate_check(&params) {
@@ -589,7 +585,7 @@ fn line_to_incoming(raw: &[u8]) -> Incoming {
             return Incoming::Malformed {
                 id: None,
                 error: RpcError::new(CODE_PARSE, "parse error: line is not UTF-8"),
-            }
+            };
         }
     };
     if text.trim().is_empty() {
@@ -669,7 +665,7 @@ extern "C" fn on_termination(_sig: i32) {
 /// SIGTERM/SIGINT → flag + watchdog: exit(0) within the shim's kill grace
 /// (05 §5.1) even while blocked reading stdin.
 fn install_termination_handler() {
-    extern "C" {
+    unsafe extern "C" {
         fn signal(signum: i32, handler: extern "C" fn(i32)) -> usize;
     }
     const SIGINT: i32 = 2;
@@ -678,11 +674,13 @@ fn install_termination_handler() {
         signal(SIGTERM, on_termination);
         signal(SIGINT, on_termination);
     }
-    std::thread::spawn(|| loop {
-        if TERM_FLAG.load(std::sync::atomic::Ordering::SeqCst) {
-            std::process::exit(0);
+    std::thread::spawn(|| {
+        loop {
+            if TERM_FLAG.load(std::sync::atomic::Ordering::SeqCst) {
+                std::process::exit(0);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        std::thread::sleep(std::time::Duration::from_millis(50));
     });
 }
 

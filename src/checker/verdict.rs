@@ -1,9 +1,47 @@
-// Verdict output (02-letter-verdict.md §2.3) — types mirror
-// schemas/shell-warden.verdict.v1.schema.json.
+// Verdict output (02-letter-verdict.md §2.3 + v2 wire compatibility).
+//
+// The published hook validates `classification` against `static|opaque` only
+// and `match` against `argv|raw`; it does not reject unknown keys and bounds
+// `facts` by byte size. V2 therefore keeps that closed vocabulary at the
+// policy boundary: complete → static; opaque AND invalid → opaque (invalid
+// blocks allow exactly like opaque and deny still matches), with the true
+// state and stable reason codes carried in bounded `facts` diagnostics.
+// A coordinated spec 02 + schema update documents this mapping (design
+// §Diagnostics and verdict wire); a hook ticket lifts `invalid` later.
 
 use serde::Serialize;
 
 pub const MAX_VERDICT_BYTES: usize = 64 * 1024; // 02 §2.3
+
+pub use super::grammar::VerdictKind;
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub enum ClassificationWire {
+    #[serde(rename = "static")]
+    Static,
+    #[serde(rename = "opaque")]
+    Opaque,
+}
+
+impl ClassificationWire {
+    pub fn from_static(complete_everywhere: bool) -> Self {
+        if complete_everywhere {
+            ClassificationWire::Static
+        } else {
+            ClassificationWire::Opaque
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub enum MatchKind {
+    /// Fully parsed token match (the only kind allow may carry).
+    #[serde(rename = "argv")]
+    Argv,
+    /// Decided on raw text / non-participating evidence (deny/ask only).
+    #[serde(rename = "raw")]
+    Raw,
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -23,24 +61,12 @@ pub struct CommandVerdict {
     pub verdict: VerdictKind,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rule_id: Option<String>,
-    pub classification: ClassificationKind,
-    /// `argv` = fully parsed token match (the only kind allow may carry);
-    /// `raw` = raw-glob match (deny/ask only).
+    pub classification: ClassificationWire,
     pub r#match: MatchKind,
+    /// Bounded v2 diagnostics: evidence state, stable reasons, matched/
+    /// qualified/rejected allow ids, emitted votes (design §Diagnostics).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub facts: Option<serde_json::Value>,
-}
-
-// Reuse the config's kinds through aliases so the pipeline has one enum type each.
-pub use super::grammar::Classification as ClassificationKind;
-pub use super::grammar::VerdictKind;
-
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
-pub enum MatchKind {
-    #[serde(rename = "argv")]
-    Argv,
-    #[serde(rename = "raw")]
-    Raw,
 }
 
 impl Verdict {
@@ -62,48 +88,52 @@ impl Verdict {
 mod tests {
     use super::*;
 
-    #[test]
-    fn roundshapes_match_schema_expectations() {
-        let v = Verdict {
+    fn sample(verdict: VerdictKind, classification: ClassificationWire) -> Verdict {
+        Verdict {
             invocation_id: "m:c".into(),
-            verdict: VerdictKind::Deny,
-            message: Some("push --force is forbidden — history is protected".into()),
+            verdict,
+            message: (verdict == VerdictKind::Deny)
+                .then(|| "push --force is forbidden — history is protected".to_string()),
             commands: vec![CommandVerdict {
                 index: 0,
-                verdict: VerdictKind::Deny,
-                rule_id: Some("vcs/no-force-push".into()),
-                classification: ClassificationKind::Static,
+                verdict,
+                rule_id: Some("git/deny-force-push".into()),
+                classification,
                 r#match: MatchKind::Argv,
-                facts: None,
+                facts: Some(serde_json::json!({ "evidence": "complete" })),
             }],
-        };
-        let bytes = v.to_wire().unwrap();
-        let json = String::from_utf8(bytes).unwrap();
-        assert!(json.contains("\"invocationId\":\"m:c\""));
-        assert!(json.contains("\"verdict\":\"deny\""));
-        assert!(json.contains("\"ruleId\":\"vcs/no-force-push\""));
-        assert!(json.contains("\"classification\":\"static\""));
-        assert!(json.contains("\"match\":\"argv\""));
-        // deny always carries message (schema: top-level allOf)
+        }
+    }
+
+    #[test]
+    fn wire_shapes_match_hook_validation() {
+        let json = String::from_utf8(
+            sample(VerdictKind::Deny, ClassificationWire::Static)
+                .to_wire()
+                .unwrap(),
+        )
+        .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["invocationId"], "m:c");
+        assert_eq!(parsed["verdict"], "deny");
+        assert_eq!(parsed["commands"][0]["classification"], "static");
+        assert_eq!(parsed["commands"][0]["match"], "argv");
+        assert!(parsed["commands"][0]["facts"]["evidence"].is_string());
+        // deny always carries message
         assert!(parsed["message"].is_string());
     }
 
     #[test]
+    fn invalid_maps_to_opaque_classification() {
+        let v = sample(VerdictKind::Ask, ClassificationWire::Opaque);
+        let json = String::from_utf8(v.to_wire().unwrap()).unwrap();
+        assert!(json.contains("\"classification\":\"opaque\""));
+    }
+
+    #[test]
     fn allow_has_no_message_serialized() {
-        let v = Verdict {
-            invocation_id: "i".into(),
-            verdict: VerdictKind::Allow,
-            message: None,
-            commands: vec![CommandVerdict {
-                index: 0,
-                verdict: VerdictKind::Allow,
-                rule_id: Some("vcs/allow-inspection".into()),
-                classification: ClassificationKind::Static,
-                r#match: MatchKind::Argv,
-                facts: None,
-            }],
-        };
+        let mut v = sample(VerdictKind::Allow, ClassificationWire::Static);
+        v.message = None;
         let json = String::from_utf8(v.to_wire().unwrap()).unwrap();
         assert!(!json.contains("message"));
     }

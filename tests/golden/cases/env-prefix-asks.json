@@ -10,19 +10,12 @@
     "commands": [
       {
         "index": 0,
-        "raw": "bash -c 'git push --force'",
+        "raw": "GIT_TERMINAL_PROMPT=0 git status",
         "cwd": "/repo"
       }
     ]
   },
   "expect": {
-    "verdict": "deny",
-    "commands": [
-      {
-        "index": 0,
-        "verdict": "deny",
-        "ruleId": "vcs/no-force-push"
-      }
-    ]
+    "verdict": "ask"
   }
 }

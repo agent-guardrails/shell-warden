@@ -10,19 +10,12 @@
     "commands": [
       {
         "index": 0,
-        "raw": "curl -o /tmp/x http://mirror.example/file",
+        "raw": "node --version",
         "cwd": "/repo"
       }
     ]
   },
   "expect": {
-    "verdict": "deny",
-    "commands": [
-      {
-        "index": 0,
-        "verdict": "deny",
-        "ruleId": "net/plain-http"
-      }
-    ]
+    "verdict": "allow"
   }
 }

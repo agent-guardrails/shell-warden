@@ -16,14 +16,6 @@
     ]
   },
   "expect": {
-    "verdict": "allow",
-    "commands": [
-      {
-        "index": 0,
-        "verdict": "allow",
-        "ruleId": "vcs/allow-inspection",
-        "match": "argv"
-      }
-    ]
+    "verdict": "allow"
   }
 }

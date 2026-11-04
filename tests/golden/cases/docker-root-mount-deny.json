@@ -20,7 +20,6 @@
     "commands": [
       {
         "index": 0,
-        "verdict": "deny",
         "ruleId": "docker/no-root-mount"
       }
     ]

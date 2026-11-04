@@ -1,40 +1,167 @@
 {
-  "version": 1,
-  "defaults": { "action": "ask", "message": "no rule matched — ask the human" },
-  "stages": [
-    { "id": "vcs",
-      "scope": { "anyOf": [ { "argv": ["git"] } ] },
-      "flags": { "-f": 0, "--force": 0, "-C": 1, "-m": 1 },
+  // Example shell-warden policy, config v2 (design/shell-warden-config-v2.md):
+  // per-executable profiles; allow is a typing-evidence coverage proof.
+  // spawn example: shell-warden --config <this file> (letter on stdin).
+  "version": 2,
+  "defaults": {
+    "action": "ask",
+    "message": "No approved command profile matched.",
+    "redirectPolicy": "safe-local-io"
+  },
+  "redirectPolicies": {
+    "safe-local-io": {
+      "redirects": { "all": [{ "sourceFd": "default", "operator": ">", "occurrence": "all", "target": { "kind": "literalPath" } }] },
+      "paths": { "all": [{ "coordinate": { "redirect": { "operator": ">", "sourceFd": "default", "occurrence": "all" } }, "within": "/tmp/reports" }] }
+    },
+    "no-redirects": {
+      "redirects": { "none": true },
+      "paths": { "none": true }
+    }
+  },
+  "profiles": [
+    {
+      "id": "git",
+      "executables": ["git"],
+      "options": {
+        "force": { "aliases": ["--force", "-f"], "arity": 0 },
+        "dryRun": { "aliases": ["--dry-run", "-n"], "arity": 0 },
+        "oneline": { "aliases": ["--oneline"], "arity": 0 }
+      },
+      "analyzer": "generic-v1",
       "rules": [
-        { "id": "vcs/no-force-push",
-          "argv": ["push"], "flag": { "--force": "present" },
-          "action": "deny", "message": "push --force is forbidden — history is protected" },
-        { "id": "vcs/allow-inspection",
-          "argv": [ { "anyOf": ["status", "log", "diff"] } ],
-          "action": "allow" } ] },
-    { "id": "docker",
-      "scope": { "anyOf": [ { "argv": ["docker"] }, { "pattern": "docker *" } ] },
-      "flags": { "-v": 1, "--volume": 1, "-d": 0 },
+        {
+          "id": "git/deny-force-push",
+          "action": "deny",
+          "message": "push --force is forbidden — history is protected",
+          "match": {
+            "arguments": { "prefix": ["push"] },
+            "options": { "presentAny": ["force"] }
+          }
+        },
+        {
+          "id": "git/allow-status",
+          "action": "allow",
+          "match": {
+            "classification": "complete",
+            "arguments": { "exact": ["status"] },
+            "options": { "none": true },
+            "environment": { "none": true },
+            "paths": { "none": true },
+            "facts": { "none": true },
+            "nestedParts": { "none": true }
+          }
+        },
+        {
+          "id": "git/allow-status-append-report",
+          "action": "allow",
+          "redirectPolicy": {
+            "mode": "extend",
+            "inline": {
+              "redirects": { "all": [{ "sourceFd": "default", "operator": ">>", "occurrence": "all", "target": { "kind": "literalPath" } }] },
+              "paths": { "all": [{ "coordinate": { "redirect": { "operator": ">>", "sourceFd": "default", "occurrence": "all" } }, "within": "/var/tmp/git-reports" }] }
+            }
+          },
+          "match": {
+            "classification": "complete",
+            "arguments": { "exact": ["status"] },
+            "options": { "none": true },
+            "environment": { "none": true },
+            "paths": { "none": true },
+            "facts": { "none": true },
+            "nestedParts": { "none": true }
+          }
+        },
+        {
+          "id": "git/allow-log-oneline",
+          "action": "allow",
+          "redirectPolicy": { "mode": "replace", "policies": ["no-redirects"] },
+          "match": {
+            "classification": "complete",
+            "arguments": { "exact": ["log"] },
+            "options": { "allowed": [{ "option": "oneline", "required": true, "repeatable": false }] },
+            "environment": { "none": true },
+            "paths": { "none": true },
+            "facts": { "none": true },
+            "nestedParts": { "none": true }
+          }
+        },
+        {
+          "id": "git/allow-push-dry-run",
+          "action": "allow",
+          "redirectPolicy": { "mode": "replace", "policies": ["no-redirects"] },
+          "match": {
+            "classification": "complete",
+            "arguments": { "exact": ["push", "origin", "main"] },
+            "options": { "allowed": [{ "option": "dryRun", "required": true, "repeatable": false }] },
+            "environment": { "none": true },
+            "paths": { "none": true },
+            "facts": { "none": true },
+            "nestedParts": { "none": true }
+          }
+        }
+      ]
+    },
+    {
+      "id": "node-version",
+      "executables": ["node"],
+      "options": { "version": { "aliases": ["--version", "-V"], "arity": 0 } },
+      "redirectPolicy": { "mode": "replace", "policies": ["no-redirects"] },
+      "analyzer": "generic-v1",
       "rules": [
-        { "id": "docker/no-root-mount",
-          "argv": ["run"], "flagValue": { "-v": "/:*", "--volume": "/:*" },
-          "action": "deny", "message": "do not mount / into the container" } ] },
-    { "id": "rm",
-      "scope": { "anyOf": [ { "argv": ["rm"] } ] },
-      "flags": { "-f": 0, "-r": 0, "-rf": 0 },
+        {
+          "id": "node-version/allow-bare-version",
+          "action": "allow",
+          "match": {
+            "classification": "complete",
+            "arguments": { "exact": [] },
+            "options": { "allowed": [{ "option": "version", "required": true, "repeatable": false }] },
+            "environment": { "none": true },
+            "paths": { "none": true },
+            "facts": { "none": true },
+            "nestedParts": { "none": true }
+          }
+        }
+      ]
+    },
+    {
+      "id": "rm",
+      "executables": ["rm"],
+      "options": {
+        "force": { "aliases": ["-f"], "arity": 0 },
+        "recursive": { "aliases": ["-r"], "arity": 0 },
+        "recursiveForce": { "aliases": ["-rf"], "arity": 0 }
+      },
+      "analyzer": "generic-v1",
       "rules": [
-        { "id": "rm/no-etc",
-          "argValue": [ "/etc", "/etc/*" ],
-          "action": "deny", "message": "do not delete system files" } ] },
-    { "id": "net",
-      "scope": { "anyOf": [ { "argv": ["curl"] }, { "argv": ["wget"] } ] },
-      "flags": { "-o": 1, "-L": 0 },
+        {
+          "id": "rm/no-etc",
+          "action": "deny",
+          "message": "do not delete system files",
+          "match": {
+            "arguments": { "containsAny": ["/etc", "/etc/*"] }
+          }
+        }
+      ]
+    },
+    {
+      "id": "docker",
+      "executables": ["docker"],
+      "options": {
+        "volume": { "aliases": ["--volume", "-v"], "arity": 1 },
+        "detach": { "aliases": ["-d"], "arity": 0 }
+      },
+      "analyzer": "generic-v1",
       "rules": [
-        { "id": "net/plain-http",
-          "argValue": [ "http://*" ],
-          "action": "deny", "message": "plain http is forbidden — use https" } ] },
-    { "id": "catch-all",
-      "scope": { "anyOf": [ { "pattern": "*" } ] },
-      "flags": {}, "rules": [] }
+        {
+          "id": "docker/no-root-mount",
+          "action": "deny",
+          "message": "do not mount / into the container",
+          "match": {
+            "arguments": { "exact": ["run"] },
+            "options": { "values": { "volume": ["/:*"] } }
+          }
+        }
+      ]
+    }
   ]
 }

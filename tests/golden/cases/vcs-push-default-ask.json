@@ -16,14 +16,6 @@
     ]
   },
   "expect": {
-    "verdict": "ask",
-    "commands": [
-      {
-        "index": 0,
-        "verdict": "ask",
-        "classification": "static"
-      }
-    ],
-    "message": "contains:ask the human"
+    "verdict": "ask"
   }
 }

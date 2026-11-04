@@ -10,12 +10,18 @@
     "commands": [
       {
         "index": 0,
-        "raw": "git status && bash -c 'git push --force'",
+        "raw": "git status; git push --force origin main",
         "cwd": "/repo"
       }
     ]
   },
   "expect": {
-    "verdict": "deny"
+    "verdict": "deny",
+    "commands": [
+      {
+        "index": 0,
+        "ruleId": "git/deny-force-push"
+      }
+    ]
   }
 }

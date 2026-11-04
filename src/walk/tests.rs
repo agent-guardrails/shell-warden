@@ -501,10 +501,11 @@ fn budget_exhaustion_bypasses_the_stage_with_a_notice() {
         calls: vec![],
     };
     let out = run(&mut mock, &stages, "s1", &mut budgets);
-    assert!(out
-        .message
-        .unwrap_or_default()
-        .contains("suspended for this session after 2 rejections"),);
+    assert!(
+        out.message
+            .unwrap_or_default()
+            .contains("suspended for this session after 2 rejections"),
+    );
     assert!(!out.contributed);
     assert_eq!(out.verdict, Verdict::Ask);
 

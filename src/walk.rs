@@ -133,7 +133,9 @@ impl BudgetTable {
 
     fn drop_overflow(&mut self) {
         if self.entries.len() > BUDGET_TABLE_CAP {
-            eprintln!("shell-warden: budget table overflow (> {BUDGET_TABLE_CAP}), clearing per-session budget state");
+            eprintln!(
+                "shell-warden: budget table overflow (> {BUDGET_TABLE_CAP}), clearing per-session budget state"
+            );
             self.clear();
         }
     }

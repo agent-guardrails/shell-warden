@@ -745,7 +745,7 @@ mod tests {
         assert_eq!(cfg.stages[0].tool.on_error, OnError::Ask);
         assert_eq!(cfg.stages[0].tool.lifecycle, Lifecycle::Persistent);
         assert_eq!(cfg.stages[0].tool.timeout_ms, 1000); // fixture sets it explicitly
-                                                         // No input block → minimal letter (command/cwd only).
+        // No input block → minimal letter (command/cwd only).
         assert!(!cfg.stages[0].tool.input_session_id);
         assert!(!cfg.stages[0].tool.input_mcp);
     }
@@ -883,7 +883,8 @@ mod tests {
         s["tool"]["command"] = json!(["{env:WARDEN_TEST_UNSET_VAR_XYZ}"]);
         assert!(parse(&ok_config(json!([s]))).is_err());
 
-        std::env::set_var("WARDEN_TEST_VAR_ABC", "/opt/tools/warden");
+        // SAFETY: test-only; no other threads are reading the environment
+        unsafe { std::env::set_var("WARDEN_TEST_VAR_ABC", "/opt/tools/warden") };
         let mut s = stage_json();
         s["tool"]["command"] = json!(["{env:WARDEN_TEST_VAR_ABC}", "--flag"]);
         let cfg = parse(&ok_config(json!([s]))).expect("valid");
@@ -899,9 +900,10 @@ mod tests {
         let cfg = parse(&ok_config(json!([s]))).expect("valid");
         let t = &cfg.stages[0].tool;
         assert!(t.env_set.contains(&("WARDEN_MODE".into(), "strict".into())));
-        assert!(t
-            .env_set
-            .contains(&("WARDEN_TOKEN".into(), "/opt/tools/warden".into())));
+        assert!(
+            t.env_set
+                .contains(&("WARDEN_TOKEN".into(), "/opt/tools/warden".into()))
+        );
         assert!(t.env_unset.contains(&"GITHUB_TOKEN".to_string()));
     }
 
