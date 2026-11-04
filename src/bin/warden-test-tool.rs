@@ -10,6 +10,14 @@ fn pid() -> u32 {
     std::process::id()
 }
 
+/// Real stage tools read their letter (06 §6.4.1: the engine writes one line
+/// and closes stdin). Reading it first pins this binary behind the spawn
+/// write on every platform, so the contract races below stay deterministic.
+fn read_letter() {
+    let mut line = String::new();
+    let _ = std::io::stdin().read_line(&mut line);
+}
+
 fn answer_with_pid() {
     let json = format!("{{\"verdict\":\"allow\",\"reason\":\"pid:{}\"}}", pid());
     println!("{json}");
@@ -20,33 +28,47 @@ fn main() {
     let mode = args.first().map(String::as_str).unwrap_or("answer");
     let arg = args.get(1).and_then(|a| a.parse::<u64>().ok());
 
+    // One-shot modes: consume the letter, then produce their outcome.
     match mode {
         // One JSON verdict, then exit 0.
-        "answer" => answer_with_pid(),
+        "answer" => {
+            read_letter();
+            answer_with_pid();
+        }
         // Valid JSON, but the tool reports its own failure (06 §6.4.4 row 2).
         "exit-code" => {
+            read_letter();
             answer_with_pid();
             let code = arg.unwrap_or(3) as i32;
             std::process::exit(code);
         }
         // Deadline breaker: answer, but too late.
         "sleep-answer" => {
+            read_letter();
             let ms = arg.unwrap_or(5_000);
             std::thread::sleep(Duration::from_millis(ms));
             answer_with_pid();
         }
         // Unparseable stdout.
-        "garbage" => println!("not json at all"),
+        "garbage" => {
+            read_letter();
+            println!("not json at all");
+        }
         // Oversize unparsable output (maxOutputBytes breach).
         "oversize" => {
+            read_letter();
             let bytes = arg.unwrap_or(200_000) as usize;
             let line: String = "x".repeat(bytes);
             println!("{line}");
         }
         // Contract breach: a response carrying a foreign protocolVersion.
-        "foreign-pv" => println!(r#"{{"protocolVersion":2,"verdict":"allow"}}"#),
+        "foreign-pv" => {
+            read_letter();
+            println!(r#"{{"protocolVersion":2,"verdict":"allow"}}"#);
+        }
         // Over-long message field (cap I6).
         "long-message" => {
+            read_letter();
             let m = "x".repeat(513);
             println!(r#"{{"verdict":"allow","message":"{m}"}}"#);
         }
