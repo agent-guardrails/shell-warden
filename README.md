@@ -16,6 +16,15 @@ no long-lived process.
   accepted design `agent-guardrails/docs/design/shell-warden-config-v2.md` and
   the normative specs in `agent-guardrails/docs/spec/shell-warden/`.
 
+- **Examples & policy tooling**: `examples/configs/` —
+  `shell-warden.example.jsonc` (reference policy, exercised by the golden
+  tests), `policy-builder.cjs` (build a v2 policy from composable helpers —
+  run `node policy-builder.cjs policy.jsonc`), `verdict-battery.cjs`
+  (`node verdict-battery.cjs --config POLICY --battery BATTERY` — spawn-based
+  verdict battery; `SHELL_WARDEN_BIN` selects the checker), and
+  `example-battery.json` (the example policy's verdicts, run in CI before
+  merges that touch `examples/configs/**`).
+
 ## Usage
 
 ```
