@@ -12,7 +12,7 @@
 //   free-form value (paths, names, messages) cannot be enumerated, hence the
 //   arity-0 workaround: declare the option arity 0 so its value becomes a
 //   positional argument covered by "remainder". Engine-side fix is tracked in
-//   agent-guardrails/shell-warden#32.
+//   agent-guardrails/shell-warden issue 32: https://github.com/agent-guardrails/shell-warden/issues/32
 // - remainder JSON is externally tagged with TWO levels:
 //   {"none":{"none":true}} / {"each":{"each":{"within":root}}}
 //   (the published schema lagged; grammar.rs is the ground truth).
@@ -159,7 +159,8 @@ const config = {
       allowRule("git/allow-branch-list", ["branch"], ["quiet"]),
       allowRule("git/allow-add", ["add"], ["all"]),
       // arity-0 "-m": the commit message becomes a positional covered by
-      // remainder (free-form values cannot be enumerated; issue #32)
+      // remainder (free-form values cannot be enumerated;
+      // engine-side fix: https://github.com/agent-guardrails/shell-warden/issues/32)
       allowRule("git/allow-commit", ["commit"], ["m", "amend", "all", "quiet"]),
       allowRule("git/allow-fetch", ["fetch"], ["quiet"]),
       allowRule("git/allow-stash", ["stash"], []),
@@ -288,7 +289,8 @@ const config = {
       denyRule("sed/deny-inplace-system", "in-place edits of system paths are forbidden",
         { arguments: { containsAny: ["/etc", "/etc/*", "/usr/*", "/System/*", "/Library/*", "/Applications/*", "/private/etc*"] } }),
       // NOTE: sed-v1 analyzer has a closed option table — bare "sed script file"
-      // is allowed; "sed -n" reads degrade to ask until issue #32 lands
+      // is allowed; "sed -n" reads degrade to ask until
+      // https://github.com/agent-guardrails/shell-warden/issues/32 lands
       allowRule("sed/allow", [], ["inPlace", "expression"]),
     ]),
   ],

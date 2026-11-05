@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 // Verdict battery runner: check a policy against a list of (command, expected verdict) cases.
-// usage: node verdict-battery.mjs --config policy.jsonc --battery battery.json
+// usage: node verdict-battery.cjs --config policy.jsonc --battery battery.json
+// (paths may be relative; the battery resolves them to absolute — engine I2
+// requires an absolute --config member)
 // SHELL_WARDEN_BIN overrides the checker binary (default: discovery PATH -> homebrew fallback).
 const { execFileSync } = require("node:child_process")
 const path = require("node:path")
@@ -10,6 +12,8 @@ function parseArgs(argv) {
   for (let i = 2; i < argv.length; i++) {
     if (argv[i] === "--config" || argv[i] === "--battery") args[argv[i].slice(2)] = argv[++i]
   }
+  if (args.config) args.config = path.resolve(args.config)
+  if (args.battery) args.battery = path.resolve(args.battery)
   if (!args.config || !args.battery) {
     console.error("usage: node verdict-battery.mjs --config policy.jsonc --battery battery.json")
     process.exit(2)
