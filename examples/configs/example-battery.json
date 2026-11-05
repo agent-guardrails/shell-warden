@@ -1,0 +1,45 @@
+{
+  "cases": [
+    {
+      "raw": "git status",
+      "expect": "allow"
+    },
+    {
+      "raw": "git log --oneline",
+      "expect": "allow"
+    },
+    {
+      "raw": "git push --dry-run origin main",
+      "expect": "allow"
+    },
+    {
+      "raw": "git push --force origin main",
+      "expect": "deny",
+      "$comment": "options presentAny force"
+    },
+    {
+      "raw": "node --version",
+      "expect": "allow"
+    },
+    {
+      "raw": "node -e \"console.log(1)\"",
+      "expect": "ask"
+    },
+    {
+      "raw": "rm /etc/hosts",
+      "expect": "deny"
+    },
+    {
+      "raw": "rm -rf /tmp/x",
+      "expect": "ask"
+    },
+    {
+      "raw": "docker run --volume /:/host",
+      "expect": "deny"
+    },
+    {
+      "raw": "git status >> /var/tmp/git-reports/x",
+      "expect": "allow"
+    }
+  ]
+}
