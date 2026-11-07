@@ -547,24 +547,22 @@ fn probe_path(name: &str, text: &str) -> std::path::PathBuf {
 
 /// The one-shot decision binary: letter in on stdin, verdict out on stdout,
 /// exit 0 verdict / 2 config invalid with empty stdout (02-letter-verdict).
+/// The letter is fed from a pre-filled file (`Stdio::from(File)`), not from a
+/// pipe: a fail-fast child (config invalid ⇒ exit 2 without reading stdin)
+/// would otherwise race `write_all` into a broken pipe and flake the test.
 fn run_checker(config_path: &std::path::Path, letter: &str) -> (i32, String, String) {
-    use std::io::Write;
     use std::process::{Command, Stdio};
-    let mut child = Command::new(env!("CARGO_BIN_EXE_shell-warden"))
+    let letter_path = probe_path("letter", letter);
+    let letter_file = std::fs::File::open(&letter_path).expect("letter fixture must be readable");
+    let out = Command::new(env!("CARGO_BIN_EXE_shell-warden"))
         .arg("--config")
         .arg(config_path)
-        .stdin(Stdio::piped())
+        .stdin(Stdio::from(letter_file))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
-        .expect("checker binary must spawn");
-    child
-        .stdin
-        .as_mut()
-        .expect("checker stdin is piped")
-        .write_all(letter.as_bytes())
-        .expect("checker stdin write must succeed");
-    let out = child.wait_with_output().expect("checker must not hang");
+        .output()
+        .expect("checker binary must run");
+    let _ = std::fs::remove_file(&letter_path);
     (
         out.status.code().unwrap_or(-1),
         String::from_utf8_lossy(&out.stdout).to_string(),
