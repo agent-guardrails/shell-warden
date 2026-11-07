@@ -16,7 +16,7 @@
 use super::evidence::reason;
 use super::evidence::{ArgToken, EnvAssign, EvidenceState, FactObs, Part, RedirectObs};
 use super::grammar::{
-    self, EnvironmentTest, EvidenceClass, FactTest, MAX_OPTION_ARITY, OptionCoverageEntry,
+    self, EnvironmentTest, EvidenceClass, MAX_OPTION_ARITY, OptionCoverageEntry,
     OptionValueCoverage, PathCoordinateSelector, PathPolicy, PathSelector, RedirectTest,
     RemainderPolicy, StringValueSelector, TokenSelector, VerdictKind,
 };
@@ -306,7 +306,7 @@ pub fn predicate_holds(m: &grammar::Match, f: &PartFacts) -> bool {
         return false;
     }
     if let Some(fm) = facts
-        && !facts_matcher_holds(fm, &f.part.facts)
+        && !facts_matcher_holds(fm, &f.part.facts, f.regexes, f.cwd)
     {
         return false;
     }
@@ -606,18 +606,47 @@ pub fn paths_matcher_holds(
     true
 }
 
-pub fn facts_matcher_holds(fm: &grammar::FactsMatcher, facts: &[FactObs]) -> bool {
-    let matches_entry = |e: &FactTest, fact: &FactObs| -> bool {
-        e.name == fact.fact_name
-            && e.analyzer
-                .as_ref()
-                .map(|a| a.as_str() == fact.analyzer_id)
-                .unwrap_or(true)
-            && e.value
-                .as_ref()
-                .map(|v| glob(&fact.value, v))
-                .unwrap_or(true)
-    };
+/// Analyzer fact test against one observed fact (ask/deny predicates and
+/// allow coverage share this closed entry semantics): entry selects analyzer
+/// id/version, fact name, occurrence ordinal, and a typed value selector
+/// that must agree with the catalogued fact type (no coercion).
+pub fn fact_test_holds(
+    e: &grammar::FactTest,
+    fact: &FactObs,
+    regexes: &grammar::RegexCache,
+    cwd: &str,
+) -> bool {
+    // the fact must be in the closed catalog: uncatalogued observations
+    // fail closed (no selector — not even `any` — matches them)
+    if super::analyzers::fact_value_type(fact.analyzer_id, &fact.fact_name).is_none() {
+        return false;
+    }
+    e.name == fact.fact_name
+        && e.analyzer
+            .as_ref()
+            .map(|a| a.as_str() == fact.analyzer_id)
+            .unwrap_or(true)
+        && e.version
+            .as_deref()
+            .map(|v| super::analyzers::analyzer_version(fact.analyzer_id) == Some(v))
+            .unwrap_or(true)
+        && e.occurrence
+            .map(|o| o.selects(fact.occurrence))
+            .unwrap_or(true)
+        && e.value
+            .as_ref()
+            .map(|sel| typed_value_matches(sel, fact, regexes, cwd))
+            .unwrap_or(true)
+}
+
+pub fn facts_matcher_holds(
+    fm: &grammar::FactsMatcher,
+    facts: &[FactObs],
+    regexes: &grammar::RegexCache,
+    cwd: &str,
+) -> bool {
+    let matches_entry =
+        |e: &grammar::FactTest, fact: &FactObs| -> bool { fact_test_holds(e, fact, regexes, cwd) };
     if let Some(true) = fm.none
         && !facts.is_empty()
     {
@@ -639,6 +668,142 @@ pub fn facts_matcher_holds(fm: &grammar::FactsMatcher, facts: &[FactObs]) -> boo
         }
     }
     true
+}
+
+// ── Typed fact-value matching (design §Closed evidence catalogs) ────────────
+//
+// A typed value selector first agrees with the fact type from the analyzer
+// catalog, then applies its arm. No selector coerces a typed fact to a
+// string, a path, a number, or back: a selector arm of the wrong catalog
+// type never matches (fail closed).
+
+fn typed_value_matches(
+    sel: &grammar::TypedValueSelector,
+    fact: &FactObs,
+    regexes: &grammar::RegexCache,
+    cwd: &str,
+) -> bool {
+    let fact_type = super::analyzers::fact_value_type(fact.analyzer_id, &fact.fact_name);
+    let Some(t) = fact_type else {
+        // unknown/uncatalogued fact: no selector may match (fail closed)
+        return false;
+    };
+    typed_value_matches_type(t, sel, &fact.value, regexes, cwd)
+}
+
+/// Typed matching against the (catalog fact type, observed value) pair, so
+/// the closed matrix is testable beyond the current string-only catalog.
+fn typed_value_matches_type(
+    t: super::analyzers::FactValueType,
+    sel: &grammar::TypedValueSelector,
+    value: &str,
+    regexes: &grammar::RegexCache,
+    cwd: &str,
+) -> bool {
+    match sel {
+        grammar::TypedValueSelector::Any => true,
+        grammar::TypedValueSelector::Exact(scalar) => scalar_exact_matches(t, scalar, value),
+        grammar::TypedValueSelector::String { string } => {
+            t == super::analyzers::FactValueType::Str
+                && string_selector_matches(string, value, regexes)
+        }
+        grammar::TypedValueSelector::Integer { integer } => {
+            t == super::analyzers::FactValueType::Integer
+                && numeric_bounds_hold(value.parse::<i64>().ok(), integer.min, integer.max)
+        }
+        grammar::TypedValueSelector::Number { number } => {
+            t == super::analyzers::FactValueType::Number
+                && numeric_bounds_hold(value.parse::<f64>().ok(), number.min, number.max)
+        }
+        grammar::TypedValueSelector::Boolean { boolean } => {
+            t == super::analyzers::FactValueType::Boolean
+                && value
+                    .parse::<bool>()
+                    .map(|b| b == *boolean)
+                    .unwrap_or(false)
+        }
+        grammar::TypedValueSelector::Path { path } => {
+            t == super::analyzers::FactValueType::Path && path_selector_matches(path, value, cwd)
+        }
+    }
+}
+
+/// Exact scalar equality strictly within the fact's catalog type. A scalar
+/// of another JSON type never equals a typed fact (no string→number,
+/// number→string, string→boolean coercion anywhere).
+fn scalar_exact_matches(
+    t: super::analyzers::FactValueType,
+    scalar: &grammar::ScalarValue,
+    value: &str,
+) -> bool {
+    use super::analyzers::FactValueType;
+    match (t, scalar) {
+        (FactValueType::Str, grammar::ScalarValue::Str(s)) => s == value,
+        (FactValueType::Integer, grammar::ScalarValue::Num(n)) => n
+            .as_i64()
+            .zip(value.parse::<i64>().ok())
+            .map(|(a, b)| a == b)
+            .unwrap_or(false),
+        (FactValueType::Number, grammar::ScalarValue::Num(n)) => n
+            .as_f64()
+            .zip(value.parse::<f64>().ok())
+            .map(|(a, b)| a == b)
+            .unwrap_or(false),
+        (FactValueType::Boolean, grammar::ScalarValue::Bool(b)) => {
+            value.parse::<bool>().map(|v| v == *b).unwrap_or(false)
+        }
+        // path facts carry their value as a literal path string
+        (FactValueType::Path, grammar::ScalarValue::Str(s)) => s == value,
+        _ => false,
+    }
+}
+
+/// Closed inclusive bounds: `min <= v <= max`; a missing bound is
+/// unbounded; an unparsable value never matches.
+fn numeric_bounds_hold<T: PartialOrd + Copy>(
+    value: Option<T>,
+    min: Option<T>,
+    max: Option<T>,
+) -> bool {
+    let Some(v) = value else {
+        return false;
+    };
+    if let Some(lo) = min
+        && v < lo
+    {
+        return false;
+    }
+    if let Some(hi) = max
+        && v > hi
+    {
+        return false;
+    }
+    true
+}
+
+fn string_selector_matches(
+    sel: &grammar::StringValueSelector,
+    value: &str,
+    regexes: &grammar::RegexCache,
+) -> bool {
+    match sel {
+        grammar::StringValueSelector::Any => true,
+        grammar::StringValueSelector::OneOf(one_of) => one_of.iter().any(|w| w == value),
+        // whole-value re2-v1 matching from the load-time cache; an uncompiled
+        // pattern cannot match (fail closed — config load always compiles)
+        grammar::StringValueSelector::Regex(pattern) => regexes.whole_match(pattern, value),
+    }
+}
+
+/// Lexical path semantics on path-typed fact values (design §Lexical path
+/// policy): exact full-string compare; within/outside on component
+/// boundaries. No I/O, no coercion.
+fn path_selector_matches(sel: &grammar::PathSelector, value: &str, cwd: &str) -> bool {
+    match sel {
+        grammar::PathSelector::Exact { exact } => exact == value,
+        grammar::PathSelector::Within { within } => path_within(value, within, cwd),
+        grammar::PathSelector::Outside { outside } => !path_within(value, outside, cwd),
+    }
 }
 
 fn nested_test(e: &grammar::NestedPartTest, n: &NestedResult) -> bool {
@@ -911,18 +1076,10 @@ pub fn allow_covers(
         Some(fm) if fm.all.is_some() => {
             let entries = fm.all.as_ref().unwrap();
             for fact in &ctx.part.facts {
-                let covered = entries.iter().any(|e: &FactTest| {
-                    e.name == fact.fact_name
-                        && e.analyzer
-                            .as_ref()
-                            .map(|a| a.as_str() == fact.analyzer_id)
-                            .unwrap_or(true)
-                        && e.value
-                            .as_ref()
-                            .map(|v| v.as_str() == fact.value)
-                            .unwrap_or(true)
-                });
-                if !covered {
+                if !entries
+                    .iter()
+                    .any(|e: &grammar::FactTest| fact_test_holds(e, fact, ctx.regexes, cwd))
+                {
                     failures.push(CoverageCode::AllowCoverageMissing);
                     break;
                 }
@@ -1338,5 +1495,331 @@ mod tests {
         };
         assert!(coordinate_matches(&sel, &tag_at(0)));
         assert!(!coordinate_matches(&sel, &tag_at(1)));
+    }
+    // ── Typed fact-value selector matrix (issue #35) ────────────────────────
+    //
+    // Typed matching runs on the (fact type, typed value) pair without any
+    // coercing lookup: string selector on a string fact, closed inclusive
+    // numeric bounds, exact booleans, lexical paths. Cross-type arms never
+    // match (no string→path, string→number, number→string, …).
+
+    use super::grammar::{StringValueSelector as SVS, TypedValueSelector as TVS};
+    use crate::checker::analyzers;
+
+    fn sel(text: &str) -> TVS {
+        serde_json::from_str(text).expect("test selector wire form must parse")
+    }
+
+    /// `true` when `selector` selects `value` under `fact_type`. The
+    /// load-time regex cache is primed from the selector's own nested
+    /// `string.regex` pattern (mirroring config-load compilation; a
+    /// non-compiling pattern stays absent and never matches).
+    fn matches(text: &str, fact_type: analyzers::FactValueType, value: &str, cwd: &str) -> bool {
+        let mut cache = grammar::RegexCache::default();
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(text)
+            && let Some(p) = v
+                .get("string")
+                .and_then(|s| s.get("regex"))
+                .and_then(|p| p.as_str())
+        {
+            let _ = cache.add(p);
+        }
+        typed_value_matches_type(fact_type, &sel(text), value, &cache, cwd)
+    }
+
+    #[test]
+    fn string_facts_match_string_arms_only() {
+        use analyzers::FactValueType::Str;
+        assert!(matches(r#"{ "any": true }"#, Str, "inPlace", "/"));
+        assert!(matches(r#"{ "exact": "inPlace" }"#, Str, "inPlace", "/"));
+        assert!(!matches(r#"{ "exact": "readOnly" }"#, Str, "inPlace", "/"));
+        assert!(matches(
+            r#"{ "string": { "oneOf": ["inPlace", "readOnly"] } }"#,
+            Str,
+            "readOnly",
+            "/"
+        ));
+        assert!(!matches(
+            r#"{ "string": { "oneOf": ["inPlace"] } }"#,
+            Str,
+            "readOnly",
+            "/"
+        ));
+        // re2-v1: whole-value matching, case-sensitive
+        let all = matches(
+            r#"{ "string": { "regex": "[a-zA-Z]+" } }"#,
+            Str,
+            "readOnly",
+            "/",
+        ) && matches(
+            r#"{ "string": { "regex": "readOnly" } }"#,
+            Str,
+            "readOnly",
+            "/",
+        );
+        assert!(all);
+        assert!(!matches(
+            r#"{ "string": { "regex": "eadOnly" } }"#,
+            Str,
+            "readOnly",
+            "/"
+        ));
+        assert!(!matches(
+            r#"{ "string": { "regex": "[A-Z]" } }"#,
+            Str,
+            "readOnly",
+            "/"
+        ));
+        assert!(!matches(
+            r#"{ "string": { "regex": "(?=a)" } }"#,
+            Str,
+            "a",
+            "/"
+        ));
+        // cross-type arms never match a string fact
+        assert!(!matches(r#"{ "integer": { "min": 0 } }"#, Str, "5", "/"));
+        assert!(!matches(r#"{ "number": { "min": 0.0 } }"#, Str, "5.0", "/"));
+        assert!(!matches(r#"{ "boolean": true }"#, Str, "true", "/"));
+        assert!(!matches(r#"{ "path": { "within": "/5" } }"#, Str, "5", "/"));
+        // scalar exact of another JSON type never equals a string fact
+        assert!(!matches(r#"{ "exact": 5 }"#, Str, "5", "/"));
+        assert!(!matches(r#"{ "exact": true }"#, Str, "true", "/"));
+    }
+
+    #[test]
+    fn numeric_selectors_are_closed_and_inclusive() {
+        use analyzers::FactValueType::{Integer, Number};
+        // integer boundaries are inclusive on both ends
+        assert!(matches(
+            r#"{ "integer": { "min": 5, "max": 9 } }"#,
+            Integer,
+            "5",
+            "/"
+        ));
+        assert!(matches(
+            r#"{ "integer": { "min": 5, "max": 9 } }"#,
+            Integer,
+            "9",
+            "/"
+        ));
+        assert!(matches(
+            r#"{ "integer": { "min": 5, "max": 9 } }"#,
+            Integer,
+            "7",
+            "/"
+        ));
+        assert!(!matches(
+            r#"{ "integer": { "min": 5, "max": 9 } }"#,
+            Integer,
+            "4",
+            "/"
+        ));
+        assert!(!matches(
+            r#"{ "integer": { "min": 5, "max": 9 } }"#,
+            Integer,
+            "10",
+            "/"
+        ));
+        // one-sided bounds
+        assert!(matches(r#"{ "integer": { "min": 0 } }"#, Integer, "0", "/"));
+        assert!(matches(
+            r#"{ "integer": { "max": -1 } }"#,
+            Integer,
+            "-1",
+            "/"
+        ));
+        assert!(!matches(
+            r#"{ "integer": { "max": -1 } }"#,
+            Integer,
+            "0",
+            "/"
+        ));
+        // number bounds, same closed inclusive semantics
+        assert!(matches(
+            r#"{ "number": { "min": 0.5, "max": 9.5 } }"#,
+            Number,
+            "9.5",
+            "/"
+        ));
+        assert!(matches(
+            r#"{ "number": { "min": 0.5 } }"#,
+            Number,
+            "9.5",
+            "/"
+        ));
+        assert!(!matches(
+            r#"{ "number": { "max": 9.5 } }"#,
+            Number,
+            "9.6",
+            "/"
+        ));
+        // unparsable fact text never matches
+        assert!(!matches(
+            r#"{ "integer": { "min": 0 } }"#,
+            Integer,
+            "not-an-int",
+            "/"
+        ));
+        // numeric arms never match another numeric catalog type
+        assert!(!matches(
+            r#"{ "number": { "min": 5.0 } }"#,
+            Integer,
+            "5",
+            "/"
+        ));
+        assert!(!matches(
+            r#"{ "integer": { "min": 5 } }"#,
+            Number,
+            "5.0",
+            "/"
+        ));
+        // scalar exact stays inside its own numeric type; numeric equality
+        // (5 == 5.0) holds within the number type, never across types
+        assert!(matches(r#"{ "exact": 5 }"#, Integer, "5", "/"));
+        assert!(matches(r#"{ "exact": 5 }"#, Number, "5.0", "/"));
+        assert!(matches(r#"{ "exact": 5.5 }"#, Number, "5.5", "/"));
+    }
+
+    #[test]
+    fn boolean_selectors_are_exact() {
+        use analyzers::FactValueType::Boolean;
+        assert!(matches(r#"{ "boolean": true }"#, Boolean, "true", "/"));
+        assert!(matches(r#"{ "boolean": false }"#, Boolean, "false", "/"));
+        assert!(!matches(r#"{ "boolean": true }"#, Boolean, "false", "/"));
+        assert!(!matches(r#"{ "boolean": false }"#, Boolean, "true", "/"));
+        assert!(!matches(r#"{ "boolean": true }"#, Boolean, "1", "/"));
+        assert!(matches(r#"{ "exact": true }"#, Boolean, "true", "/"));
+        assert!(!matches(r#"{ "exact": false }"#, Boolean, "true", "/"));
+    }
+
+    #[test]
+    fn path_selectors_use_lexical_semantics() {
+        use analyzers::FactValueType::Path;
+        assert!(matches(
+            r#"{ "path": { "exact": "/work/project/README.md" } }"#,
+            Path,
+            "/work/project/README.md",
+            "/"
+        ));
+        assert!(matches(
+            r#"{ "path": { "within": "/work/project" } }"#,
+            Path,
+            "/work/project/src/main.rs",
+            "/"
+        ));
+        // component boundary: /work/repo2 is not within /work/repo
+        assert!(!matches(
+            r#"{ "path": { "within": "/work/repo" } }"#,
+            Path,
+            "/work/repo2/file",
+            "/"
+        ));
+        assert!(matches(
+            r#"{ "path": { "outside": "/work/private" } }"#,
+            Path,
+            "/work/project/src",
+            "/"
+        ));
+        assert!(!matches(
+            r#"{ "path": { "outside": "/work/project" } }"#,
+            Path,
+            "/work/project/src",
+            "/"
+        ));
+        // relative fact values compose with the command cwd lexically
+        assert!(matches(
+            r#"{ "path": { "within": "/tmp/work" } }"#,
+            Path,
+            "report.txt",
+            "/tmp/work"
+        ));
+        assert!(!matches(
+            r#"{ "path": { "exact": "/tmp/other" } }"#,
+            Path,
+            "report.txt",
+            "/tmp/work"
+        ));
+        // string facts never carry path semantics (no string→path coercion)
+        assert!(!matches(
+            r#"{ "path": { "within": "/work/project" } }"#,
+            analyzers::FactValueType::Str,
+            "/work/project/README.md",
+            "/"
+        ));
+    }
+
+    /// Version selectors compare the analyzer id's vN suffix exactly.
+    #[test]
+    fn fact_version_selects_the_catalog_version() {
+        let fact = FactObs {
+            analyzer_id: "sed-v1",
+            fact_name: "executionPrimitive".into(),
+            value: "readOnly".into(),
+            occurrence: 1,
+            safety_relevant: true,
+        };
+        let e_v1: grammar::FactTest =
+            serde_json::from_str(r#"{ "name": "executionPrimitive", "version": "1" }"#).unwrap();
+        let e_v2: grammar::FactTest =
+            serde_json::from_str(r#"{ "name": "executionPrimitive", "version": "2" }"#).unwrap();
+        assert!(fact_test_holds(
+            &e_v1,
+            &fact,
+            &grammar::RegexCache::default(),
+            "/"
+        ));
+        assert!(!fact_test_holds(
+            &e_v2,
+            &fact,
+            &grammar::RegexCache::default(),
+            "/"
+        ));
+        // occurrence selectors select 1-based ordinals
+        let e_occ_all: grammar::FactTest =
+            serde_json::from_str(r#"{ "name": "assignment", "occurrence": "all" }"#).unwrap();
+        let e_occ_2: grammar::FactTest =
+            serde_json::from_str(r#"{ "name": "assignment", "occurrence": 2 }"#).unwrap();
+        assert!(e_occ_all.occurrence.unwrap().selects(fact.occurrence));
+        assert!(!e_occ_2.occurrence.unwrap().selects(fact.occurrence));
+        // unknown facts fail closed: no selector matches them
+        let uncatalogued = FactObs {
+            analyzer_id: "sed-v1",
+            fact_name: "unknownFact".into(),
+            value: "x".into(),
+            occurrence: 1,
+            safety_relevant: false,
+        };
+        let e: grammar::FactTest = serde_json::from_str(r#"{ "name": "unknownFact" }"#).unwrap();
+        assert!(!fact_test_holds(
+            &e,
+            &uncatalogued,
+            &grammar::RegexCache::default(),
+            "/"
+        ));
+    }
+
+    /// Whole-value regex arm and the oneOf arm at helper level.
+    #[test]
+    fn string_selector_helpers_use_one_of_and_regex() {
+        let one_of: SVS = serde_json::from_str(r#"{ "oneOf": ["a", "b"] }"#).unwrap();
+        assert!(string_selector_matches(
+            &one_of,
+            "b",
+            &grammar::RegexCache::default()
+        ));
+        assert!(!string_selector_matches(
+            &one_of,
+            "c",
+            &grammar::RegexCache::default()
+        ));
+        let re: SVS = serde_json::from_str(r#"{ "regex": "a.c" }"#).unwrap();
+        let cache = grammar::RegexCache::compile("a.c").unwrap();
+        assert!(string_selector_matches(&re, "abc", &cache));
+        assert!(!string_selector_matches(&re, "xabc", &cache));
+        let bad: SVS = serde_json::from_str(r#"{ "regex": "(?=a)" }"#).unwrap();
+        assert!(
+            !string_selector_matches(&bad, "a", &grammar::RegexCache::default()),
+            "uncompilable patterns never match"
+        );
     }
 }

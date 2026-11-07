@@ -29,7 +29,7 @@ const SED_XARGS: &str = r#"{  "version": 2,
           "message": "In-place edits must go through a workspace commit.",
           "match": {
             "classification": "complete",
-            "facts": { "any": [{ "name": "executionPrimitive", "value": "inPlace" }] }
+            "facts": { "any": [{ "name": "executionPrimitive", "value": { "exact": "inPlace" } }] }
           }
         },
         {
@@ -42,9 +42,10 @@ const SED_XARGS: &str = r#"{  "version": 2,
             "environment": { "none": true },
             "paths": { "none": true },
             "facts": { "all": [
-              { "name": "programForm", "value": "positional" },
-              { "name": "programForm", "value": "expression" },
-              { "name": "programForm", "value": "file" }
+              { "analyzer": "sed-v1", "version": "1", "name": "executionPrimitive", "occurrence": "all", "value": { "exact": "readOnly" } },
+              { "analyzer": "sed-v1", "version": "1", "name": "programForm", "occurrence": "all", "value": { "exact": "positional" } },
+              { "analyzer": "sed-v1", "version": "1", "name": "programForm", "occurrence": "all", "value": { "exact": "expression" } },
+              { "analyzer": "sed-v1", "version": "1", "name": "programForm", "occurrence": "all", "value": { "exact": "file" } }
             ] },
             "nestedParts": { "none": true }
           }
@@ -309,8 +310,9 @@ fn sed_plain_reads_allowed() {
 
 #[test]
 fn sed_program_form_fact_emitted() {
-    // programForm (`positional`) fires for a bare script, and the read allow
-    // only survives because programForm is not safety-relevant
+    // programForm (`positional`) fires for a bare script, and the read
+    // allow survives only because every emitted fact (including the
+    // safety-relevant executionPrimitive) is typed-covered
     let v = run(SED_XARGS, "sed s/a/b/ f.txt");
     let facts = run_facts(&v);
     assert_eq!(facts["evidence"], "complete");
@@ -334,6 +336,298 @@ fn xargs_stdin_arg_command_asks() {
     // operand with no matching deny still asks (stdin-append ⇒ opaque)
     let v = run(SED_XARGS, "xargs echo hi");
     assert_eq!(v.verdict, VerdictKind::Ask);
+}
+
+// ── Issue #35: typed fact selectors + sed-v1 read-only options ──────────────
+//
+// Standalone probe configs (loaded through the real config entry point):
+// `sed -n` and `sed -E` are read-only options in the sed-v1 closed
+// compatibility table; `-i` keeps emitting in-place facts; unknown options,
+// uncovered safety-relevant facts, and wrong typed selectors fail closed.
+
+const SED_FULL: &str = r#"{  "version": 2,
+  "defaults": { "action": "ask", "message": "No approved command profile matched.", "redirectPolicy": "no-redirects" },
+  "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
+  "profiles": [
+    {
+      "id": "sed",
+      "executables": ["sed"],
+      "options": {
+        "noPrint": { "aliases": ["-n"], "arity": 0 },
+        "extendedRegexp": { "aliases": ["-E"], "arity": 0 },
+        "inPlace": { "aliases": ["-i"], "arity": 0 },
+        "expression": { "aliases": ["-e"], "arity": 1 },
+        "file": { "aliases": ["-f"], "arity": 1 }
+      },
+      "analyzer": "sed-v1",
+      "rules": [
+        {
+          "id": "sed/deny-inplace",
+          "action": "deny",
+          "message": "In-place edits must go through a workspace commit.",
+          "match": {
+            "classification": "complete",
+            "facts": { "any": [{ "name": "executionPrimitive", "value": { "exact": "inPlace" } }] }
+          }
+        },
+        {
+          "id": "sed/allow-n-print",
+          "action": "allow",
+          "match": {
+            "classification": "complete",
+            "arguments": { "exact": ["1,5p", "file"] },
+            "options": { "allowed": [{ "option": "noPrint", "required": true, "repeatable": false }] },
+            "environment": { "none": true },
+            "paths": { "none": true },
+            "facts": { "all": [
+              { "analyzer": "sed-v1", "version": "1", "name": "executionPrimitive", "occurrence": "all", "value": { "exact": "readOnly" } },
+              { "analyzer": "sed-v1", "version": "1", "name": "programForm", "occurrence": "all", "value": { "exact": "positional" } }
+            ] },
+            "nestedParts": { "none": true }
+          }
+        },
+        {
+          "id": "sed/allow-ERE-substitute",
+          "action": "allow",
+          "match": {
+            "classification": "complete",
+            "arguments": { "exact": ["s/a/b/", "file"] },
+            "options": { "allowed": [{ "option": "extendedRegexp", "required": true, "repeatable": false }] },
+            "environment": { "none": true },
+            "paths": { "none": true },
+            "facts": { "all": [
+              { "analyzer": "sed-v1", "version": "1", "name": "executionPrimitive", "occurrence": "all", "value": { "exact": "readOnly" } },
+              { "analyzer": "sed-v1", "version": "1", "name": "programForm", "occurrence": "all", "value": { "exact": "positional" } }
+            ] },
+            "nestedParts": { "none": true }
+          }
+        }
+      ]
+    }
+  ]
+}"#;
+
+#[test]
+fn sed_n_read_only_print_allows() {
+    let v = run(SED_FULL, "sed -n '1,5p' file");
+    assert_eq!(
+        v.verdict,
+        VerdictKind::Allow,
+        "sed -n read produces a fact {}",
+        run_facts(&v)
+    );
+}
+
+#[test]
+fn sed_e_read_only_substitute_allows() {
+    let v = run(SED_FULL, "sed -E s/a/b/ file");
+    assert_eq!(v.verdict, VerdictKind::Allow);
+}
+
+#[test]
+fn sed_in_place_keeps_denying() {
+    let v = run(SED_FULL, "sed -i 's/a/b/' file");
+    assert_eq!(v.verdict, VerdictKind::Deny);
+    let facts = run_facts(&v);
+    assert!(
+        facts["matched"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r == "sed/deny-inplace"),
+        "deny emits through the inPlace analyzer fact: {facts}"
+    );
+}
+
+#[test]
+fn sed_unknown_option_fails_closed() {
+    let v = run(SED_FULL, "sed -x s/a/b/ f.txt");
+    assert_eq!(v.verdict, VerdictKind::Ask);
+    let facts = run_facts(&v);
+    assert!(
+        facts["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r == "unknown-option"),
+        "unknown sed option must be an unknown-option reason: {facts}"
+    );
+}
+
+#[test]
+fn sed_read_only_without_option_coverage_asks() {
+    // same -n command, but the profile has no noPrint declaration/allow:
+    // the unknown option makes evidence fail closed.
+    const SED_NO_N: &str = r#"{  "version": 2,
+  "defaults": { "action": "ask", "redirectPolicy": "no-redirects" },
+  "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
+  "profiles": [
+    {
+      "id": "sed",
+      "executables": ["sed"],
+      "options": {
+        "inPlace": { "aliases": ["-i"], "arity": 0 },
+        "expression": { "aliases": ["-e"], "arity": 1 }
+      },
+      "analyzer": "sed-v1",
+      "rules": [
+        {
+          "id": "sed/allow-n-print",
+          "action": "allow",
+          "match": {
+            "classification": "complete",
+            "arguments": { "exact": ["1,5p", "file"] },
+            "options": { "none": true },
+            "environment": { "none": true },
+            "paths": { "none": true },
+            "facts": { "all": [
+              { "analyzer": "sed-v1", "version": "1", "name": "executionPrimitive", "occurrence": "all", "value": { "exact": "readOnly" } }
+            ] },
+            "nestedParts": { "none": true }
+          }
+        }
+      ]
+    }
+  ]
+}"#;
+    let v = run(SED_NO_N, "sed -n '1,5p' file");
+    assert_eq!(v.verdict, VerdictKind::Ask, "-n requires option coverage");
+}
+
+#[test]
+fn sed_missing_safety_fact_coverage_does_not_allow() {
+    // an allow that covers only programForm leaves the safety-relevant
+    // executionPrimitive fact uncovered ⇒ the allow emits no vote.
+    const SED_UNCOVERED: &str = r#"{  "version": 2,
+  "defaults": { "action": "ask", "redirectPolicy": "no-redirects" },
+  "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
+  "profiles": [
+    {
+      "id": "sed",
+      "executables": ["sed"],
+      "options": {},
+      "analyzer": "sed-v1",
+      "rules": [
+        {
+          "id": "sed/allow-uncovered",
+          "action": "allow",
+          "match": {
+            "classification": "complete",
+            "arguments": { "exact": ["s/a/b/", "file"] },
+            "options": { "none": true },
+            "environment": { "none": true },
+            "paths": { "none": true },
+            "facts": { "all": [
+              { "analyzer": "sed-v1", "version": "1", "name": "programForm", "occurrence": "all", "value": { "exact": "positional" } }
+            ] },
+            "nestedParts": { "none": true }
+          }
+        }
+      ]
+    }
+  ]
+}"#;
+    let cfg = load_str(SED_UNCOVERED).expect("config without value must load");
+    let v = evaluate(&cfg, &letter("sed s/a/b/ file"));
+    assert_eq!(
+        v.verdict,
+        VerdictKind::Ask,
+        "missing safety coverage rejects the allow"
+    );
+    let facts = run_facts(&v);
+    assert!(
+        facts["rejected"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["ruleId"] == "sed/allow-uncovered"),
+        "rejected allow records coverage failure: {facts}"
+    );
+}
+
+#[test]
+fn sed_wrong_typed_fact_selector_does_not_allow() {
+    // a typed selector that compiles but does not select the emitted value
+    // (regex "inPlace" vs observed "readOnly") never qualifies the allow.
+    const SED_WRONG: &str = r#"{  "version": 2,
+  "defaults": { "action": "ask", "redirectPolicy": "no-redirects" },
+  "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
+  "profiles": [
+    {
+      "id": "sed",
+      "executables": ["sed"],
+      "options": {},
+      "analyzer": "sed-v1",
+      "rules": [
+        {
+          "id": "sed/allow-wrong",
+          "action": "allow",
+          "match": {
+            "classification": "complete",
+            "arguments": { "exact": ["s/a/b/", "file"] },
+            "options": { "none": true },
+            "environment": { "none": true },
+            "paths": { "none": true },
+            "facts": { "all": [
+              { "analyzer": "sed-v1", "version": "1", "name": "executionPrimitive", "occurrence": "all", "value": { "string": { "regex": "^inPlace$" } } }
+            ] },
+            "nestedParts": { "none": true }
+          }
+        }
+      ]
+    }
+  ]
+}"#;
+    let cfg = load_str(SED_WRONG).expect("wrong-value typed selector is valid config");
+    let v = evaluate(&cfg, &letter("sed s/a/b/ file"));
+    assert_eq!(
+        v.verdict,
+        VerdictKind::Ask,
+        "wrong typed selector cannot allow"
+    );
+}
+
+#[test]
+fn sed_allow_without_typed_value_still_requires_full_coverage() {
+    // omitting the value selector selects every observed occurrence of the
+    // fact — coverage must include the safety-relevant fact itself.
+    const SED_ALL_VALUES: &str = r#"{  "version": 2,
+  "defaults": { "action": "ask", "redirectPolicy": "no-redirects" },
+  "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
+  "profiles": [
+    {
+      "id": "sed",
+      "executables": ["sed"],
+      "options": {},
+      "analyzer": "sed-v1",
+      "rules": [
+        {
+          "id": "sed/allow-any-value",
+          "action": "allow",
+          "match": {
+            "classification": "complete",
+            "arguments": { "exact": ["s/a/b/", "file"] },
+            "options": { "none": true },
+            "environment": { "none": true },
+            "paths": { "none": true },
+            "facts": { "all": [
+              { "analyzer": "sed-v1", "version": "1", "name": "executionPrimitive", "occurrence": "all", "value": { "any": true } },
+              { "analyzer": "sed-v1", "version": "1", "name": "programForm", "occurrence": "all", "value": { "any": true } }
+            ] },
+            "nestedParts": { "none": true }
+          }
+        }
+      ]
+    }
+  ]
+}"#;
+    let cfg = load_str(SED_ALL_VALUES).expect("any-typed facts entries must load");
+    let v = evaluate(&cfg, &letter("sed s/a/b/ file"));
+    assert_eq!(
+        v.verdict,
+        VerdictKind::Allow,
+        "any-typed coverage covers all emitted facts"
+    );
 }
 
 // ── Wrapper / substitution semantics ────────────────────────────────────────
