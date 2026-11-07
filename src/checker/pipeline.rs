@@ -19,7 +19,7 @@
 
 use super::config::Config;
 use super::evidence::{ArgToken, EvidenceState, Part, reason};
-use super::grammar;
+
 use super::grammar::{
     AnalyzerId, OverrideMode, PathCoverage, Profile, RedirectCoverage, RedirectEntry,
     RedirectPolicy, RedirectPolicyOverride, Relation, Rule, VerdictKind,
@@ -447,33 +447,28 @@ fn path_coordinates(
     for sel in &prof.path_sources {
         if let Some(pc) = &sel.argument {
             // `{index}` selects that one positional; `{index, remainder: true}`
-            // also selects every positional past the index.
-            match pc {
-                grammar::PositionalCoordinate {
-                    index,
-                    remainder: false,
-                } if idx_ok(*index as usize, parsed.positionals.len()) => {
-                    let tok = &parsed.positionals[*index as usize];
-                    push(
-                        PathSourceTag::Argument { index: *index },
-                        tok.text.clone(),
-                        tok.resolvable,
-                        &mut out,
-                    );
-                }
-                grammar::PositionalCoordinate {
-                    remainder: true, ..
-                } => {
-                    for (k, tok) in parsed.positionals.iter().enumerate() {
-                        push(
-                            PathSourceTag::Argument { index: k as u32 },
-                            tok.text.clone(),
-                            tok.resolvable,
-                            &mut out,
-                        );
-                    }
-                }
-                _ => {}
+            // selects the positionals from the index onwards (inclusive).
+            let (start, remainder) = (pc.index, pc.remainder);
+            let positionals: Vec<(u32, &ArgToken)> = if remainder {
+                parsed
+                    .positionals
+                    .iter()
+                    .enumerate()
+                    .filter(|(k, _)| *k as u32 >= start)
+                    .map(|(k, t)| (k as u32, t))
+                    .collect()
+            } else if (start as usize) < parsed.positionals.len() {
+                vec![(start, &parsed.positionals[start as usize])]
+            } else {
+                Vec::new()
+            };
+            for (k, tok) in positionals {
+                push(
+                    PathSourceTag::Argument { index: k },
+                    tok.text.clone(),
+                    tok.resolvable,
+                    &mut out,
+                );
             }
         }
         if let Some(ov) = &sel.option_value {
@@ -544,10 +539,6 @@ fn path_coordinates(
         }
     }
     out
-}
-
-fn idx_ok(i: usize, len: usize) -> bool {
-    i < len
 }
 
 fn occurred_canonicals(parsed: &ParsedOptions) -> Vec<String> {

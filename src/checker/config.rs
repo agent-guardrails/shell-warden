@@ -516,8 +516,11 @@ fn validate_token_selector(sel: &TokenSelector, regexes: &mut RegexCache) -> Res
     }
 }
 
-/// Absolute lexical paths on every path-selector arm (no end-anchored globe,
-/// no relative form).
+/// Absolute lexical paths on every path-selector arm: a *normalized* absolute
+/// path — no `//`, no `.` / `..` components, no trailing slash. A root like
+/// `/repo/..` normalizes to `/` and would widen coverage; a root like
+/// `//work` shifts component comparison — both are invalid input, not
+/// implicitly normalized.
 fn validate_path_selector(p: &PathSelector) -> Result<(), String> {
     let (kind, val) = match p {
         PathSelector::Exact { exact } => ("exact", exact),
@@ -534,7 +537,30 @@ fn validate_path_selector(p: &PathSelector) -> Result<(), String> {
             "path selector {kind} root \"{val}\" must be an absolute lexical path"
         ));
     }
+    normalized_absolute(val).ok_or_else(|| {
+        format!("path selector {kind} root \"{val}\" is not a normalized absolute lexical path")
+    })?;
     Ok(())
+}
+
+/// The normalized form of an absolute lexical path, or `None` when the text
+/// is not absolute/normalized enough for a config root. Normalization is
+/// lexical only: component boundaries, no I/O (no symlink resolution).
+fn normalized_absolute(value: &str) -> Option<String> {
+    if !value.starts_with('/') {
+        return None;
+    }
+    if value == "/" {
+        return Some("/".into());
+    }
+    let comps: Vec<&str> = value[1..].split('/').collect();
+    for comp in &comps {
+        match *comp {
+            "" | "." | ".." => return None,
+            _ => {}
+        }
+    }
+    Some(format!("/{}", comps.join("/")))
 }
 
 fn validate_profile(
@@ -674,13 +700,28 @@ fn validate_profile(
                 profile.id
             ));
         }
-        if let Some(ov) = &sel.option_value
-            && (ov.value_ordinal == 0 || ov.value_ordinal > MAX_OPTION_ARITY as u32)
-        {
-            return Err(format!(
-                "profile \"{}\": optionValue valueOrdinal {} is outside 1..={MAX_OPTION_ARITY}",
-                profile.id, ov.value_ordinal
-            ));
+        if let Some(ov) = &sel.option_value {
+            // the option-value coordinate must name a declared canonical
+            // option and stay inside its fixed arity: a silent miss would let
+            // a path value slip through a `{ "none": true }` paths policy
+            let Some(spec) = profile.options.get(&ov.option) else {
+                return Err(format!(
+                    "profile \"{}\": path source optionValue references undeclared option \"{}\"",
+                    profile.id, ov.option
+                ));
+            };
+            if spec.arity == 0 {
+                return Err(format!(
+                    "profile \"{}\": path source optionValue references zero-arity option \"{}\"",
+                    profile.id, ov.option
+                ));
+            }
+            if ov.value_ordinal == 0 || ov.value_ordinal > spec.arity as u32 {
+                return Err(format!(
+                    "profile \"{}\": optionValue valueOrdinal {} is outside 1..={}",
+                    profile.id, ov.value_ordinal, spec.arity
+                ));
+            }
         }
         if sel.redirect.is_some() {
             return Err(format!(
@@ -811,14 +852,17 @@ fn validate_redirect_path_coverage(c: &PathCoverage) -> Result<(), String> {
     Ok(())
 }
 
-/// Lexical path policy: exactly one selector; trusted roots are absolute.
+/// Lexical path policy: exactly one selector; trusted roots are absolute *and*
+/// normalized (no `//`, no `.`/`..` components, no trailing slash — a
+/// non-normalized root would silently widen coverage).
 fn validate_path_policy(p: &PathPolicy) -> Result<(), String> {
     let set = p.exact.is_some() as u8 + p.within.is_some() as u8 + p.outside.is_some() as u8;
     if set != 1 {
         return Err("path policy must select exactly one of exact/within/outside".to_string());
     }
-    for root in ["within", "outside"] {
+    for root in ["exact", "within", "outside"] {
         let val = match root {
+            "exact" => p.exact.as_deref().unwrap_or("/"),
             "within" => p.within.as_deref().unwrap_or("/"),
             _ => p.outside.as_deref().unwrap_or("/"),
         };
@@ -827,6 +871,9 @@ fn validate_path_policy(p: &PathPolicy) -> Result<(), String> {
                 "path policy {root} root \"{val}\" must be an absolute lexical path"
             ));
         }
+        normalized_absolute(val).ok_or_else(|| {
+            format!("path policy {root} root \"{val}\" is not a normalized absolute lexical path")
+        })?;
     }
     Ok(())
 }
@@ -1498,6 +1545,145 @@ mod tests {
                     "values": { "each": { "regex": "(a)\\1" } } }] }"#,
             ),
             "re2-v1",
+        );
+    }
+
+    /// The fixed `re2-v1` dialect allows no flag configuration: inline flag
+    /// groups would silently change case sensitivity or anchoring, so every
+    /// `(?flags…)` / `(?flags:…)` / `(?-flags…)` form is invalid config —
+    /// while named groups and the non-capturing core stay valid.
+    #[test]
+    fn inline_regex_flags_rejected() {
+        for (name, pattern) in [
+            ("(?i) safe", "(?i)safe"),
+            ("(?i: core)", "(?i:safe"),
+            ("(?m) dot", "(?m)"),
+            ("(?-u) flags", "(?-u)"),
+        ] {
+            expect_invalid(
+                name,
+                &cargo_config(
+                    r#""name": { "aliases": ["--name"], "arity": 1 }"#,
+                    None,
+                    &format!(
+                        r#"{{ "allowed": [{{ "option": "name", "required": false, "repeatable": false,
+                    "values": {{ "each": {{ "regex": "{}" }} }} }}] }}"#,
+                        pattern
+                    ),
+                ),
+                "flag",
+            );
+        }
+        // named groups and bare non-capturing groups remain legal dialect
+        assert!(
+            load_str(&cargo_config(
+                r#""name": { "aliases": ["--name"], "arity": 1 }"#,
+                None,
+                r#"{ "allowed": [{ "option": "name", "required": false, "repeatable": false,
+                    "values": { "each": { "regex": "(?:ok)" } } }] }"#,
+            ))
+            .is_ok()
+        );
+        assert!(
+            load_str(&cargo_config(
+                r#""name": { "aliases": ["--name"], "arity": 1 }"#,
+                None,
+                r#"{ "allowed": [{ "option": "name", "required": false, "repeatable": false,
+                    "values": { "each": { "regex": "(?P<sub>[a-z]+)" } } }] }"#,
+            ))
+            .is_ok()
+        );
+    }
+
+    /// Selector (and policy) roots must be normalized absolute lexical paths:
+    /// `//`, `.` and `..` components and trailing slashes shift the
+    /// component-boundary semantics and would widen coverage.
+    #[test]
+    fn non_normalized_lexical_roots_rejected() {
+        for (name, root) in [
+            ("double slash", "//work/project"),
+            ("dot component", "/work/./project"),
+            ("dot-dot component", "/work/repo/.."),
+            ("trailing slash", "/work/project/"),
+        ] {
+            expect_invalid(
+                name,
+                &cargo_config(
+                    r#""name": { "aliases": ["--name"], "arity": 1 }"#,
+                    None,
+                    &format!(
+                        r#"{{ "allowed": [{{ "option": "name", "required": false, "repeatable": false,
+                    "values": {{ "each": {{ "path": {{ "within": "{}" }} }} }} }}] }}"#,
+                        root
+                    ),
+                ),
+                "root",
+            );
+        }
+        // the bare root "/" normalizes to itself and stays valid
+        assert!(
+            load_str(&cargo_config(
+                r#""name": { "aliases": ["--name"], "arity": 1 }"#,
+                None,
+                r#"{ "allowed": [{ "option": "name", "required": false, "repeatable": false,
+                    "values": { "each": { "path": { "within": "/" } } } }] }"#,
+            ))
+            .is_ok()
+        );
+        // the same rule guards redirect-policy path roots
+        let Err(err) = load_str(
+            r#"{ "version": 2,
+  "defaults": { "action": "ask" },
+  "redirectPolicies": { "p": { "redirects": { "all": [{ "sourceFd": "default", "operator": ">", "occurrence": "all", "target": { "kind": "literalPath" } }] },
+    "paths": { "all": [{ "coordinate": { "redirect": { "operator": ">", "sourceFd": "default", "occurrence": "all" } }, "within": "/tmp//x" }] } } },
+  "profiles": [] }"#,
+        ) else {
+            panic!("a redirect policy path root with // must reject");
+        };
+        assert!(err.contains("normalized absolute lexical path"), "{err}");
+    }
+
+    /// A pathSources `optionValue` coordinate must name a declared canonical
+    /// option and stay inside its fixed arity: otherwise the coordinate
+    /// would silently never be produced and a path value could pass a
+    /// `{ "none": true }` paths policy.
+    #[test]
+    fn path_source_option_value_validates_the_option_grammar() {
+        let base = |option_lines: &str, ordinal: u32| {
+            format!(
+                r#"{{
+  "version": 2,
+  "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
+  "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
+  "profiles": [{{
+      "id": "cargo",
+      "executables": ["cargo"],
+      "options": {{ {option_lines} }},
+      "pathSources": [{{ "optionValue": {{ "option": "file", "valueOrdinal": {ordinal} }} }}],
+      "rules": []
+  }}]
+}}"#
+            )
+        };
+        // ordinal inside the declared arity-1 option is fine
+        assert!(load_str(&base(r#""file": { "aliases": ["--file"], "arity": 1 }"#, 1)).is_ok());
+        // undeclared canonical option
+        expect_invalid(
+            "undeclared option value",
+            &base(r#""name": { "aliases": ["--name"], "arity": 1 }"#, 1),
+            "undeclared option",
+        );
+        // ordinal beyond the fixed arity (declared arity 2)
+        expect_invalid(
+            "ordinal beyond arity",
+            &base(r#""file": { "aliases": ["--rename"], "arity": 2 }"#, 3),
+            "outside 1..=",
+        );
+        // zero-arity option can never produce a value coordinate
+        expect_invalid(
+            "zero-arity option value",
+            &base(r#""file": { "aliases": ["-v"], "arity": 0 }"#, 1),
+            "zero-arity",
         );
     }
 

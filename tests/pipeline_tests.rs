@@ -960,8 +960,117 @@ fn fixed_arity_probes() {
     );
 }
 
-// Ask/deny ordinary predicate: `options.values` now carries one closed token
-// selector per canonical option; the existential test is ∃ occurrence × value.
+// ── Review regressions: fail-closed option parsing and path coordinates ─────
+
+/// `rm -rf /` with a policy that allows `-r`/`-f` but no positional arguments
+/// must never allow: the cluster is one argv token and the argument `/`
+/// stays an uncovered positional (historical bug: the cluster swallowed the
+/// following argv token, a fail-open allow).
+#[test]
+fn short_option_cluster_never_swallows_the_argument() {
+    let config = r#"
+{
+  "version": 2,
+  "defaults": { "action": "ask", "redirectPolicy": "no-redirects" },
+  "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
+  "profiles": [
+    {
+      "id": "rm", "executables": ["rm"],
+      "options": { "recursive": { "aliases": ["-r"], "arity": 0 }, "force": { "aliases": ["-f"], "arity": 0 } },
+      "rules": [
+        {
+          "id": "rm/allow-recursive-force", "action": "allow",
+          "match": {
+            "classification": "complete",
+            "arguments": { "exact": [] },
+            "options": { "allowed": [
+              { "option": "recursive", "required": false, "repeatable": false },
+              { "option": "force", "required": false, "repeatable": false }
+            ] },
+            "environment": { "none": true },
+            "paths": { "none": true },
+            "facts": { "none": true },
+            "nestedParts": { "none": true }
+          },
+          "redirectPolicy": { "mode": "replace", "policies": ["no-redirects"] }
+        }
+      ]
+    }
+  ]
+}"#;
+    let cfg = load_str(config).expect("cluster probe config must load");
+    assert_eq!(
+        evaluate(&cfg, &letter("rm -rf /")).verdict,
+        VerdictKind::Ask,
+        "the `/` argument stays an uncovered positional — no fail-open allow"
+    );
+    assert_eq!(
+        evaluate(&cfg, &letter("rm -r -f /")).verdict,
+        VerdictKind::Ask
+    );
+    assert_eq!(
+        evaluate(&cfg, &letter("rm -rf")).verdict,
+        VerdictKind::Allow,
+        "the flag-only cluster still allows"
+    );
+}
+
+/// `{index, remainder: true}` path sources select the positionals from the
+/// index onwards (inclusive) — not every positional (historical bug: the
+/// index was ignored).
+#[test]
+fn remainder_path_source_selects_from_the_index() {
+    let config = |index: u32| {
+        format!(
+            r#"
+{{
+  "version": 2,
+  "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
+  "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
+  "profiles": [
+    {{
+      "id": "cargo", "executables": ["cargo"],
+      "options": {{}},
+      "pathSources": [{{ "argument": {{ "index": {index}, "remainder": true }} }}],
+      "rules": [
+        {{
+          "id": "cargo/allow-init-a", "action": "allow",
+          "match": {{
+            "classification": "complete",
+            "arguments": {{ "exact": ["init", "a"] }},
+            "options": {{ "none": true }},
+            "environment": {{ "none": true }},
+            "paths": {{ "none": true }},
+            "facts": {{ "none": true }},
+            "nestedParts": {{ "none": true }}
+          }},
+          "redirectPolicy": {{ "mode": "replace", "policies": ["no-redirects"] }}
+        }}
+      ]
+    }}
+  ]
+}}"#
+        )
+    };
+    // positionals of `cargo init a` are [init(0), a(1)]: with `{index: 2,
+    // remainder: true}` no coordinate may be produced → paths none holds
+    let cfg = load_str(&config(2)).expect("remainder probe config must load");
+    assert_eq!(
+        evaluate(&cfg, &letter_cwd("cargo init a", "/repo")).verdict,
+        VerdictKind::Allow,
+        "indices below the remaindes start stay unselected"
+    );
+    // with `{index: 1, remainder: true}` the index-1 positional exists and
+    // the `{ "none": true }` paths policy can no longer allow
+    let cfg = load_str(&config(1)).expect("remainder probe config must load");
+    assert_eq!(
+        evaluate(&cfg, &letter_cwd("cargo init a", "/repo")).verdict,
+        VerdictKind::Ask,
+        "the coordinate is produced from the bound index onwards"
+    );
+}
+
+// Ask/deny ordinary predicate: `options.values` now carries one closed token// selector per canonical option; the existential test is ∃ occurrence × value.
 // The empty value arrives as an *inline* form (`--message=`, declared
 // `inline: true`), because an empty argument token is dropped by the parser.
 #[test]

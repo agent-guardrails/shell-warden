@@ -1182,21 +1182,19 @@ pub struct RegexCache {
 impl RegexCache {
     /// Compile one whole-value `re2-v1` pattern: the user's syntax wrapped in
     /// `\A(?:…)\z` anchors so matching covers the entire value only. A
-    /// backreference or look-around subexpression is unsupported syntax and
-    /// invalidates the config (fail closed).
+    /// backreference, look-around subexpression or inline flag group is
+    /// unsupported syntax and invalidates the config (fail closed).
     pub fn compile(pattern: &str) -> Result<Self, String> {
-        regex::Regex::new(&format!(r"\A(?:{pattern})\z"))
-            .map(|re| RegexCache {
-                patterns: std::collections::BTreeMap::from([(pattern.to_string(), re)]),
-            })
-            .map_err(|e| format!("re2-v1 pattern compile failed: {e}"))
+        let re = compile_anchored_re2(pattern)?;
+        Ok(RegexCache {
+            patterns: std::collections::BTreeMap::from([(pattern.to_string(), re)]),
+        })
     }
 
     /// Pre-compile `pattern` into this cache (config-load phase).
     pub fn add(&mut self, pattern: &str) -> Result<(), String> {
         if !self.patterns.contains_key(pattern) {
-            let re = regex::Regex::new(&format!(r"\A(?:{pattern})\z"))
-                .map_err(|e| format!("re2-v1 pattern compile failed: {e}"))?;
+            let re = compile_anchored_re2(pattern)?;
             self.patterns.insert(pattern.to_string(), re);
         }
         Ok(())
@@ -1210,6 +1208,65 @@ impl RegexCache {
             .map(|re| re.is_match(value))
             .unwrap_or(false)
     }
+}
+
+/// Validate the fixed `re2-v1` dialect beyond the regex crate's grammar: no
+/// inline flag groups (`(?i)`, `(?m)`, `(?im-r:…)`, …) — matching is
+/// case-sensitive with no configurable flags. Named groups (`(?P<n>…)`,
+/// `(?<n>…)`) and a bare non-capturing `(?:…)`, are fine. The regex crate's
+/// compile step catches backreferences and look-around.
+fn compile_anchored_re2(pattern: &str) -> Result<regex::Regex, String> {
+    reject_inline_flags(pattern)?;
+    regex::Regex::new(&format!(r"\A(?:{pattern})\z"))
+        .map_err(|e| format!("re2-v1 pattern compile failed: {e}"))
+}
+
+fn reject_inline_flags(pattern: &str) -> Result<(), String> {
+    let bytes = pattern.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        i += 1;
+        // a backslash escape consumes the next byte (`\(` is a literal paren)
+        if bytes[i - 1] == b'\\' {
+            i += 1;
+            continue;
+        }
+        if bytes[i - 1] != b'(' || i >= bytes.len() || bytes[i] != b'?' {
+            continue;
+        }
+        // `(?…` group: decide flags vs named / non-capturing
+        let flag_letters: &[u8] = b"imsxUu";
+        let mut k = i + 1;
+        let mut chars: Vec<u8> = Vec::new();
+        let mut saw_dash = false;
+        while k < bytes.len() {
+            let b = bytes[k];
+            match b {
+                b'<' => {
+                    // `(?P<name>` / `(?<name>` — a named group, allowed
+                    break;
+                }
+                b':' | b')' => break,
+                b'-' => saw_dash = true,
+                _ => chars.push(b),
+            }
+            k += 1;
+        }
+        if bytes.get(i + 1) == Some(&b'P') || bytes.get(i + 1) == Some(&b'<') {
+            continue; // named group forms are dialect-legal
+        }
+        // any inline flag letter (or a flags-off group `(?-x)`) is a
+        // configurable setting and therefore outside `re2-v1`
+        let is_flag_group =
+            (!chars.is_empty() && chars.iter().all(|c| flag_letters.contains(c))) || saw_dash;
+        if is_flag_group {
+            return Err(format!(
+                "re2-v1 pattern uses an inline flag group at byte {i} — \
+                 the dialect allows no configured flags (case-sensitive whole-value matching only)"
+            ));
+        }
+    }
+    Ok(())
 }
 
 // ── Profiles ────────────────────────────────────────────────────────────────

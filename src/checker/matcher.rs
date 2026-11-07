@@ -208,12 +208,26 @@ fn string_value_holds(
 
 /// Lexical path selector against one literal token: cwd-joined, dot-dot
 /// normalized, component-boundary comparisons; no filesystem or symlink I/O.
+/// `exact` also compares the normalized form (cwd join + `.` / `..`
+/// resolution), so `./sub/../file` under cwd `/work/project` equals
+/// `/work/project/file`.
 pub fn path_selector_holds(selector: &PathSelector, text: &str, cwd: &str) -> bool {
     match selector {
-        PathSelector::Exact { exact } => exact.as_str() == text,
+        PathSelector::Exact { exact } => normalized_path(text, cwd) == *exact,
         PathSelector::Within { within } => path_within(text, within, cwd),
         PathSelector::Outside { outside } => !path_within(text, outside, cwd),
     }
+}
+
+/// `path` normalized lexically against `cwd` (join + `.` / `..` resolution,
+/// never an empty-root-form): `/a/../b`, `./x` and `a//b` reduce on component
+/// boundaries.
+pub fn normalized_path(path: &str, cwd: &str) -> String {
+    let comps = lexical_components(path, cwd);
+    if comps.is_empty() {
+        return "/".to_string();
+    }
+    format!("/{}", comps.join("/"))
 }
 
 /// One token-value selector (string arms, or the `path` arm) against one
@@ -489,7 +503,11 @@ pub fn coordinate_matches(sel: &PathCoordinateSelector, tag: &PathSourceTag) -> 
             Some(grammar::PositionalCoordinate {
                 index: n,
                 remainder,
-            }) => n == *index || remainder,
+            }) => {
+                // `{index}` selects that one positional; `{index, remainder:
+                // true}` selects the positionals from the index onwards.
+                if remainder { *index >= n } else { n == *index }
+            }
             None => false,
         },
         PathSourceTag::OptionValue {
@@ -1147,5 +1165,66 @@ mod tests {
         assert!(!path_within("/work/repo2", "/work/repo", "/"));
         assert!(path_within("reports/a.txt", "/tmp", "/tmp/work"));
         assert!(!path_within("reports/a.txt", "/var", "/tmp/work"));
+    }
+
+    /// `path.exact` applies the lexical normalization (cwd join + `.`/`..`
+    /// resolution), not a raw string comparison: under cwd `/work/project`
+    /// the token `./sub/../file` is `/work/project/file`.
+    #[test]
+    fn exact_path_selector_normalizes_lexically() {
+        let sel = PathSelector::Exact {
+            exact: "/work/project/file".into(),
+        };
+        assert!(path_selector_holds(&sel, "./sub/../file", "/work/project"));
+        assert!(path_selector_holds(
+            &sel,
+            "/work/project/file",
+            "/other/cwd"
+        ));
+        assert!(path_selector_holds(&sel, "file", "/work/project"));
+        assert!(!path_selector_holds(
+            &sel,
+            "/work/project/file2",
+            "/work/project"
+        ));
+        // a dot-dot climb out of the fixed token never hides its final shape
+        assert!(!path_selector_holds(
+            &sel,
+            "../../etc/passwd",
+            "/work/project"
+        ));
+        assert_eq!(normalized_path("/a//b/./c", "/x"), "/a/b/c");
+        assert_eq!(normalized_path("a/../../b", "/"), "/b");
+    }
+
+    /// Coordinate semantics after the positional-coordinate form collapse:
+    /// `{index}` selects exactly that positional; `{index, remainder: true}`
+    /// selects the positionals from the index onwards (inclusive).
+    #[test]
+    fn positional_coordinate_selects_index_or_remainder_from_index() {
+        let arg_sel =
+            |index: u32, remainder: bool| grammar::PositionalCoordinate { index, remainder };
+        let tag_at = |k: u32| PathSourceTag::Argument { index: k };
+        let none_sel = PathCoordinateSelector {
+            argument: None,
+            option_value: None,
+            environment: None,
+            redirect: None,
+            analyzer_fact: None,
+        };
+        let sel = PathCoordinateSelector {
+            argument: Some(arg_sel(1, true)),
+            ..none_sel.clone()
+        };
+        // remainder: from the index onwards — index 0 stays out, 1..=2 in
+        assert!(!coordinate_matches(&sel, &tag_at(0)));
+        assert!(coordinate_matches(&sel, &tag_at(1)));
+        assert!(coordinate_matches(&sel, &tag_at(2)));
+        let sel = PathCoordinateSelector {
+            argument: Some(arg_sel(0, false)),
+            ..none_sel
+        };
+        assert!(coordinate_matches(&sel, &tag_at(0)));
+        assert!(!coordinate_matches(&sel, &tag_at(1)));
     }
 }
