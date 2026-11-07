@@ -1,0 +1,10 @@
+[package]
+name = "sw-attrs"
+version = "0.0.0"
+edition = "2024"
+description = "Inert helper-attribute registrar for shell-warden grammar declarations whose Deserialize/Serialize impls are hand-written (see src/checker/grammar.rs)"
+license = "MIT"
+publish = false
+
+[lib]
+proc-macro = true

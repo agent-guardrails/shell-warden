@@ -13,16 +13,16 @@
 //   arity-0 workaround: declare the option arity 0 so its value becomes a
 //   positional argument covered by "remainder". Engine-side fix is tracked in
 //   agent-guardrails/shell-warden issue 32: https://github.com/agent-guardrails/shell-warden/issues/32
-// - remainder JSON is externally tagged with TWO levels:
-//   {"none":{"none":true}} / {"each":{"each":{"within":root}}}
-//   (the published schema lagged; grammar.rs is the ground truth).
+// - remainder JSON is the canonical one-level form
+//   {"none": true} / {"each": tokenSelector} (docs issue 21 / PR 22 made the
+//   public contract authoritative; nested externally tagged forms are invalid).
 const fs = require("node:fs")
 
 // ── coverage helpers ─────────────────────────────────────────────────────────
 const cov = (option) => ({ option, required: false, repeatable: false })
 const valCov = (option, values) => ({ option, required: false, repeatable: false, values: { each: values } })
-const rem = (within) => ({ each: { each: { within } } })
-const NO_MORE = { none: { none: true } }
+const rem = (within) => ({ each: { within } })
+const NO_MORE = { none: true }
 const ALLOW_TAIL = { environment: { none: true }, paths: { none: true }, facts: { none: true }, nestedParts: { none: true } }
 
 const allowRule = (id, prefix, optionCoverage, root = "/") => ({

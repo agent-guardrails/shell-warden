@@ -496,3 +496,124 @@ fn reorder_rules_options_policies_keeps_verdicts() {
 fn allow_log_oneline_smoke() {
     allow_log_oneline_impl();
 }
+
+// ── Config-v2 canonical wire DTOs (issue #34): fixture probe ────────────────
+//
+// Standalone temporary config files, loaded through the real config entry
+// point (`load_path`): canonical one-level forms load and their allow
+// coverage holds; nested externally tagged, mixed, and unknown forms are
+// rejected during config parsing — before any verdict is produced.
+
+fn probe_config(remainder_value: &str) -> String {
+    format!(
+        r#"{{
+  "version": 2,
+  "defaults": {{ "action": "ask", "message": "No approved command profile matched.", "redirectPolicy": "no-redirects" }},
+  "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
+  "profiles": [
+    {{
+      "id": "git",
+      "executables": ["git"],
+      "options": {{ "oneline": {{ "aliases": ["--oneline"], "arity": 0 }} }},
+      "rules": [
+        {{
+          "id": "git/allow-push-suffix", "action": "allow",
+          "match": {{
+            "classification": "complete",
+            "arguments": {{ "prefix": ["push"], "remainder": {remainder_value} }},
+            "options": {{ "none": true }}, "environment": {{ "none": true }},
+            "paths": {{ "none": true }}, "facts": {{ "none": true }},
+            "nestedParts": {{ "none": true }}
+          }},
+          "redirectPolicy": {{ "mode": "replace", "policies": ["no-redirects"] }}
+        }}
+      ]
+    }}
+  ]
+}}"#
+    )
+}
+
+fn probe_path(name: &str, text: &str) -> std::path::PathBuf {
+    let mut p = std::env::temp_dir();
+    p.push(format!(
+        "shell-warden-34-{}-{}.jsonc",
+        name,
+        std::process::id()
+    ));
+    std::fs::write(&p, text).expect("probe fixture must be writable");
+    p
+}
+
+#[test]
+fn remainder_dto_probe_accepts_canonical_forms() {
+    // canonical `{"none": true}`: no argument beyond the prefix.
+    let none_path = probe_path("none-canonical", &probe_config(r#"{ "none": true }"#));
+    let none_cfg = load_str(&std::fs::read_to_string(&none_path).unwrap())
+        .unwrap_or_else(|e| panic!("canonical none must load: {e}"));
+    assert_eq!(
+        evaluate(&none_cfg, &letter("git push --dry-run")).verdict,
+        VerdictKind::Ask,
+        "extra arguments beyond the none closure never allow"
+    );
+
+    // canonical `{"each": {"exact": [...]}}`.
+    let exact_path = probe_path(
+        "each-exact",
+        &probe_config(r#"{ "each": { "exact": ["origin", "main"] } }"#),
+    );
+    let exact_cfg = load_str(&std::fs::read_to_string(&exact_path).unwrap())
+        .unwrap_or_else(|e| panic!("canonical each-exact must load: {e}"));
+    assert_eq!(
+        evaluate(&exact_cfg, &letter("git push origin main")).verdict,
+        VerdictKind::Allow
+    );
+
+    // canonical `{"each": {"within": ...}}` (absolute lexical path root).
+    let within_path = probe_path(
+        "each-within",
+        &probe_config(r#"{ "each": { "within": "/repo" } }"#),
+    );
+    let within_cfg = load_str(&std::fs::read_to_string(&within_path).unwrap())
+        .unwrap_or_else(|e| panic!("canonical each-within must load: {e}"));
+    assert_eq!(
+        evaluate(&within_cfg, &letter_cwd("git push README.md", "/repo")).verdict,
+        VerdictKind::Allow
+    );
+
+    for p in [&none_path, &exact_path, &within_path] {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
+#[test]
+fn remainder_dto_probe_rejects_non_canonical_forms() {
+    for (name, remainder_value) in [
+        // nested externally tagged forms (docs fixtures RemainderPolicy/
+        // nested-serde-none.json, OptionValueCoverage/nested-serde-each.json)
+        ("none-nested", r#"{ "none": { "none": true } }"#),
+        ("each-nested", r#"{ "each": { "each": { "any": true } } }"#),
+        // mixed union arms
+        (
+            "mixed",
+            r#"{ "none": true, "each": { "exact": ["origin"] } }"#,
+        ),
+        // not-the-closed-form values and unknown forms
+        ("false-none", r#"{ "none": false }"#),
+        ("unknown", r#"{ "any": true }"#),
+        (
+            "rich-path-alias",
+            r#"{ "each": { "path": { "within": "/repo" } } }"#,
+        ),
+    ] {
+        let path = probe_path(name, &probe_config(remainder_value));
+        let text = std::fs::read_to_string(&path).unwrap();
+        let err = load_str(&text)
+            .err()
+            .unwrap_or_else(|| panic!("{name} probe must not parse"));
+        assert!(
+            err.contains("config invalid"),
+            "{name} probe must fail during config parsing: {err}"
+        );
+    }
+}

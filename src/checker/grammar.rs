@@ -3,6 +3,10 @@
 // Serde types mirror schemas/shell-warden.config.v2.schema.json exactly;
 // `deny_unknown_fields` everywhere = strict validation at parse time.
 //
+// The config-v2 wire grammar declarations live in one contiguous, marked
+// region below; `agent-guardrails/docs` (PR 22) snapshots exactly that region
+// and fails closed on grammar drift. Keep it contiguous and free of helpers.
+//
 // `option` is the umbrella term: arity 0 = flag; arity 1..=4 consumes values.
 // No v1 compatibility: a v2 checker reads v2 only (design §Migration).
 
@@ -112,22 +116,6 @@ impl Default for Limits {
 pub struct RedirectPolicy {
     pub redirects: RedirectCoverage,
     pub paths: PathCoverage,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-#[serde(untagged)]
-pub enum RedirectCoverage {
-    None { none: bool },
-    All { all: Vec<RedirectEntry> },
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-#[serde(untagged)]
-pub enum PathCoverage {
-    None { none: bool },
-    All { all: Vec<PathEntry> },
 }
 
 /// Redirect operator catalog (closed, design §Action-sensitive matching):
@@ -322,20 +310,6 @@ pub struct PathCoordinateSelector {
     pub analyzer_fact: Option<FactCoordinate>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-#[serde(untagged)]
-pub enum PositionalCoordinate {
-    N {
-        index: u32,
-        #[serde(default)]
-        remainder: bool,
-    },
-    All {
-        all: bool,
-    },
-}
-
 impl PositionalCoordinate {
     pub fn is_remainder_form(&self) -> bool {
         matches!(
@@ -376,6 +350,325 @@ pub struct FactCoordinate {
     pub name: String,
     #[serde(default)]
     pub occurrence: Option<Occurrence>,
+}
+
+// ── Config v2 wire grammar (stable snapshot region) ─────────────────────────
+//
+// Every config-v2 grammar declaration consumed by the docs drift guard sits
+// between the two markers, contiguously and completely; the docs repository
+// (PR 22) snapshots exactly this region and fails closed on drift. No
+// helper declarations inside the markers.
+
+// shell-warden-config-v2-grammar: begin
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+#[serde(untagged)]
+pub enum RedirectCoverage {
+    None { none: bool },
+    All { all: Vec<RedirectEntry> },
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+#[serde(untagged)]
+pub enum PathCoverage {
+    None { none: bool },
+    All { all: Vec<PathEntry> },
+}
+
+/// `rustfmt::skip` pins the single-line `All { all: bool }` variant: the docs
+/// grammar snapshot is token-identical to this source and rustfmt would
+/// otherwise reformat the variant into a comma that drifts. The attribute is
+/// invisible to the snapshot extractor.
+#[rustfmt::skip]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+#[serde(untagged)]
+pub enum PositionalCoordinate {
+    N {
+        index: u32,
+        #[serde(default)]
+        remainder: bool,
+    },
+    All { all: bool },
+}
+
+/// Positional-argument matcher. `prefix` requires an explicit `remainder`;
+/// `exact` must not carry one.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ArgumentsMatcher {
+    #[serde(default)]
+    pub exact: Option<Vec<String>>,
+    #[serde(default)]
+    pub prefix: Option<Vec<String>>,
+    /// Remainder policy: only meaningful (and mandatory!) with `prefix`.
+    pub remainder: Option<RemainderPolicy>,
+    /// Existential test: any positional token matches one of these globs.
+    #[serde(default)]
+    pub contains_any: Option<Vec<String>>,
+}
+
+/// Cover the remaining positional arguments after `prefix`: `{none: true}` = no
+/// further arguments; `{each: selector}` = every remaining literal token must
+/// satisfy the token selector (design §Reusable redirect policies semantics;
+/// closed vocabulary: exact-member or safe path-selector).
+#[derive(Debug, Clone, PartialEq, sw_attrs::GrammarDocAttrs)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub enum RemainderPolicy {
+    None { none: bool },
+    Each { each: TokenSelector },
+}
+
+/// Closed token selector for `remainder: {each}`.
+#[derive(Debug, Clone, PartialEq, sw_attrs::GrammarDocAttrs)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub enum TokenSelector {
+    /// Every remainder token must be one of these literal tokens.
+    Exact(Vec<String>),
+    /// Every remainder token must be a literal path within this lexical root.
+    Within(String),
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct OptionsMatcher {
+    #[serde(default)]
+    pub present_all: Option<Vec<String>>,
+    #[serde(default)]
+    pub present_any: Option<Vec<String>>,
+    #[serde(default)]
+    pub absent_all: Option<Vec<String>>,
+    /// Values map: canonical option → glob list; existential per value.
+    pub values: Option<std::collections::BTreeMap<String, Vec<String>>>,
+    /// Allow coverage policy ({ "none": true }); selects the allow form.
+    pub none: Option<bool>,
+    /// Allow coverage policy ({ "allowed": [entry, ...] }).
+    pub allowed: Option<Vec<OptionCoverage>>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct OptionCoverage {
+    pub option: String,
+    pub required: bool,
+    pub repeatable: bool,
+    /// Closed value selector for every consumed / inline value.
+    pub values: Option<ValuesCoverage>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+#[serde(untagged)]
+pub enum ValuesCoverage {
+    None { none: bool },
+    Each { each: Vec<String> },
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct EnvironmentTest {
+    pub name: String,
+    /// Literal value (exact) — optional = unconstrained.
+    pub value: Option<String>,
+    /// Assignment must sit in the command prefix (`FOO=1 cmd`) when true.
+    pub prefix: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct FactTest {
+    pub analyzer: Option<String>,
+    pub name: String,
+    #[serde(default)]
+    pub value: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct NestedPartTest {
+    pub relation: Option<Relation>,
+    /// Executable head of the nested part (lexical), e.g. `rm`.
+    pub executable: Option<String>,
+    ///// Selected profile for the nested part (config reference).
+    pub profile: Option<String>,
+    /// `(analyzerCommand)` parts originate from that analyzer's ID.
+    pub analyzer: Option<String>,
+    /// Match only when the nested part itself is in this evidence state.
+    pub state: Option<EvidenceClass>,
+    /// A nested part must already reduce to this verdict for the parent's
+    /// nesting-coverage policy to cover it.
+    pub verdict: Option<VerdictKind>,
+    #[serde(default)]
+    pub occurrence: Option<Occurrence>,
+}
+
+// shell-warden-config-v2-grammar: end
+
+// Canonical one-level wire forms. A derived Serde enum representation would
+// externally tag the struct variants and nest both directions of the wire
+// (`{"none": {"none": true}}`), the accidental nested shape the public
+// contract rejects. Both directions are therefore hand-implemented: exactly
+// one canonical arm, no aliases, no fallback, no migration.
+
+impl<'de> serde::Deserialize<'de> for RemainderPolicy {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = RemainderPolicy;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(
+                    "a one-level remainder policy: {\"none\": true} or {\"each\": tokenSelector}",
+                )
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
+                let field = map
+                    .next_key::<RemainderPolicyField>()?
+                    .ok_or_else(|| serde::de::Error::custom("empty remainder policy"))?;
+                let policy = match field {
+                    RemainderPolicyField::None => {
+                        let none: bool = map.next_value()?;
+                        if !none {
+                            return Err(serde::de::Error::custom(
+                                "remainder none policy must be {\"none\": true}",
+                            ));
+                        }
+                        RemainderPolicy::None { none: true }
+                    }
+                    RemainderPolicyField::Each => {
+                        let each: TokenSelector = map.next_value()?;
+                        RemainderPolicy::Each { each }
+                    }
+                };
+                if map.next_key::<RemainderPolicyField>()?.is_some() {
+                    return Err(serde::de::Error::custom(
+                        "mixed remainder policy arms: use exactly one of none/each",
+                    ));
+                }
+                Ok(policy)
+            }
+        }
+        deserializer.deserialize_map(V)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RemainderPolicyField {
+    None,
+    Each,
+}
+
+impl<'de> serde::Deserialize<'de> for RemainderPolicyField {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct V;
+        impl serde::de::Visitor<'_> for V {
+            type Value = RemainderPolicyField;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a remainder policy arm: `none` or `each`")
+            }
+            fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<Self::Value, E> {
+                match s {
+                    "none" => Ok(RemainderPolicyField::None),
+                    "each" => Ok(RemainderPolicyField::Each),
+                    other => Err(E::unknown_field(other, &["none", "each"])),
+                }
+            }
+        }
+        deserializer.deserialize_str(V)
+    }
+}
+
+impl serde::Serialize for RemainderPolicy {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(1))?;
+        match self {
+            RemainderPolicy::None { none } => map.serialize_entry("none", none)?,
+            RemainderPolicy::Each { each } => map.serialize_entry("each", each)?,
+        }
+        map.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for TokenSelector {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = TokenSelector;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(
+                    "a one-level token selector: {\"exact\": [token, ...]} or {\"within\": root}",
+                )
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
+                let field = map
+                    .next_key::<TokenSelectorField>()?
+                    .ok_or_else(|| serde::de::Error::custom("empty token selector"))?;
+                let selector = match field {
+                    TokenSelectorField::Exact => {
+                        let exact: Vec<String> = map.next_value()?;
+                        TokenSelector::Exact(exact)
+                    }
+                    TokenSelectorField::Within => {
+                        let within: String = map.next_value()?;
+                        TokenSelector::Within(within)
+                    }
+                };
+                if map.next_key::<TokenSelectorField>()?.is_some() {
+                    return Err(serde::de::Error::custom(
+                        "mixed token selector arms: use exactly one of exact/within",
+                    ));
+                }
+                Ok(selector)
+            }
+        }
+        deserializer.deserialize_map(V)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TokenSelectorField {
+    Exact,
+    Within,
+}
+
+impl<'de> serde::Deserialize<'de> for TokenSelectorField {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct V;
+        impl serde::de::Visitor<'_> for V {
+            type Value = TokenSelectorField;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a token selector arm: `exact` or `within`")
+            }
+            fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<Self::Value, E> {
+                match s {
+                    "exact" => Ok(TokenSelectorField::Exact),
+                    "within" => Ok(TokenSelectorField::Within),
+                    other => Err(E::unknown_field(other, &["exact", "within"])),
+                }
+            }
+        }
+        deserializer.deserialize_str(V)
+    }
+}
+
+impl serde::Serialize for TokenSelector {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(1))?;
+        match self {
+            TokenSelector::Exact(exact) => map.serialize_entry("exact", exact)?,
+            TokenSelector::Within(within) => map.serialize_entry("within", within)?,
+        }
+        map.end()
+    }
 }
 
 // ── Profiles ────────────────────────────────────────────────────────────────
@@ -549,78 +842,6 @@ pub enum EvidenceClass {
     Invalid,
 }
 
-/// Positional-argument matcher. `prefix` requires an explicit `remainder`;
-/// `exact` must not carry one.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct ArgumentsMatcher {
-    #[serde(default)]
-    pub exact: Option<Vec<String>>,
-    #[serde(default)]
-    pub prefix: Option<Vec<String>>,
-    /// Remainder policy: only meaningful (and mandatory!) with `prefix`.
-    pub remainder: Option<RemainderPolicy>,
-    /// Existential test: any positional token matches one of these globs.
-    #[serde(default)]
-    pub contains_any: Option<Vec<String>>,
-}
-
-/// Cover the remaining positional arguments after `prefix`: `{none: true}` = no
-/// further arguments; `{each: selector}` = every remaining literal token must
-/// satisfy the token selector (design §Reusable redirect policies semantics;
-/// closed vocabulary: exact-member or safe path-selector).
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub enum RemainderPolicy {
-    None { none: bool },
-    Each { each: TokenSelector },
-}
-
-/// Closed token selector for `remainder: {each}`.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub enum TokenSelector {
-    /// Every remainder token must be one of these literal tokens.
-    Exact(Vec<String>),
-    /// Every remainder token must be a literal path within this lexical root.
-    Within(String),
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct OptionsMatcher {
-    #[serde(default)]
-    pub present_all: Option<Vec<String>>,
-    #[serde(default)]
-    pub present_any: Option<Vec<String>>,
-    #[serde(default)]
-    pub absent_all: Option<Vec<String>>,
-    /// Values map: canonical option → glob list; existential per value.
-    pub values: Option<std::collections::BTreeMap<String, Vec<String>>>,
-    /// Allow coverage policy ({ "none": true }); selects the allow form.
-    pub none: Option<bool>,
-    /// Allow coverage policy ({ "allowed": [entry, ...] }).
-    pub allowed: Option<Vec<OptionCoverage>>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct OptionCoverage {
-    pub option: String,
-    pub required: bool,
-    pub repeatable: bool,
-    /// Closed value selector for every consumed / inline value.
-    pub values: Option<ValuesCoverage>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-#[serde(untagged)]
-pub enum ValuesCoverage {
-    None { none: bool },
-    Each { each: Vec<String> },
-}
-
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct EnvironmentMatcher {
@@ -630,16 +851,6 @@ pub struct EnvironmentMatcher {
     pub all: Option<Vec<EnvironmentTest>>,
     #[serde(default)]
     pub none: Option<bool>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct EnvironmentTest {
-    pub name: String,
-    /// Literal value (exact) — optional = unconstrained.
-    pub value: Option<String>,
-    /// Assignment must sit in the command prefix (`FOO=1 cmd`) when true.
-    pub prefix: Option<bool>,
 }
 
 // ── Generic closed coverage form: `{"none": true}` or `{"all": [entry]}` ────
@@ -689,15 +900,6 @@ pub struct FactsMatcher {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct FactTest {
-    pub analyzer: Option<String>,
-    pub name: String,
-    #[serde(default)]
-    pub value: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct NestedPartsMatcher {
     #[serde(default)]
     pub none: Option<bool>,
@@ -705,25 +907,6 @@ pub struct NestedPartsMatcher {
     pub any: Option<Vec<NestedPartTest>>,
     #[serde(default)]
     pub all: Option<Vec<NestedPartTest>>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct NestedPartTest {
-    pub relation: Option<Relation>,
-    /// Executable head of the nested part (lexical), e.g. `rm`.
-    pub executable: Option<String>,
-    ///// Selected profile for the nested part (config reference).
-    pub profile: Option<String>,
-    /// `(analyzerCommand)` parts originate from that analyzer's ID.
-    pub analyzer: Option<String>,
-    /// Match only when the nested part itself is in this evidence state.
-    pub state: Option<EvidenceClass>,
-    /// A nested part must already reduce to this verdict for the parent's
-    /// nesting-coverage policy to cover it.
-    pub verdict: Option<VerdictKind>,
-    #[serde(default)]
-    pub occurrence: Option<Occurrence>,
 }
 
 /// Closed relation enum (design §Parsing, parts, and evidence states): the
@@ -741,4 +924,152 @@ pub enum Relation {
     CommandSubstitution,
     #[serde(rename = "analyzerCommand")]
     AnalyzerCommand,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn remainder_none_parses_canonical() {
+        let p: RemainderPolicy = serde_json::from_value(json!({ "none": true })).unwrap();
+        assert_eq!(p, RemainderPolicy::None { none: true });
+    }
+
+    #[test]
+    fn remainder_each_parses_canonical_exact() {
+        let p: RemainderPolicy =
+            serde_json::from_value(json!({ "each": { "exact": ["ls", "cat"] } })).unwrap();
+        assert_eq!(
+            p,
+            RemainderPolicy::Each {
+                each: TokenSelector::Exact(vec!["ls".into(), "cat".into()])
+            }
+        );
+    }
+
+    #[test]
+    fn remainder_each_parses_canonical_within() {
+        let p: RemainderPolicy =
+            serde_json::from_value(json!({ "each": { "within": "/work/project" } })).unwrap();
+        assert_eq!(
+            p,
+            RemainderPolicy::Each {
+                each: TokenSelector::Within("/work/project".into())
+            }
+        );
+    }
+
+    /// Externally tagged nesting (`{"none": {"none": true}}`, docs release
+    /// fixture `RemainderPolicy/nested-serde-none.json`) is rejected, not
+    /// accepted as an alias.
+    #[test]
+    fn remainder_nested_none_rejected() {
+        let e = serde_json::from_value::<RemainderPolicy>(json!({ "none": { "none": true } }));
+        assert!(e.is_err(), "nested externally tagged none must not parse");
+    }
+
+    #[test]
+    fn remainder_nested_each_rejected() {
+        let e = serde_json::from_value::<RemainderPolicy>(
+            json!({ "each": { "each": { "any": true } } }),
+        );
+        assert!(e.is_err(), "nested each must not parse");
+    }
+
+    /// Mixed union arms (`{"none": true, "each": …}`) are invalid.
+    #[test]
+    fn remainder_mixed_arms_rejected() {
+        let e = serde_json::from_value::<RemainderPolicy>(json!({
+            "none": true,
+            "each": { "exact": ["ls"] }
+        }));
+        assert!(e.is_err(), "mixed none+each must not parse");
+    }
+
+    #[test]
+    fn remainder_empty_object_rejected() {
+        assert!(serde_json::from_value::<RemainderPolicy>(json!({})).is_err());
+    }
+
+    #[test]
+    fn remainder_unknown_form_rejected() {
+        assert!(serde_json::from_value::<RemainderPolicy>(json!({ "any": true })).is_err());
+        // `{"none": false}` is not the documented closed form (const true).
+        assert!(serde_json::from_value::<RemainderPolicy>(json!({ "none": false })).is_err());
+    }
+
+    #[test]
+    fn token_selector_parses_canonical() {
+        let a: TokenSelector = serde_json::from_value(json!({ "exact": ["-l", "-h"] })).unwrap();
+        assert_eq!(a, TokenSelector::Exact(vec!["-l".into(), "-h".into()]));
+        let b: TokenSelector = serde_json::from_value(json!({ "within": "/repo" })).unwrap();
+        assert_eq!(b, TokenSelector::Within("/repo".into()));
+    }
+
+    #[test]
+    fn token_selector_nested_mixed_unknown_rejected() {
+        // recursively nested form (docs fixture OptionValueCoverage//nested-serde-each)
+        assert!(
+            serde_json::from_value::<TokenSelector>(json!({ "each": { "exact": ["ls"] } }))
+                .is_err()
+        );
+        // mixed arms
+        assert!(
+            serde_json::from_value::<TokenSelector>(json!({
+                "exact": ["ls"], "within": "/repo"
+            }))
+            .is_err()
+        );
+        // non-documented union arms must not parse (no aliases, no rich forms)
+        assert!(serde_json::from_value::<TokenSelector>(json!({ "any": true })).is_err());
+        assert!(
+            serde_json::from_value::<TokenSelector>(json!({ "path": { "within": "/repo" } }))
+                .is_err()
+        );
+        assert!(serde_json::from_value::<TokenSelector>(json!({})).is_err());
+    }
+
+    /// The wire forms themselves stay canonical: serialization never emits the
+    /// accidentally externally tagged nested shape.
+    #[test]
+    fn remainder_and_selector_serialize_canonical() {
+        let p = RemainderPolicy::Each {
+            each: TokenSelector::Within("/work/project".into()),
+        };
+        assert_eq!(
+            serde_json::to_value(&p).unwrap(),
+            json!({ "each": { "within": "/work/project" } })
+        );
+        let p2 = RemainderPolicy::None { none: true };
+        assert_eq!(serde_json::to_value(&p2).unwrap(), json!({ "none": true }));
+        let t = TokenSelector::Exact(vec!["ls".into()]);
+        assert_eq!(
+            serde_json::to_value(&t).unwrap(),
+            json!({ "exact": ["ls"] })
+        );
+    }
+
+    /// A composed `arguments` rewrite carries the canonical remainder shape
+    /// end-to-end through serde.
+    #[test]
+    fn arguments_matcher_uses_canonical_remainder_wire_form() {
+        let m: ArgumentsMatcher = serde_json::from_value(json!({
+            "prefix": ["git", "push"],
+            "remainder": { "each": { "exact": ["origin", "main"] } }
+        }))
+        .unwrap();
+        assert_eq!(
+            m,
+            ArgumentsMatcher {
+                exact: None,
+                prefix: Some(vec!["git".into(), "push".into()]),
+                remainder: Some(RemainderPolicy::Each {
+                    each: TokenSelector::Exact(vec!["origin".into(), "main".into()])
+                }),
+                contains_any: None,
+            }
+        );
+    }
 }
