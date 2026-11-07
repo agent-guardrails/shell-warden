@@ -587,7 +587,15 @@ impl serde::Serialize for RemainderPolicy {
         use serde::ser::SerializeMap;
         let mut map = serializer.serialize_map(Some(1))?;
         match self {
-            RemainderPolicy::None { none } => map.serialize_entry("none", none)?,
+            RemainderPolicy::None { none: true } => map.serialize_entry("none", &true)?,
+            // Mirror the deserializer's rejection: a `none: false` value has no
+            // canonical wire form, so serialization errors instead of emitting
+            // a value that would parse back as invalid. Round-trip stays total.
+            RemainderPolicy::None { none: false } => {
+                return Err(serde::ser::Error::custom(
+                    "remainder none policy requires {\"none\": true}",
+                ));
+            }
             RemainderPolicy::Each { each } => map.serialize_entry("each", each)?,
         }
         map.end()
@@ -1048,6 +1056,18 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&t).unwrap(),
             json!({ "exact": ["ls"] })
+        );
+    }
+
+    /// `{"none": false}` has no canonical wire form: serialization errors
+    /// instead of emitting a value the deserializer would reject, keeping
+    /// round-trip symmetric.
+    #[test]
+    fn remainder_none_false_is_unserializable() {
+        let p = RemainderPolicy::None { none: false };
+        assert!(
+            serde_json::to_value(&p).is_err(),
+            "none=false must not serialize to a canonical value"
         );
     }
 

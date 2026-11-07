@@ -126,9 +126,18 @@ pub fn load_path(path: &Path) -> ConfigResult {
 }
 
 /// Load + validate from a string (used by golden tests directly).
+///
+/// The schema parse consumes the raw text stream (not the `Value` below it):
+/// `serde_json`'s map normalizes duplicate object keys to last-wins, which
+/// would silently widen a restricted remainder policy (`{"within": "/repo/safe",
+/// "within": "/"}`). Streaming keeps every key visible to the serde visitors,
+/// so struct visitors raise `duplicate field …` and the canonical selectors
+/// reject any second arm — all before any normalized value exists.
 pub fn load_str(text: &str) -> ConfigResult {
     let stripped =
         strip_jsonc(text).map_err(|e| format!("config invalid: JSONC syntax error: {e}"))?;
+    // Value pass serves the configBytes cap only; it must not feed the
+    // schema parse (last-wins duplicate-key collapse).
     let value: Value =
         serde_json::from_str(&stripped).map_err(|e| format!("config invalid: JSON error: {e}"))?;
     let limit = raw_limits_bytes(&value);
@@ -139,7 +148,7 @@ pub fn load_str(text: &str) -> ConfigResult {
         ));
     }
     let raw: RawConfig =
-        serde_json::from_value(value).map_err(|e| format!("config invalid: schema: {e}"))?;
+        serde_json::from_str(&stripped).map_err(|e| format!("config invalid: schema: {e}"))?;
     let config = validate(raw).map_err(|e| format!("config invalid: {e}"))?;
     Ok(config)
 }
@@ -1061,4 +1070,81 @@ fn validate_ask_deny_match(rule: &Rule, profile: &Profile) -> Result<(), String>
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Duplicated keys must never collapse to last-wins semantics: the first
+    /// key restricts the remainder to /repo/safe, the second would relax it
+    /// to "/". Both keys stay visible to the serde visitor and are rejected.
+    #[test]
+    fn duplicate_remainder_keys_never_collapse() {
+        const CFG: &str = r#"{
+  "version": 2,
+  "defaults": { "action": "ask" },
+  "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
+  "profiles": [{ "id": "git", "executables": ["git"], "options": {}, "rules": [{
+      "id": "a", "action": "allow", "redirectPolicy": { "mode": "replace", "policies": ["no-redirects"] },
+      "match": { "classification": "complete", "arguments": { "prefix": ["push"],
+        "remainder": { "each": { "within": "/repo/safe", "within": "/" } } },
+        "options": { "none": true }, "environment": { "none": true }, "paths": { "none": true },
+        "facts": { "none": true }, "nestedParts": { "none": true } } }] }]
+}"#;
+        let Err(err) = load_str(CFG) else {
+            panic!("duplicate token selector keys must reject");
+        };
+        assert!(
+            err.contains("config invalid"),
+            "must fail during config parsing: {err}"
+        );
+    }
+
+    #[test]
+    fn duplicate_none_keys_rejected() {
+        const CFG: &str = r#"{
+  "version": 2,
+  "defaults": { "action": "ask" },
+  "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
+  "profiles": [{ "id": "git", "executables": ["git"], "options": {}, "rules": [{
+      "id": "a", "action": "allow", "redirectPolicy": { "mode": "replace", "policies": ["no-redirects"] },
+      "match": { "classification": "complete", "arguments": { "prefix": ["push"],
+        "remainder": { "none": true, "none": true } },
+        "options": { "none": true }, "environment": { "none": true }, "paths": { "none": true },
+        "facts": { "none": true }, "nestedParts": { "none": true } } }] }]
+}"#;
+        let Err(err) = load_str(CFG) else {
+            panic!("duplicate none keys must reject");
+        };
+        assert!(err.contains("config invalid"), "{err}");
+    }
+
+    #[test]
+    fn duplicate_top_level_and_struct_keys_rejected() {
+        let Err(dup_version) =
+            load_str(r#"{ "version": 2, "version": 2, "defaults": { "action": "ask" } }"#)
+        else {
+            panic!("duplicate top-level key must reject");
+        };
+        assert!(dup_version.contains("config invalid"), "{dup_version}");
+        let Err(dup_defaults) = load_str(
+            r#"{ "version": 2, "defaults": { "action": "ask" }, "defaults": { "action": "ask" } }"#,
+        ) else {
+            panic!("duplicate struct key must reject");
+        };
+        assert!(dup_defaults.contains("config invalid"), "{dup_defaults}");
+    }
+
+    #[test]
+    fn parse_error_messages_stay_prefixed() {
+        let Err(e) = load_str("{ bad") else {
+            panic!("malformed JSON must reject");
+        };
+        assert!(e.contains("config invalid"), "{e}");
+        let Err(e) = load_str(r#"{ "version": 3, "defaults": { "action": "ask" } }"#) else {
+            panic!("wrong version must reject");
+        };
+        assert!(e.contains("version must be 2"), "{e}");
+    }
 }

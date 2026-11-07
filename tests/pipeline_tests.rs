@@ -3,7 +3,7 @@
 // monotonicity and order-independence property invariants (§Policy resolution
 // properties) and wrapper/nesting behavior. Letter fixtures per 02 §2.2.
 
-use shell_warden::checker::config::load_str;
+use shell_warden::checker::config::{load_path, load_str};
 use shell_warden::checker::letter::Letter;
 use shell_warden::checker::pipeline::evaluate;
 use shell_warden::checker::verdict::{Verdict, VerdictKind};
@@ -547,38 +547,54 @@ fn probe_path(name: &str, text: &str) -> std::path::PathBuf {
 
 #[test]
 fn remainder_dto_probe_accepts_canonical_forms() {
-    // canonical `{"none": true}`: no argument beyond the prefix.
+    // canonical `{"none": true}`: the bare prefix allows; any argument beyond
+    // the closure asks (proving the remainder semantics, not route effects).
     let none_path = probe_path("none-canonical", &probe_config(r#"{ "none": true }"#));
-    let none_cfg = load_str(&std::fs::read_to_string(&none_path).unwrap())
-        .unwrap_or_else(|e| panic!("canonical none must load: {e}"));
+    let none_cfg =
+        load_path(&none_path).unwrap_or_else(|e| panic!("canonical none must load: {e}"));
     assert_eq!(
-        evaluate(&none_cfg, &letter("git push --dry-run")).verdict,
+        evaluate(&none_cfg, &letter("git push")).verdict,
+        VerdictKind::Allow
+    );
+    assert_eq!(
+        evaluate(&none_cfg, &letter("git push origin")).verdict,
         VerdictKind::Ask,
-        "extra arguments beyond the none closure never allow"
+        "arguments beyond the none closure never allow"
     );
 
-    // canonical `{"each": {"exact": [...]}}`.
+    // canonical `{"each": {"exact": [...]}}`: members allow, non-members ask.
     let exact_path = probe_path(
         "each-exact",
         &probe_config(r#"{ "each": { "exact": ["origin", "main"] } }"#),
     );
-    let exact_cfg = load_str(&std::fs::read_to_string(&exact_path).unwrap())
-        .unwrap_or_else(|e| panic!("canonical each-exact must load: {e}"));
+    let exact_cfg =
+        load_path(&exact_path).unwrap_or_else(|e| panic!("canonical each-exact must load: {e}"));
     assert_eq!(
         evaluate(&exact_cfg, &letter("git push origin main")).verdict,
         VerdictKind::Allow
     );
+    assert_eq!(
+        evaluate(&exact_cfg, &letter("git push unknown")).verdict,
+        VerdictKind::Ask,
+        "remainder tokens outside the exact member list never allow"
+    );
 
-    // canonical `{"each": {"within": ...}}` (absolute lexical path root).
+    // canonical `{"each": {"within": ...}}` (absolute lexical path root):
+    // lexical paths under the root allow, anything outside asks.
     let within_path = probe_path(
         "each-within",
         &probe_config(r#"{ "each": { "within": "/repo" } }"#),
     );
-    let within_cfg = load_str(&std::fs::read_to_string(&within_path).unwrap())
-        .unwrap_or_else(|e| panic!("canonical each-within must load: {e}"));
+    let within_cfg =
+        load_path(&within_path).unwrap_or_else(|e| panic!("canonical each-within must load: {e}"));
     assert_eq!(
         evaluate(&within_cfg, &letter_cwd("git push README.md", "/repo")).verdict,
         VerdictKind::Allow
+    );
+    assert_eq!(
+        evaluate(&within_cfg, &letter_cwd("git push /etc/passwd", "/repo")).verdict,
+        VerdictKind::Ask,
+        "paths outside the within root never allow"
     );
 
     for p in [&none_path, &exact_path, &within_path] {
@@ -607,13 +623,13 @@ fn remainder_dto_probe_rejects_non_canonical_forms() {
         ),
     ] {
         let path = probe_path(name, &probe_config(remainder_value));
-        let text = std::fs::read_to_string(&path).unwrap();
-        let err = load_str(&text)
+        let err = load_path(&path)
             .err()
             .unwrap_or_else(|| panic!("{name} probe must not parse"));
         assert!(
             err.contains("config invalid"),
             "{name} probe must fail during config parsing: {err}"
         );
+        let _ = std::fs::remove_file(&path);
     }
 }
