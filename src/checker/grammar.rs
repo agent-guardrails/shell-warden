@@ -312,13 +312,7 @@ pub struct PathCoordinateSelector {
 
 impl PositionalCoordinate {
     pub fn is_remainder_form(&self) -> bool {
-        matches!(
-            self,
-            PositionalCoordinate::N {
-                remainder: true,
-                ..
-            }
-        )
+        self.remainder
     }
 }
 
@@ -328,8 +322,8 @@ pub struct OptionValueCoordinate {
     pub option: String,
     #[serde(default)]
     pub occurrence: Option<Occurrence>,
-    #[serde(default)]
-    pub value_ordinal: Option<Occurrence>,
+    /// Selected value ordinal: 1-based, bounded by the declared maximum arity.
+    pub value_ordinal: u32,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -377,21 +371,16 @@ pub enum PathCoverage {
     All { all: Vec<PathEntry> },
 }
 
-/// `rustfmt::skip` pins the single-line `All { all: bool }` variant: the docs
-/// grammar snapshot is token-identical to this source and rustfmt would
-/// otherwise reformat the variant into a comma that drifts. The attribute is
-/// invisible to the snapshot extractor.
-#[rustfmt::skip]
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-#[serde(untagged)]
-pub enum PositionalCoordinate {
-    N {
-        index: u32,
-        #[serde(default)]
-        remainder: bool,
-    },
-    All { all: bool },
+/// Positional coordinate source selector: one positional argument `index`
+/// (0-based) plus an optional `remainder: true` flag selecting the
+/// remainder arguments after the index (docs fixture
+/// `PositionalCoordinate/index-and-remainder.json`).
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, sw_attrs::GrammarDocAttrs)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct PositionalCoordinate {
+    pub index: u32,
+    #[serde(default)]
+    pub remainder: bool,
 }
 
 /// Positional-argument matcher. `prefix` requires an explicit `remainder`;
@@ -411,9 +400,8 @@ pub struct ArgumentsMatcher {
 }
 
 /// Cover the remaining positional arguments after `prefix`: `{none: true}` = no
-/// further arguments; `{each: selector}` = every remaining literal token must
-/// satisfy the token selector (design §Reusable redirect policies semantics;
-/// closed vocabulary: exact-member or safe path-selector).
+/// further arguments; `{each: tokenValueSelector}` = every remaining literal
+/// token must satisfy the token selector (closed vocabulary below).
 #[derive(Debug, Clone, PartialEq, sw_attrs::GrammarDocAttrs)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub enum RemainderPolicy {
@@ -421,14 +409,191 @@ pub enum RemainderPolicy {
     Each { each: TokenSelector },
 }
 
-/// Closed token selector for `remainder: {each}`.
+/// Selection limit in one closed selector array (design §Limits):
+/// `oneOf` alternatives. Fixed at 64, not configurable.
+pub const MAX_SELECTOR_ALTERNATIVES: usize = 64;
+/// Regex UTF-8-byte limit for one `re2-v1` pattern (design §Limits).
+pub const MAX_REGEX_BYTES: usize = 1024;
+/// Lexical-path UTF-8-byte limit (design §Limits).
+pub const MAX_PATH_BYTES: usize = 4096;
+
+/// Closed string-value selector (design §Action-sensitive matching):
+/// `{"any": true}`, `{"oneOf": [literal, ...]}` or `{"regex": re2-v1}`.
+/// Exactly one discriminator key per selector object; no globs, no coercion.
+#[derive(Debug, Clone, PartialEq, sw_attrs::GrammarDocAttrs)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub enum StringValueSelector {
+    /// Covers any complete literal token, including an empty inline value.
+    Any,
+    /// Covers one listed literal by exact equality. Non-empty (1..=64) and
+    /// duplicate-free; `"*"` is a literal asterisk (wildcards live in `regex`).
+    OneOf(Vec<String>),
+    /// Whole-value `re2-v1` match; compiled when configuration loads.
+    Regex(String),
+}
+
+/// Closed lexical path selector: exact / within / outside on absolute lexical
+/// roots (component-boundary semantics of the lexical path policy; no I/O).
+/// One key per selector object; a second key or an array is invalid.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, sw_attrs::GrammarDocAttrs)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(untagged)]
+pub enum PathSelector {
+    Exact { exact: String },
+    Within { within: String },
+    Outside { outside: String },
+}
+
+/// Closed token-value selector: one string-value selector, or a lexical path
+/// applied to the literal token. Both arms stay one-level on the wire:
+/// `{"any": true}` / `{"oneOf": [...]}` / `{"regex": pattern}` / `{"path": …}`.
 #[derive(Debug, Clone, PartialEq, sw_attrs::GrammarDocAttrs)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub enum TokenSelector {
-    /// Every remainder token must be one of these literal tokens.
-    Exact(Vec<String>),
-    /// Every remainder token must be a literal path within this lexical root.
-    Within(String),
+    Str(StringValueSelector),
+    Path(PathSelector),
+}
+
+impl TokenSelector {
+    /// Decode convenience: the string-value arm, if any.
+    pub fn as_str_selector(&self) -> Option<&StringValueSelector> {
+        match self {
+            TokenSelector::Str(s) => Some(s),
+            TokenSelector::Path(..) => None,
+        }
+    }
+
+    pub fn as_path(&self) -> Option<&PathSelector> {
+        match self {
+            TokenSelector::Str(_) => None,
+            TokenSelector::Path(path) => Some(path),
+        }
+    }
+}
+
+/// Closed option-value coverage: `{"each": tokenValueSelector}` covers every
+/// value ordinal of every occurrence; `{"byPosition": [selector, ...]}` has
+/// exactly one selector per fixed value ordinal (zero-based array position ⇒
+/// one-based ordinal). It never expresses a variable value count.
+/// Closed option-value coverage: `{"each": tokenValueSelector}` covers every
+/// value ordinal of every occurrence; `{"byPosition": [selector, ...]}` has
+/// exactly one selector per fixed value ordinal (zero-based array position ⇒
+/// one-based ordinal). It never expresses a variable value count.
+#[derive(Debug, Clone, PartialEq, sw_attrs::GrammarDocAttrs)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub enum OptionValueCoverage {
+    Each { each: TokenSelector },
+    ByPosition { by_position: Vec<TokenSelector> },
+}
+
+impl OptionValueCoverage {
+    /// `byPosition` is structurally bounded to the declared arity range
+    /// (schema maxItems: 4); the per-option arity equality is checked against
+    /// the profile declaration in config validation.
+    pub fn validate_shape(&self) -> Result<(), String> {
+        match self {
+            OptionValueCoverage::Each { .. } => Ok(()),
+            OptionValueCoverage::ByPosition { by_position } => {
+                if by_position.is_empty() {
+                    return Err(
+                        "optionValueCoverage.byPosition must list at least one selector"
+                            .to_string(),
+                    );
+                }
+                if by_position.len() > MAX_OPTION_ARITY as usize {
+                    return Err(format!(
+                        "optionValueCoverage.byPosition exceeds {MAX_OPTION_ARITY} selectors"
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Zero-arity option coverage entry: presence / repetition only — no values.
+/// Both directions are hand-implemented at the `OptionCoverageEntry` union
+/// level (derived untagged would drop `deny_unknown_fields` under serde's
+/// content buffering).
+#[derive(Debug, Clone, PartialEq)]
+pub struct OptionCoverage {
+    pub option: String,
+    pub required: bool,
+    pub repeatable: bool,
+}
+
+/// Fixed option grammar declaration: canonical ID → aliases + arity +
+/// inline-form permission. Fixed arity 0..=4; no variadic, minArity or
+/// maxArity form exists in v2. `--alias=value` is valid only when the option
+/// has arity one and declares `inline: true`.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, sw_attrs::GrammarDocAttrs)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct OptionSpec {
+    /// Aliases exactly as they may appear in argv (`--long`, `-f`).
+    pub aliases: Vec<String>,
+    /// 0..=4 (validated in config loader).
+    pub arity: u8,
+    /// Absent or false ⇒ the inline form `--alias=value` is rejected (arity
+    /// one included); `true` is only valid for a declared arity-one option.
+    #[serde(default)]
+    pub inline: Option<bool>,
+}
+
+/// Positive-arity option coverage entry: additionally states the value
+/// selector for every consumed or inline value (required, closed form).
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct PositiveArityOptionCoverage {
+    pub option: String,
+    pub required: bool,
+    pub repeatable: bool,
+    pub values: OptionValueCoverage,
+}
+
+/// One allow `options.allowed` entry: references a declared canonical profile
+/// option and states `required` and `repeatable`; positive arity additionally
+/// carries the closed value coverage. Canonical option IDs must stay unique
+/// within one list (config validation); the union rejects a zero-arity entry
+/// carrying `values` and a positive-arity entry without it.
+/// One allow `options.allowed` entry: references a declared canonical profile
+/// option and states `required` and `repeatable`; positive arity additionally
+/// carries the closed value coverage. Canonical option IDs must stay unique
+/// within one list (config validation); the union rejects a zero-arity entry
+/// carrying `values` and a positive-arity entry without it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum OptionCoverageEntry {
+    ZeroArity(OptionCoverage),
+    PositiveArity(PositiveArityOptionCoverage),
+}
+
+impl OptionCoverageEntry {
+    pub fn option(&self) -> &str {
+        match self {
+            OptionCoverageEntry::ZeroArity(e) => &e.option,
+            OptionCoverageEntry::PositiveArity(e) => &e.option,
+        }
+    }
+
+    pub fn required(&self) -> bool {
+        match self {
+            OptionCoverageEntry::ZeroArity(e) => e.required,
+            OptionCoverageEntry::PositiveArity(e) => e.required,
+        }
+    }
+
+    pub fn repeatable(&self) -> bool {
+        match self {
+            OptionCoverageEntry::ZeroArity(e) => e.repeatable,
+            OptionCoverageEntry::PositiveArity(e) => e.repeatable,
+        }
+    }
+
+    pub fn values(&self) -> Option<&OptionValueCoverage> {
+        match self {
+            OptionCoverageEntry::ZeroArity(_) => None,
+            OptionCoverageEntry::PositiveArity(e) => Some(&e.values),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -440,30 +605,13 @@ pub struct OptionsMatcher {
     pub present_any: Option<Vec<String>>,
     #[serde(default)]
     pub absent_all: Option<Vec<String>>,
-    /// Values map: canonical option → glob list; existential per value.
-    pub values: Option<std::collections::BTreeMap<String, Vec<String>>>,
+    /// Existential value predicate: canonical option → selector; a selected
+    /// occurrence whose value satisfies the selector makes the dimension hold.
+    pub values: Option<std::collections::BTreeMap<String, TokenSelector>>,
     /// Allow coverage policy ({ "none": true }); selects the allow form.
     pub none: Option<bool>,
     /// Allow coverage policy ({ "allowed": [entry, ...] }).
-    pub allowed: Option<Vec<OptionCoverage>>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct OptionCoverage {
-    pub option: String,
-    pub required: bool,
-    pub repeatable: bool,
-    /// Closed value selector for every consumed / inline value.
-    pub values: Option<ValuesCoverage>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-#[serde(untagged)]
-pub enum ValuesCoverage {
-    None { none: bool },
-    Each { each: Vec<String> },
+    pub allowed: Option<Vec<OptionCoverageEntry>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -602,14 +750,15 @@ impl serde::Serialize for RemainderPolicy {
     }
 }
 
-impl<'de> serde::Deserialize<'de> for TokenSelector {
+impl<'de> serde::Deserialize<'de> for StringValueSelector {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         struct V;
         impl<'de> serde::de::Visitor<'de> for V {
-            type Value = TokenSelector;
+            type Value = StringValueSelector;
             fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 f.write_str(
-                    "a one-level token selector: {\"exact\": [token, ...]} or {\"within\": root}",
+                    "a one-level string-value selector: {\"any\": true}, \
+                     {\"oneOf\": [literal, ...]} or {\"regex\": re2-v1 pattern}",
                 )
             }
             fn visit_map<A: serde::de::MapAccess<'de>>(
@@ -617,21 +766,44 @@ impl<'de> serde::Deserialize<'de> for TokenSelector {
                 mut map: A,
             ) -> Result<Self::Value, A::Error> {
                 let field = map
-                    .next_key::<TokenSelectorField>()?
-                    .ok_or_else(|| serde::de::Error::custom("empty token selector"))?;
+                    .next_key::<StringValueSelectorField>()?
+                    .ok_or_else(|| serde::de::Error::custom("empty string-value selector"))?;
                 let selector = match field {
-                    TokenSelectorField::Exact => {
-                        let exact: Vec<String> = map.next_value()?;
-                        TokenSelector::Exact(exact)
+                    StringValueSelectorField::Any => {
+                        let any: bool = map.next_value()?;
+                        if !any {
+                            return Err(serde::de::Error::custom(
+                                "string-value selector any must be the literal boolean true",
+                            ));
+                        }
+                        StringValueSelector::Any
                     }
-                    TokenSelectorField::Within => {
-                        let within: String = map.next_value()?;
-                        TokenSelector::Within(within)
+                    StringValueSelectorField::OneOf => {
+                        let one_of: Vec<String> = map.next_value()?;
+                        if one_of.is_empty() || one_of.len() > MAX_SELECTOR_ALTERNATIVES {
+                            return Err(serde::de::Error::custom(format!(
+                                "oneOf must list 1..={MAX_SELECTOR_ALTERNATIVES} literals"
+                            )));
+                        }
+                        let mut seen = std::collections::BTreeSet::new();
+                        if !one_of.iter().all(|l| seen.insert(l.clone())) {
+                            return Err(serde::de::Error::custom("oneOf literals must be unique"));
+                        }
+                        StringValueSelector::OneOf(one_of)
+                    }
+                    StringValueSelectorField::Regex => {
+                        let regex: String = map.next_value()?;
+                        if regex.len() > MAX_REGEX_BYTES {
+                            return Err(serde::de::Error::custom(format!(
+                                "regex pattern exceeds {MAX_REGEX_BYTES} UTF-8 bytes"
+                            )));
+                        }
+                        StringValueSelector::Regex(regex)
                     }
                 };
-                if map.next_key::<TokenSelectorField>()?.is_some() {
+                if map.next_key::<StringValueSelectorField>()?.is_some() {
                     return Err(serde::de::Error::custom(
-                        "mixed token selector arms: use exactly one of exact/within",
+                        "mixed selector arms: use exactly one of any/oneOf/regex/path",
                     ));
                 }
                 Ok(selector)
@@ -642,9 +814,51 @@ impl<'de> serde::Deserialize<'de> for TokenSelector {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StringValueSelectorField {
+    Any,
+    OneOf,
+    Regex,
+}
+
+impl<'de> serde::Deserialize<'de> for StringValueSelectorField {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct V;
+        impl serde::de::Visitor<'_> for V {
+            type Value = StringValueSelectorField;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a string-value selector arm: `any`, `oneOf` or `regex`")
+            }
+            fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<Self::Value, E> {
+                match s {
+                    "any" => Ok(StringValueSelectorField::Any),
+                    "oneOf" => Ok(StringValueSelectorField::OneOf),
+                    "regex" => Ok(StringValueSelectorField::Regex),
+                    other => Err(E::unknown_field(other, &["any", "oneOf", "regex"])),
+                }
+            }
+        }
+        deserializer.deserialize_str(V)
+    }
+}
+
+impl serde::Serialize for StringValueSelector {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(1))?;
+        match self {
+            StringValueSelector::Any => map.serialize_entry("any", &true)?,
+            StringValueSelector::OneOf(one_of) => map.serialize_entry("oneOf", one_of)?,
+            StringValueSelector::Regex(regex) => map.serialize_entry("regex", regex)?,
+        }
+        map.end()
+    }
+}
+
 enum TokenSelectorField {
-    Exact,
-    Within,
+    Any,
+    OneOf,
+    Regex,
+    Path,
 }
 
 impl<'de> serde::Deserialize<'de> for TokenSelectorField {
@@ -653,17 +867,86 @@ impl<'de> serde::Deserialize<'de> for TokenSelectorField {
         impl serde::de::Visitor<'_> for V {
             type Value = TokenSelectorField;
             fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str("a token selector arm: `exact` or `within`")
+                f.write_str("a token selector arm: `any`, `oneOf`, `regex` or `path`")
             }
             fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<Self::Value, E> {
                 match s {
-                    "exact" => Ok(TokenSelectorField::Exact),
-                    "within" => Ok(TokenSelectorField::Within),
-                    other => Err(E::unknown_field(other, &["exact", "within"])),
+                    "any" => Ok(TokenSelectorField::Any),
+                    "oneOf" => Ok(TokenSelectorField::OneOf),
+                    "regex" => Ok(TokenSelectorField::Regex),
+                    "path" => Ok(TokenSelectorField::Path),
+                    other => Err(E::unknown_field(other, &["any", "oneOf", "regex", "path"])),
                 }
             }
         }
         deserializer.deserialize_str(V)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for TokenSelector {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = TokenSelector;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(
+                    "a one-level token selector: {\"any\": true}, {\"oneOf\": [literal, ...]}, \
+                     {\"regex\": re2-v1 pattern} or {\"path\": pathSelector}",
+                )
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
+                let field = map
+                    .next_key::<TokenSelectorField>()?
+                    .ok_or_else(|| serde::de::Error::custom("empty token selector"))?;
+                let selector = match field {
+                    TokenSelectorField::Any => {
+                        let any: bool = map.next_value()?;
+                        if !any {
+                            return Err(serde::de::Error::custom(
+                                "token selector any must be the literal boolean true",
+                            ));
+                        }
+                        TokenSelector::Str(StringValueSelector::Any)
+                    }
+                    TokenSelectorField::OneOf => {
+                        let one_of: Vec<String> = map.next_value()?;
+                        if one_of.is_empty() || one_of.len() > MAX_SELECTOR_ALTERNATIVES {
+                            return Err(serde::de::Error::custom(format!(
+                                "oneOf must list 1..={MAX_SELECTOR_ALTERNATIVES} literals"
+                            )));
+                        }
+                        let mut seen = std::collections::BTreeSet::new();
+                        if !one_of.iter().all(|l| seen.insert(l.clone())) {
+                            return Err(serde::de::Error::custom("oneOf literals must be unique"));
+                        }
+                        TokenSelector::Str(StringValueSelector::OneOf(one_of))
+                    }
+                    TokenSelectorField::Regex => {
+                        let regex: String = map.next_value()?;
+                        if regex.len() > MAX_REGEX_BYTES {
+                            return Err(serde::de::Error::custom(format!(
+                                "regex pattern exceeds {MAX_REGEX_BYTES} UTF-8 bytes"
+                            )));
+                        }
+                        TokenSelector::Str(StringValueSelector::Regex(regex))
+                    }
+                    TokenSelectorField::Path => {
+                        let path: PathSelector = map.next_value()?;
+                        TokenSelector::Path(path)
+                    }
+                };
+                if map.next_key::<TokenSelectorField>()?.is_some() {
+                    return Err(serde::de::Error::custom(
+                        "mixed selector arms: use exactly one of any/oneOf/regex/path",
+                    ));
+                }
+                Ok(selector)
+            }
+        }
+        deserializer.deserialize_map(V)
     }
 }
 
@@ -672,10 +955,260 @@ impl serde::Serialize for TokenSelector {
         use serde::ser::SerializeMap;
         let mut map = serializer.serialize_map(Some(1))?;
         match self {
-            TokenSelector::Exact(exact) => map.serialize_entry("exact", exact)?,
-            TokenSelector::Within(within) => map.serialize_entry("within", within)?,
+            TokenSelector::Str(s) => {
+                // flatten the string-value selector into the same map level
+                match s {
+                    StringValueSelector::Any => map.serialize_entry("any", &true)?,
+                    StringValueSelector::OneOf(one_of) => map.serialize_entry("oneOf", one_of)?,
+                    StringValueSelector::Regex(regex) => map.serialize_entry("regex", regex)?,
+                }
+            }
+            TokenSelector::Path(path) => map.serialize_entry("path", path)?,
         }
         map.end()
+    }
+}
+
+enum OptionValueCoverageField {
+    Each,
+    ByPosition,
+}
+
+impl<'de> serde::Deserialize<'de> for OptionValueCoverageField {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct V;
+        impl serde::de::Visitor<'_> for V {
+            type Value = OptionValueCoverageField;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("an option-value coverage arm: `each` or `byPosition`")
+            }
+            fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<Self::Value, E> {
+                match s {
+                    "each" => Ok(OptionValueCoverageField::Each),
+                    "byPosition" => Ok(OptionValueCoverageField::ByPosition),
+                    other => Err(E::unknown_field(other, &["each", "byPosition"])),
+                }
+            }
+        }
+        deserializer.deserialize_str(V)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for OptionValueCoverage {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = OptionValueCoverage;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(
+                    "a one-level option-value coverage: {\"each\": tokenValueSelector} \
+                     or {\"byPosition\": [tokenValueSelector, ...]}",
+                )
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
+                let field = map
+                    .next_key::<OptionValueCoverageField>()?
+                    .ok_or_else(|| serde::de::Error::custom("empty option-value coverage"))?;
+                let coverage = match field {
+                    OptionValueCoverageField::Each => {
+                        let each: TokenSelector = map.next_value()?;
+                        OptionValueCoverage::Each { each }
+                    }
+                    OptionValueCoverageField::ByPosition => {
+                        let by_position: Vec<TokenSelector> = map.next_value()?;
+                        OptionValueCoverage::ByPosition { by_position }
+                    }
+                };
+                if map.next_key::<OptionValueCoverageField>()?.is_some() {
+                    return Err(serde::de::Error::custom(
+                        "mixed coverage arms: use exactly one of each/byPosition",
+                    ));
+                }
+                Ok(coverage)
+            }
+        }
+        deserializer.deserialize_map(V)
+    }
+}
+
+impl serde::Serialize for OptionValueCoverage {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(1))?;
+        match self {
+            OptionValueCoverage::Each { each } => map.serialize_entry("each", each)?,
+            OptionValueCoverage::ByPosition { by_position } => {
+                map.serialize_entry("byPosition", by_position)?
+            }
+        }
+        map.end()
+    }
+}
+
+enum OptionCoverageEntryField {
+    Option,
+    Required,
+    Repeatable,
+    Values,
+}
+
+impl<'de> serde::Deserialize<'de> for OptionCoverageEntryField {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct V;
+        impl serde::de::Visitor<'_> for V {
+            type Value = OptionCoverageEntryField;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("an option coverage entry field")
+            }
+            fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<Self::Value, E> {
+                match s {
+                    "option" => Ok(OptionCoverageEntryField::Option),
+                    "required" => Ok(OptionCoverageEntryField::Required),
+                    "repeatable" => Ok(OptionCoverageEntryField::Repeatable),
+                    "values" => Ok(OptionCoverageEntryField::Values),
+                    other => Err(E::unknown_field(
+                        other,
+                        &["option", "required", "repeatable", "values"],
+                    )),
+                }
+            }
+        }
+        deserializer.deserialize_str(V)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for OptionCoverageEntry {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = OptionCoverageEntry;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(
+                    "an option coverage entry: {\"option\", \"required\", \"repeatable\"} \
+                     plus \"values\" for a positive-arity option",
+                )
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut option: Option<String> = None;
+                let mut required: Option<bool> = None;
+                let mut repeatable: Option<bool> = None;
+                let mut values: Option<OptionValueCoverage> = None;
+                while let Some(field) = map.next_key::<OptionCoverageEntryField>()? {
+                    match field {
+                        OptionCoverageEntryField::Option => option = Some(map.next_value()?),
+                        OptionCoverageEntryField::Required => required = Some(map.next_value()?),
+                        OptionCoverageEntryField::Repeatable => {
+                            repeatable = Some(map.next_value()?)
+                        }
+                        OptionCoverageEntryField::Values => values = Some(map.next_value()?),
+                    }
+                }
+                let option = option.ok_or_else(|| serde::de::Error::missing_field("option"))?;
+                let required =
+                    required.ok_or_else(|| serde::de::Error::missing_field("required"))?;
+                let repeatable =
+                    repeatable.ok_or_else(|| serde::de::Error::missing_field("repeatable"))?;
+                match values {
+                    None => Ok(OptionCoverageEntry::ZeroArity(OptionCoverage {
+                        option,
+                        required,
+                        repeatable,
+                    })),
+                    Some(values) => Ok(OptionCoverageEntry::PositiveArity(
+                        PositiveArityOptionCoverage {
+                            option,
+                            required,
+                            repeatable,
+                            values,
+                        },
+                    )),
+                }
+            }
+        }
+        deserializer.deserialize_map(V)
+    }
+}
+
+impl serde::Serialize for OptionCoverageEntry {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::{SerializeMap, SerializeStruct};
+        match self {
+            OptionCoverageEntry::ZeroArity(e) => {
+                let mut map = serializer.serialize_map(Some(3))?;
+                map.serialize_entry("option", &e.option)?;
+                map.serialize_entry("required", &e.required)?;
+                map.serialize_entry("repeatable", &e.repeatable)?;
+                map.end()
+            }
+            OptionCoverageEntry::PositiveArity(e) => {
+                let mut s = serializer.serialize_struct("PositiveArityOptionCoverage", 4)?;
+                s.serialize_field("option", &e.option)?;
+                s.serialize_field("required", &e.required)?;
+                s.serialize_field("repeatable", &e.repeatable)?;
+                s.serialize_field("values", &e.values)?;
+                s.end()
+            }
+        }
+    }
+}
+
+impl serde::Serialize for OptionCoverage {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut s = serializer.serialize_struct("OptionCoverage", 3)?;
+        s.serialize_field("option", &self.option)?;
+        s.serialize_field("required", &self.required)?;
+        s.serialize_field("repeatable", &self.repeatable)?;
+        s.end()
+    }
+}
+
+/// The fixed `re2-v1` regex dialect (design §Action-sensitive matching):
+/// RE2-compatible UTF-8 syntax and semantics, case-sensitive, no
+/// backreferences or look-around, no configurable flags. Selectors carry the
+/// pattern as a plain string; patterns are compiled exactly once when the
+/// configuration loads and always match the entire decoded token.
+#[derive(Debug, Clone, Default)]
+pub struct RegexCache {
+    patterns: std::collections::BTreeMap<String, regex::Regex>,
+}
+
+impl RegexCache {
+    /// Compile one whole-value `re2-v1` pattern: the user's syntax wrapped in
+    /// `\A(?:…)\z` anchors so matching covers the entire value only. A
+    /// backreference or look-around subexpression is unsupported syntax and
+    /// invalidates the config (fail closed).
+    pub fn compile(pattern: &str) -> Result<Self, String> {
+        regex::Regex::new(&format!(r"\A(?:{pattern})\z"))
+            .map(|re| RegexCache {
+                patterns: std::collections::BTreeMap::from([(pattern.to_string(), re)]),
+            })
+            .map_err(|e| format!("re2-v1 pattern compile failed: {e}"))
+    }
+
+    /// Pre-compile `pattern` into this cache (config-load phase).
+    pub fn add(&mut self, pattern: &str) -> Result<(), String> {
+        if !self.patterns.contains_key(pattern) {
+            let re = regex::Regex::new(&format!(r"\A(?:{pattern})\z"))
+                .map_err(|e| format!("re2-v1 pattern compile failed: {e}"))?;
+            self.patterns.insert(pattern.to_string(), re);
+        }
+        Ok(())
+    }
+
+    /// Whole-value match against the compiled `pattern`; an uncompiled
+    /// pattern cannot match (fail closed).
+    pub fn whole_match(&self, pattern: &str, value: &str) -> bool {
+        self.patterns
+            .get(pattern)
+            .map(|re| re.is_match(value))
+            .unwrap_or(false)
     }
 }
 
@@ -732,19 +1265,6 @@ impl AnalyzerId {
             AnalyzerId::XargsV1 => "xargs-v1",
         }
     }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct OptionSpec {
-    /// Aliases exactly as they may appear in argv (`--long`, `-f`).
-    pub aliases: Vec<String>,
-    /// 0..=4 (validated in config loader).
-    pub arity: u8,
-    /// `--long=value` valid for every positive-arity option by default;
-    /// set false to refuse the inline form.
-    #[serde(default)]
-    pub inline: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -939,6 +1459,8 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    // ── RemainderPolicy ─────────────────────────────────────────────────────
+
     #[test]
     fn remainder_none_parses_canonical() {
         let p: RemainderPolicy = serde_json::from_value(json!({ "none": true })).unwrap();
@@ -946,38 +1468,43 @@ mod tests {
     }
 
     #[test]
-    fn remainder_each_parses_canonical_exact() {
-        let p: RemainderPolicy =
-            serde_json::from_value(json!({ "each": { "exact": ["ls", "cat"] } })).unwrap();
-        assert_eq!(
-            p,
-            RemainderPolicy::Each {
-                each: TokenSelector::Exact(vec!["ls".into(), "cat".into()])
-            }
-        );
+    fn remainder_each_parses_canonical_token_selectors() {
+        for (wire, expected) in [
+            (
+                json!({ "each": { "oneOf": ["ls", "cat"] } }),
+                TokenSelector::Str(StringValueSelector::OneOf(vec!["ls".into(), "cat".into()])),
+            ),
+            (
+                json!({ "each": { "any": true } }),
+                TokenSelector::Str(StringValueSelector::Any),
+            ),
+            (
+                json!({ "each": { "regex": "[a-z]+" } }),
+                TokenSelector::Str(StringValueSelector::Regex("[a-z]+".into())),
+            ),
+            (
+                json!({ "each": { "path": { "within": "/work/project" } } }),
+                TokenSelector::Path(PathSelector::Within {
+                    within: "/work/project".into(),
+                }),
+            ),
+        ] {
+            let p: RemainderPolicy = serde_json::from_value(wire).unwrap();
+            assert_eq!(p, RemainderPolicy::Each { each: expected });
+        }
     }
 
-    #[test]
-    fn remainder_each_parses_canonical_within() {
-        let p: RemainderPolicy =
-            serde_json::from_value(json!({ "each": { "within": "/work/project" } })).unwrap();
-        assert_eq!(
-            p,
-            RemainderPolicy::Each {
-                each: TokenSelector::Within("/work/project".into())
-            }
-        );
-    }
-
-    /// Externally tagged nesting (`{"none": {"none": true}}`, docs release
-    /// fixture `RemainderPolicy/nested-serde-none.json`) is rejected, not
-    /// accepted as an alias.
+    /// Externally tagged nesting (`{"none": {"none": true}}`, docs fixture
+    /// `RemainderPolicy/nested-serde-none.json`) is rejected, not accepted as
+    /// an alias.
     #[test]
     fn remainder_nested_none_rejected() {
         let e = serde_json::from_value::<RemainderPolicy>(json!({ "none": { "none": true } }));
         assert!(e.is_err(), "nested externally tagged none must not parse");
     }
 
+    /// Recursively nested `each` (docs fixture
+    /// `OptionValueCoverage/nested-serde-each.json`) is rejected.
     #[test]
     fn remainder_nested_each_rejected() {
         let e = serde_json::from_value::<RemainderPolicy>(
@@ -986,12 +1513,11 @@ mod tests {
         assert!(e.is_err(), "nested each must not parse");
     }
 
-    /// Mixed union arms (`{"none": true, "each": …}`) are invalid.
     #[test]
     fn remainder_mixed_arms_rejected() {
         let e = serde_json::from_value::<RemainderPolicy>(json!({
             "none": true,
-            "each": { "exact": ["ls"] }
+            "each": { "any": true }
         }));
         assert!(e.is_err(), "mixed none+each must not parse");
     }
@@ -1002,41 +1528,18 @@ mod tests {
     }
 
     #[test]
-    fn remainder_unknown_form_rejected() {
-        assert!(serde_json::from_value::<RemainderPolicy>(json!({ "any": true })).is_err());
-        // `{"none": false}` is not the documented closed form (const true).
+    fn remainder_unknown_or_false_forms_rejected() {
+        // the old v0.3.0 `exact-member` and bare `within` alias forms are not
+        // part of the closed contract
+        assert!(
+            serde_json::from_value::<RemainderPolicy>(json!({ "each": { "exact": ["ls"] } }))
+                .is_err()
+        );
+        assert!(
+            serde_json::from_value::<RemainderPolicy>(json!({ "each": { "within": "/repo" } }))
+                .is_err()
+        );
         assert!(serde_json::from_value::<RemainderPolicy>(json!({ "none": false })).is_err());
-    }
-
-    #[test]
-    fn token_selector_parses_canonical() {
-        let a: TokenSelector = serde_json::from_value(json!({ "exact": ["-l", "-h"] })).unwrap();
-        assert_eq!(a, TokenSelector::Exact(vec!["-l".into(), "-h".into()]));
-        let b: TokenSelector = serde_json::from_value(json!({ "within": "/repo" })).unwrap();
-        assert_eq!(b, TokenSelector::Within("/repo".into()));
-    }
-
-    #[test]
-    fn token_selector_nested_mixed_unknown_rejected() {
-        // recursively nested form (docs fixture OptionValueCoverage//nested-serde-each)
-        assert!(
-            serde_json::from_value::<TokenSelector>(json!({ "each": { "exact": ["ls"] } }))
-                .is_err()
-        );
-        // mixed arms
-        assert!(
-            serde_json::from_value::<TokenSelector>(json!({
-                "exact": ["ls"], "within": "/repo"
-            }))
-            .is_err()
-        );
-        // non-documented union arms must not parse (no aliases, no rich forms)
-        assert!(serde_json::from_value::<TokenSelector>(json!({ "any": true })).is_err());
-        assert!(
-            serde_json::from_value::<TokenSelector>(json!({ "path": { "within": "/repo" } }))
-                .is_err()
-        );
-        assert!(serde_json::from_value::<TokenSelector>(json!({})).is_err());
     }
 
     /// The wire forms themselves stay canonical: serialization never emits the
@@ -1044,18 +1547,20 @@ mod tests {
     #[test]
     fn remainder_and_selector_serialize_canonical() {
         let p = RemainderPolicy::Each {
-            each: TokenSelector::Within("/work/project".into()),
+            each: TokenSelector::Path(PathSelector::Within {
+                within: "/work/project".into(),
+            }),
         };
         assert_eq!(
             serde_json::to_value(&p).unwrap(),
-            json!({ "each": { "within": "/work/project" } })
+            json!({ "each": { "path": { "within": "/work/project" } } })
         );
         let p2 = RemainderPolicy::None { none: true };
         assert_eq!(serde_json::to_value(&p2).unwrap(), json!({ "none": true }));
-        let t = TokenSelector::Exact(vec!["ls".into()]);
+        let t = TokenSelector::Str(StringValueSelector::OneOf(vec!["ls".into()]));
         assert_eq!(
             serde_json::to_value(&t).unwrap(),
-            json!({ "exact": ["ls"] })
+            json!({ "oneOf": ["ls"] })
         );
     }
 
@@ -1077,7 +1582,7 @@ mod tests {
     fn arguments_matcher_uses_canonical_remainder_wire_form() {
         let m: ArgumentsMatcher = serde_json::from_value(json!({
             "prefix": ["git", "push"],
-            "remainder": { "each": { "exact": ["origin", "main"] } }
+            "remainder": { "each": { "oneOf": ["origin", "main"] } }
         }))
         .unwrap();
         assert_eq!(
@@ -1086,10 +1591,231 @@ mod tests {
                 exact: None,
                 prefix: Some(vec!["git".into(), "push".into()]),
                 remainder: Some(RemainderPolicy::Each {
-                    each: TokenSelector::Exact(vec!["origin".into(), "main".into()])
+                    each: TokenSelector::Str(StringValueSelector::OneOf(vec![
+                        "origin".into(),
+                        "main".into()
+                    ]))
                 }),
                 contains_any: None,
             }
         );
+    }
+
+    // ── StringValueSelector ─────────────────────────────────────────────────
+
+    #[test]
+    fn string_value_selector_parses_every_closed_arm() {
+        let s: StringValueSelector = serde_json::from_value(json!({ "any": true })).unwrap();
+        assert_eq!(s, StringValueSelector::Any);
+        let s: StringValueSelector =
+            serde_json::from_value(json!({ "oneOf": ["safe", "readOnly"] })).unwrap();
+        assert_eq!(
+            s,
+            StringValueSelector::OneOf(vec!["safe".into(), "readOnly".into()])
+        );
+        let s: StringValueSelector = serde_json::from_value(json!({ "regex": "[a-z]+" })).unwrap();
+        assert_eq!(s, StringValueSelector::Regex("[a-z]+".into()));
+    }
+
+    #[test]
+    fn string_value_selector_rejects_selected_shapes() {
+        // docs fixture StringValueSelector/invalid-regex.json: the pattern
+        // itself is validated at config load (regex crate rejects look-around)
+        let e = serde_json::from_value::<StringValueSelector>(json!({ "any": false }));
+        assert!(e.is_err(), "any must be the literal boolean true");
+        // oneOf must be non-empty, duplicate-free and bounded
+        assert!(serde_json::from_value::<StringValueSelector>(json!({ "oneOf": [] })).is_err());
+        assert!(
+            serde_json::from_value::<StringValueSelector>(json!({ "oneOf": ["a", "a"] })).is_err()
+        );
+        let too_many = (0..65).map(|i| i.to_string()).collect::<Vec<_>>();
+        assert!(
+            serde_json::from_value::<StringValueSelector>(json!({ "oneOf": too_many })).is_err()
+        );
+        assert!(
+            serde_json::from_value::<StringValueSelector>(json!({ "regex": "x".repeat(1025) }))
+                .is_err()
+        );
+        // unknown / mixed arms
+        assert!(serde_json::from_value::<StringValueSelector>(json!({ "exact": ["x"] })).is_err());
+        assert!(
+            serde_json::from_value::<StringValueSelector>(json!({
+                "any": true, "oneOf": ["also"]
+            }))
+            .is_err()
+        );
+        assert!(serde_json::from_value::<StringValueSelector>(json!({ "path": {} })).is_err());
+        assert!(serde_json::from_value::<StringValueSelector>(json!({})).is_err());
+    }
+
+    #[test]
+    fn token_selector_multiple_union_arms_rejected() {
+        // docs fixture TokenSelector/multiple-union-arms.json
+        let e = serde_json::from_value::<TokenSelector>(json!({
+            "any": true, "oneOf": ["also"]
+        }));
+        assert!(e.is_err(), "two discriminator keys must not parse");
+        // a token selector is never itself a coverage wrapper
+        assert!(
+            serde_json::from_value::<TokenSelector>(json!({ "each": { "any": true } })).is_err()
+        );
+        assert!(serde_json::from_value::<TokenSelector>(json!({})).is_err());
+    }
+
+    // ── PathSelector ────────────────────────────────────────────────────────
+
+    #[test]
+    fn path_selector_parses_every_closed_arm() {
+        let p: PathSelector = serde_json::from_value(json!({ "exact": "/work/x" })).unwrap();
+        assert_eq!(
+            p,
+            PathSelector::Exact {
+                exact: "/work/x".into()
+            }
+        );
+        let p: PathSelector =
+            serde_json::from_value(json!({ "outside": "/work/project/private" })).unwrap();
+        assert_eq!(
+            p,
+            PathSelector::Outside {
+                outside: "/work/project/private".into()
+            }
+        );
+    }
+
+    #[test]
+    fn path_selector_rejects_non_canonical_shapes() {
+        // two discriminator keys in one selector object
+        assert!(
+            serde_json::from_value::<PathSelector>(json!({ "exact": "/a", "within": "/b" }))
+                .is_err()
+        );
+        // nested externally tagged form
+        assert!(
+            serde_json::from_value::<PathSelector>(json!({ "within": { "within": "/repo" } }))
+                .is_err()
+        );
+        // `path` is a closed token-selector arm, not a path-selector alias
+        assert!(
+            serde_json::from_value::<TokenSelector>(json!({ "path": { "within": "/repo" } }))
+                .is_ok()
+        );
+        assert!(serde_json::from_value::<PathSelector>(json!({})).is_err());
+    }
+
+    // ── Option grammar + coverage entries ───────────────────────────────────
+
+    #[test]
+    fn option_spec_rejects_unknown_keys() {
+        let e = serde_json::from_value::<OptionSpec>(json!({
+            "aliases": ["--name"], "arity": 1, "inline": true, "variadic": true
+        }));
+        assert!(e.is_err(), "no variadic key exists in v2");
+    }
+
+    #[test]
+    fn option_coverage_entries_parse_per_fixture_family() {
+        // zero-arity (docs fixture OptionCoverage/zero-arity.json)
+        let e: OptionCoverageEntry = serde_json::from_value(json!({
+            "option": "verbose", "required": false, "repeatable": false
+        }))
+        .unwrap();
+        assert_eq!(e.option(), "verbose");
+        assert!(e.values().is_none());
+        // positive arity (docs fixture PositiveArityOptionCoverage/with-values.json)
+        let e: OptionCoverageEntry = serde_json::from_value(json!({
+            "option": "file", "required": false, "repeatable": true,
+            "values": { "each": { "path": { "within": "/work/project" } } }
+        }))
+        .unwrap();
+        assert!(e.values().is_some());
+    }
+
+    #[test]
+    fn option_coverage_wire_carriage_of_values_selects_the_positive_arm() {
+        // parse level: a `values` field selects the positive-arity shape; the
+        // zero-arity semantic rejection happens against the declared profile
+        // arity in config validation (see config tests)
+        let e: OptionCoverageEntry = serde_json::from_value(json!({
+            "option": "verbose", "required": false, "repeatable": false,
+            "values": { "each": { "any": true } }
+        }))
+        .unwrap();
+        assert!(e.values().is_some());
+        // unknown keys stay rejected at parse level (no untagged buffering)
+        let e = serde_json::from_value::<OptionCoverageEntry>(json!({
+            "option": "verbose", "required": false, "repeatable": false,
+            "variadic": true
+        }));
+        assert!(e.is_err(), "no variadic key exists in v2");
+    }
+
+    #[test]
+    fn option_value_coverage_parses_each_and_by_position() {
+        let c: OptionValueCoverage =
+            serde_json::from_value(json!({ "each": { "oneOf": ["json", "yaml"] } })).unwrap();
+        assert!(matches!(c, OptionValueCoverage::Each { .. }));
+        let c: OptionValueCoverage = serde_json::from_value(json!({
+            "byPosition": [
+                { "regex": "[a-z]+" },
+                { "path": { "within": "/work/project" } }
+            ]
+        }))
+        .unwrap();
+        assert!(matches!(c, OptionValueCoverage::ByPosition { .. }));
+        // shape failures (docs fixtures):
+        // bad-by-position-length.json — five selectors in a 0..=4 world
+        let e = serde_json::from_value::<OptionValueCoverage>(json!({
+            "byPosition": [
+                { "any": true }, { "any": true }, { "any": true },
+                { "any": true }, { "any": true }
+            ]
+        }))
+        .unwrap();
+        assert!(e.validate_shape().is_err());
+        // empty byPosition list is never valid
+        let e = serde_json::from_value::<OptionValueCoverage>(json!({ "byPosition": [] })).unwrap();
+        assert!(e.validate_shape().is_err());
+        // nested externally tagged form fails
+        assert!(
+            serde_json::from_value::<OptionValueCoverage>(json!({
+                "each": { "each": { "any": true } }
+            }))
+            .is_err()
+        );
+    }
+
+    // ── OptionsMatcher ──────────────────────────────────────────────────────
+
+    #[test]
+    fn options_matcher_values_carries_closed_token_selectors() {
+        let m: OptionsMatcher = serde_json::from_value(json!({
+            "values": { "file": { "path": { "within": "/work/project" } } }
+        }))
+        .unwrap();
+        assert_eq!(
+            m.values.unwrap()["file"],
+            TokenSelector::Path(PathSelector::Within {
+                within: "/work/project".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn options_coverage_none_and_allowed_parse() {
+        let m: OptionsMatcher = serde_json::from_value(json!({ "none": true })).unwrap();
+        assert_eq!(m.none, Some(true));
+        // docs fixture OptionsCoverage/none-and-allowed.json
+        let m: OptionsMatcher = serde_json::from_value(json!({
+            "allowed": [
+                { "option": "verbose", "required": false, "repeatable": false },
+                {
+                    "option": "file", "required": false, "repeatable": true,
+                    "values": { "each": { "path": { "within": "/work/project" } } }
+                }
+            ]
+        }))
+        .unwrap();
+        assert_eq!(m.allowed.as_ref().unwrap().len(), 2);
     }
 }

@@ -313,6 +313,8 @@ fn evaluate_part_rules(
         canonical,
         path_coords: &path_coords,
         nested: &nested,
+        cwd,
+        regexes: &config.regexes,
     };
 
     // every matching rule is evaluated and emits its vote (monotonicity)
@@ -444,9 +446,10 @@ fn path_coordinates(
         };
     for sel in &prof.path_sources {
         if let Some(pc) = &sel.argument {
+            // `{index}` selects that one positional; `{index, remainder: true}`
+            // also selects every positional past the index.
             match pc {
-                grammar::PositionalCoordinate::All { all: false } => {}
-                grammar::PositionalCoordinate::N {
+                grammar::PositionalCoordinate {
                     index,
                     remainder: false,
                 } if idx_ok(*index as usize, parsed.positionals.len()) => {
@@ -458,10 +461,9 @@ fn path_coordinates(
                         &mut out,
                     );
                 }
-                grammar::PositionalCoordinate::N {
+                grammar::PositionalCoordinate {
                     remainder: true, ..
-                }
-                | grammar::PositionalCoordinate::All { all: true } => {
+                } => {
                     for (k, tok) in parsed.positionals.iter().enumerate() {
                         push(
                             PathSourceTag::Argument { index: k as u32 },
@@ -484,10 +486,9 @@ fn path_coordinates(
                 {
                     continue;
                 }
+                // `valueOrdinal` selects exactly that 1-based value ordinal
                 for (k, v) in occ.values.iter().enumerate() {
-                    if let Some(vs) = &ov.value_ordinal
-                        && !vs.selects(k as u32 + 1)
-                    {
+                    if ov.value_ordinal != k as u32 + 1 {
                         continue;
                     }
                     push(

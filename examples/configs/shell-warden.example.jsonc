@@ -158,7 +158,7 @@
           "message": "do not mount / into the container",
           "match": {
             "arguments": { "exact": ["run"] },
-            "options": { "values": { "volume": ["/:*"] } }
+            "options": { "values": { "volume": { "regex": "/:.*" } } }
           }
         }
       ]

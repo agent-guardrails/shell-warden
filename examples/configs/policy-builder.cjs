@@ -8,20 +8,23 @@
 // Coverage-model notes worth remembering (proven empirically):
 // - allow = a total coverage proof (classification complete + every dimension
 //   covered + redirect policy). A flag alone never carries an allow.
-// - optionCoverage.values.each is LITERAL equality (no glob support) — a
-//   free-form value (paths, names, messages) cannot be enumerated, hence the
-//   arity-0 workaround: declare the option arity 0 so its value becomes a
-//   positional argument covered by "remainder". Engine-side fix is tracked in
+// - `values` selectors are closed token selectors (`oneOf`, `regex` on whole
+//   value, `path` within/outside) — a free-form value (messages) cannot be
+//   enumerated, hence the arity-0 workaround: declare the option arity 0 so
+//   its value becomes a positional argument covered by "remainder". The
+//   fixed-arity + option-value-selector work landed in
 //   agent-guardrails/shell-warden issue 32: https://github.com/agent-guardrails/shell-warden/issues/32
 // - remainder JSON is the canonical one-level form
-//   {"none": true} / {"each": tokenSelector} (docs issue 21 / PR 22 made the
-//   public contract authoritative; nested externally tagged forms are invalid).
+//   {"none": true} / {"each": tokenValueSelector} where the token selector is
+//   {"any": true} / {"oneOf": [literal, ...]} / {"regex": pattern} /
+//   {"path": pathSelector} (docs issue 21 / PR 22 made the public contract
+//   authoritative; nested externally tagged forms are invalid).
 const fs = require("node:fs")
 
 // ── coverage helpers ─────────────────────────────────────────────────────────
 const cov = (option) => ({ option, required: false, repeatable: false })
 const valCov = (option, values) => ({ option, required: false, repeatable: false, values: { each: values } })
-const rem = (within) => ({ each: { within } })
+const rem = (within) => ({ each: { path: { within } } })
 const NO_MORE = { none: true }
 const ALLOW_TAIL = { environment: { none: true }, paths: { none: true }, facts: { none: true }, nestedParts: { none: true } }
 
@@ -159,8 +162,8 @@ const config = {
       allowRule("git/allow-branch-list", ["branch"], ["quiet"]),
       allowRule("git/allow-add", ["add"], ["all"]),
       // arity-0 "-m": the commit message becomes a positional covered by
-      // remainder (free-form values cannot be enumerated;
-      // engine-side fix: https://github.com/agent-guardrails/shell-warden/issues/32)
+      // remainder with `{"any": true}` (free-form, not enumerable
+      // field-by-field; engine-side selector work: https://github.com/agent-guardrails/shell-warden/issues/32)
       allowRule("git/allow-commit", ["commit"], ["m", "amend", "all", "quiet"]),
       allowRule("git/allow-fetch", ["fetch"], ["quiet"]),
       allowRule("git/allow-stash", ["stash"], []),

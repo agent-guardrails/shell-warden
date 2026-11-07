@@ -28,6 +28,9 @@ pub struct Config {
     /// Effective default redirect policy id (non-empty; `no-redirects` when
     /// the config omitted one and no allow rule needs it).
     pub defaults_redirect_policy: String,
+    /// Every `re2-v1` pattern compiled at configuration load; a later whole-
+    /// value match consults this cache (fail closed on a missing entry).
+    pub regexes: RegexCache,
 }
 
 impl Config {
@@ -305,7 +308,8 @@ fn strip_jsonc(text: &str) -> Result<String, String> {
 const MAX_EXECUTABLES: usize = 8;
 const MAX_ALIASES_PER_OPTION: usize = 16;
 const MAX_PATH_SOURCES: usize = 64;
-const MAX_MATCH_GLOBS: usize = 64;
+// Selector-alternative limit lives with the grammar closed unions (64); the
+// option `values` map carries one closed selector per canonical id.
 
 /// Analyzer-compatible canonical option ids (closed compatibility table,
 /// design §Profiles, option grammars, and analyzers). `sed-v1` is the only
@@ -433,13 +437,104 @@ fn validate(raw: RawConfig) -> Result<Config, String> {
         }
     }
 
+    let regexes = compile_config_regexes(&raw)?;
     let cfg = Config {
         raw,
         defaults_redirect_policy: defaults_redirect,
+        regexes,
     };
     // cross-check: every nestedParts profile reference resolves (already done
     // per rule against the profile set in validate_profile)
     Ok(cfg)
+}
+
+/// Validate every closed selector surface and precompile each `re2-v1`
+/// pattern into the load-time cache (design §Action-sensitive matching:
+/// "compiled when configuration loads"). A pattern outside the fixed dialect
+/// — backreference, look-around, whitespace — invalidates the config.
+fn compile_config_regexes(raw: &RawConfig) -> Result<RegexCache, String> {
+    let mut regexes = RegexCache::default();
+    for profile in &raw.profiles {
+        for rule in &profile.rules {
+            precompile_match_selectors(&rule.r#match, &mut regexes)?;
+        }
+        for hint in &profile.fallback_hints {
+            if let Some(m) = &hint.r#match {
+                precompile_match_selectors(m, &mut regexes)?;
+            }
+        }
+    }
+    Ok(regexes)
+}
+
+fn precompile_match_selectors(m: &Match, regexes: &mut RegexCache) -> Result<(), String> {
+    if let Some(a) = &m.arguments
+        && let Some(RemainderPolicy::Each { each }) = &a.remainder
+    {
+        validate_token_selector(each, regexes)?;
+    }
+    if let Some(o) = &m.options {
+        if let Some(values) = &o.values {
+            for sel in values.values() {
+                validate_token_selector(sel, regexes)?;
+            }
+        }
+        if let Some(allowed) = &o.allowed {
+            for entry in allowed {
+                if let Some(coverage) = entry.values() {
+                    validate_option_value_coverage(coverage, regexes)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_option_value_coverage(
+    coverage: &OptionValueCoverage,
+    regexes: &mut RegexCache,
+) -> Result<(), String> {
+    coverage.validate_shape()?;
+    match coverage {
+        OptionValueCoverage::Each { each } => validate_token_selector(each, regexes),
+        OptionValueCoverage::ByPosition { by_position } => {
+            for sel in by_position {
+                validate_token_selector(sel, regexes)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Closed-token-selector validation beyond serde: value-ordinal and path
+/// bounds (absolute lexical roots), plus regex precompilation.
+fn validate_token_selector(sel: &TokenSelector, regexes: &mut RegexCache) -> Result<(), String> {
+    match sel {
+        TokenSelector::Str(StringValueSelector::Regex(pattern)) => regexes.add(pattern),
+        TokenSelector::Str(_) => Ok(()),
+        TokenSelector::Path(path) => validate_path_selector(path),
+    }
+}
+
+/// Absolute lexical paths on every path-selector arm (no end-anchored globe,
+/// no relative form).
+fn validate_path_selector(p: &PathSelector) -> Result<(), String> {
+    let (kind, val) = match p {
+        PathSelector::Exact { exact } => ("exact", exact),
+        PathSelector::Within { within } => ("within", within),
+        PathSelector::Outside { outside } => ("outside", outside),
+    };
+    if val.len() > MAX_PATH_BYTES {
+        return Err(format!(
+            "path selector {kind} exceeds {MAX_PATH_BYTES} UTF-8 bytes"
+        ));
+    }
+    if !val.starts_with('/') {
+        return Err(format!(
+            "path selector {kind} root \"{val}\" must be an absolute lexical path"
+        ));
+    }
+    Ok(())
 }
 
 fn validate_profile(
@@ -519,6 +614,14 @@ fn validate_profile(
                 profile.id, spec.arity
             ));
         }
+        // inline form opt-in for a declared arity-one option only
+        if spec.inline == Some(true) && spec.arity != 1 {
+            return Err(format!(
+                "profile \"{}\": option \"{canonical}\" declares inline for arity {}, \
+                 but the inline form is valid only for arity one",
+                profile.id, spec.arity
+            ));
+        }
         if spec.aliases.is_empty() || spec.aliases.len() > MAX_ALIASES_PER_OPTION {
             return Err(format!(
                 "profile \"{}\": option \"{canonical}\" bad aliases list size",
@@ -569,6 +672,14 @@ fn validate_profile(
             return Err(format!(
                 "profile \"{}\": empty path source selector",
                 profile.id
+            ));
+        }
+        if let Some(ov) = &sel.option_value
+            && (ov.value_ordinal == 0 || ov.value_ordinal > MAX_OPTION_ARITY as u32)
+        {
+            return Err(format!(
+                "profile \"{}\": optionValue valueOrdinal {} is outside 1..={MAX_OPTION_ARITY}",
+                profile.id, ov.value_ordinal
             ));
         }
         if sel.redirect.is_some() {
@@ -914,16 +1025,9 @@ fn validate_allow_match(
         return Err("allow arguments are exact or prefix plus an explicit remainder".to_string());
     }
     if let Some(RemainderPolicy::Each { each }) = &args.remainder {
-        match each {
-            TokenSelector::Within(root) => {
-                if !root.starts_with('/') {
-                    return Err(
-                        "remainder within root must be an absolute lexical path".to_string()
-                    );
-                }
-            }
-            TokenSelector::Exact(_) => {}
-        }
+        // path arms must carry absolute lexical roots; regex patterns are
+        // precompiled (and validated) after profile validation
+        let _ = each;
     }
     // options: none or allowed (entries reference profile options)
     let Some(opts) = &m.options else {
@@ -944,35 +1048,45 @@ fn validate_allow_match(
             if allowed.is_empty() {
                 return Err("options.allowed must carry at least one entry".to_string());
             }
+            // canonical option ids are unique within one allowed list — even
+            // when the duplicate entries differ in other fields
+            let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
             for entry in allowed {
-                let Some(spec) = profile.options.get(&entry.option) else {
+                let canonical = entry.option();
+                if !seen.insert(canonical) {
                     return Err(format!(
-                        "option coverage references undeclared option \"{}\"",
-                        entry.option
+                        "options.allowed carries a duplicate canonical option \"{canonical}\" policy"
+                    ));
+                }
+                let Some(spec) = profile.options.get(canonical) else {
+                    return Err(format!(
+                        "option coverage references undeclared option \"{canonical}\""
                     ));
                 };
+                let values = entry.values();
                 if spec.arity > 0 {
-                    match &entry.values {
-                        Some(ValuesCoverage::Each { each }) => {
-                            if each.is_empty() {
-                                return Err(format!(
-                                    "option \"{}\" values.each must not be empty",
-                                    entry.option
-                                ));
-                            }
-                        }
-                        _ => {
-                            return Err(format!(
-                                "positive-arity option \"{}\" must select every consumed value (values.each)",
-                                entry.option
-                            ));
-                        }
+                    let Some(coverage) = values else {
+                        return Err(format!(
+                            "positive-arity option \"{canonical}\" must select every consumed \
+                             value (values policy)"
+                        ));
+                    };
+                    coverage.validate_shape()?;
+                    if let OptionValueCoverage::ByPosition { by_position } = coverage
+                        && by_position.len() != spec.arity as usize
+                    {
+                        return Err(format!(
+                            "option \"{canonical}\" has fixed arity {} but its byPosition \
+                             coverage lists {} selectors",
+                            spec.arity,
+                            by_position.len()
+                        ));
                     }
-                } else if entry.values.is_some() {
-                    return Err(format!(
-                        "zero-arity option \"{}\" takes no values",
-                        entry.option
-                    ));
+                } else if values.is_some() {
+                    // a positive-arity entry on a declared flag: the wire
+                    // carried `values`, which a zero-arity option may never
+                    // have
+                    return Err(format!("zero-arity option \"{canonical}\" takes no values"));
                 }
             }
         }
@@ -1115,14 +1229,14 @@ fn validate_ask_deny_match(rule: &Rule, profile: &Profile) -> Result<(), String>
     }
     if let Some(o) = &m.options {
         if let Some(values) = &o.values {
-            for (id, globs) in values {
+            if values.is_empty() {
+                return Err("options.values must list at least one option".to_string());
+            }
+            for id in values.keys() {
                 if !profile.options.contains_key(id) {
                     return Err(format!(
                         "options.values references undeclared option \"{id}\""
                     ));
-                }
-                if globs.is_empty() || globs.len() > MAX_MATCH_GLOBS {
-                    return Err(format!("options.values \"{id}\" bad glob list"));
                 }
             }
         }
@@ -1295,5 +1409,211 @@ mod tests {
             panic!("wrong version must reject");
         };
         assert!(e.contains("version must be 2"), "{e}");
+    }
+
+    // ── Fixed option arity + option-value selectors (issue 32) ──────────────
+
+    /// A one-profile config with an arity-one `--name` value option covered by
+    /// a closed selector; `options_json` / `name_spec` / `rename_spec` are
+    /// spliced in per scenario.
+    fn cargo_profile(name_spec: &str, rename_spec: Option<&str>, options_json: &str) -> String {
+        let rename = rename_spec
+            .map(|r| format!(r#""rename": {r}, "#))
+            .unwrap_or_default();
+        format!(
+            r#"{{
+      "id": "cargo",
+      "executables": ["cargo"],
+      "options": {{
+        {name_spec},
+        {rename}
+        "force": {{ "aliases": ["--force"], "arity": 0 }}
+      }},
+      "rules": [
+        {{
+          "id": "cargo/allow-init", "action": "allow",
+          "match": {{
+            "classification": "complete",
+            "arguments": {{ "exact": ["init"] }},
+            "options": {options_json},
+            "environment": {{ "none": true }},
+            "paths": {{ "none": true }},
+            "facts": {{ "none": true }},
+            "nestedParts": {{ "none": true }}
+          }},
+          "redirectPolicy": {{ "mode": "replace", "policies": ["no-redirects"] }}
+        }}
+      ]
+    }}"#
+        )
+    }
+
+    fn cargo_config(name_spec: &str, rename_spec: Option<&str>, options_json: &str) -> String {
+        let blob = cargo_profile(name_spec, rename_spec, options_json);
+        format!(
+            r#"{{
+  "version": 2,
+  "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
+  "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
+  "profiles": [{blob}]
+}}"#
+        )
+    }
+
+    fn expect_invalid(name: &str, text: &str, needle: &str) {
+        let Err(err) = load_str(text) else {
+            panic!("{name} config must be rejected");
+        };
+        assert!(
+            err.contains("config invalid"),
+            "{name} must fail during config parsing: {err}"
+        );
+        assert!(
+            err.contains(needle),
+            "{name} must name the violation `{needle}`: {err}"
+        );
+    }
+
+    /// An invalid `re2-v1` pattern invalidates the config at load (docs
+    /// fixture StringValueSelector/invalid-regex.json: look-around).
+    #[test]
+    fn invalid_regex_pattern_rejected() {
+        expect_invalid(
+            "invalid-regex",
+            &cargo_config(
+                r#""name": { "aliases": ["--name"], "arity": 1 }"#,
+                None,
+                r#"{ "allowed": [{ "option": "name", "required": false, "repeatable": false,
+                    "values": { "each": { "regex": "(?=unsafe)unsafe" } } }] }"#,
+            ),
+            "re2-v1",
+        );
+        // numeric backreference subexpression likewise
+        expect_invalid(
+            "backreference-regex",
+            &cargo_config(
+                r#""name": { "aliases": ["--name"], "arity": 1 }"#,
+                None,
+                r#"{ "allowed": [{ "option": "name", "required": false, "repeatable": false,
+                    "values": { "each": { "regex": "(a)\\1" } } }] }"#,
+            ),
+            "re2-v1",
+        );
+    }
+
+    /// A selector arm with the payload of the wrong type is a parse error
+    /// (schema "type mismatch"), never silently coerced.
+    #[test]
+    fn selector_type_mismatch_rejected() {
+        expect_invalid(
+            "one-of-string",
+            &cargo_config(
+                r#""name": { "aliases": ["--name"], "arity": 1 }"#,
+                None,
+                r#"{ "allowed": [{ "option": "name", "required": false, "repeatable": false,
+                    "values": { "each": { "oneOf": "x" } } }] }"#,
+            ),
+            "config invalid",
+        );
+    }
+
+    /// Nested selector input (`{"each": {"each": …}}`) is rejected — no
+    /// nested proxy.
+    #[test]
+    fn nested_selector_input_rejected() {
+        expect_invalid(
+            "nested-each",
+            &cargo_config(
+                r#""name": { "aliases": ["--name"], "arity": 1 }"#,
+                None,
+                r#"{ "allowed": [{ "option": "name", "required": false, "repeatable": false,
+                    "values": { "each": { "path": { "each": { "any": true } } } } }] }"#,
+            ),
+            "config invalid",
+        );
+    }
+
+    /// A positive-arity option coverage without `values` is invalid (docs
+    /// fixture PositiveArityOptionCoverage/missing-values-policy.json).
+    #[test]
+    fn positive_arity_option_requires_values_policy() {
+        expect_invalid(
+            "missing-values-policy",
+            &cargo_config(
+                r#""name": { "aliases": ["--name"], "arity": 1 }"#,
+                None,
+                r#"{ "allowed": [{ "option": "name", "required": false, "repeatable": false }] }"#,
+            ),
+            "positive-arity option",
+        );
+    }
+
+    /// A coverage entry carrying `values` on a declared zero-arity option is
+    /// invalid.
+    #[test]
+    fn zero_arity_option_prohibits_values() {
+        expect_invalid(
+            "zero-arity-values",
+            &cargo_config(
+                r#""verbose": { "aliases": ["-v"], "arity": 0 }"#,
+                None,
+                r#"{ "allowed": [{ "option": "verbose", "required": false, "repeatable": false,
+                    "values": { "each": { "any": true } } }] }"#,
+            ),
+            "zero-arity option",
+        );
+    }
+
+    /// `byPosition` must have exactly the declared fixed arity of selectors.
+    #[test]
+    fn by_position_length_must_equal_declared_arity() {
+        expect_invalid(
+            "bad-by-position-length",
+            &cargo_config(
+                r#""name": { "aliases": ["--name"], "arity": 1 }"#,
+                Some(r#"{ "aliases": ["--rename"], "arity": 2 }"#),
+                r#"{ "allowed": [
+                    { "option": "name", "required": false, "repeatable": false,
+                      "values": { "each": { "any": true } } },
+                    { "option": "rename", "required": false, "repeatable": false,
+                      "values": { "byPosition": [ { "any": true }, { "any": true }, { "any": true } ] } }
+                ] }"#,
+            ),
+            "byPosition",
+        );
+    }
+
+    /// `inline: true` is only valid for a declared arity-one option (docs
+    /// fixture OptionSpec/inline-arity-greater-than-one.json).
+    #[test]
+    fn inline_opt_in_is_arity_one_only() {
+        expect_invalid(
+            "inline-arity-two",
+            &cargo_config(
+                r#""name": { "aliases": ["--name"], "arity": 1 }"#,
+                Some(r#"{ "aliases": ["--rename"], "arity": 2, "inline": true }"#),
+                r#"{ "none": true }"#,
+            ),
+            "inline",
+        );
+    }
+
+    /// Canonical duplicate option policies in one `allowed` list invalidate
+    /// the config (docs fixture
+    /// OptionsCoverage/duplicate-canonical-option-policies.json).
+    #[test]
+    fn duplicate_canonical_option_policies_rejected() {
+        expect_invalid(
+            "duplicate-option-policies",
+            &cargo_config(
+                r#""verbose": { "aliases": ["-v"], "arity": 0 }"#,
+                None,
+                r#"{ "allowed": [
+                    { "option": "verbose", "required": false, "repeatable": false },
+                    { "option": "verbose", "required": false, "repeatable": true }
+                ] }"#,
+            ),
+            "duplicate canonical option",
+        );
     }
 }
