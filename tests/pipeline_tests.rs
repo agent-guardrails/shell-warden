@@ -545,6 +545,72 @@ fn probe_path(name: &str, text: &str) -> std::path::PathBuf {
     p
 }
 
+/// The one-shot decision binary: letter in on stdin, verdict out on stdout,
+/// exit 0 verdict / 2 config invalid with empty stdout (02-letter-verdict).
+fn run_checker(config_path: &std::path::Path, letter: &str) -> (i32, String, String) {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new(env!("CARGO_BIN_EXE_shell-warden"))
+        .arg("--config")
+        .arg(config_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("checker binary must spawn");
+    child
+        .stdin
+        .as_mut()
+        .expect("checker stdin is piped")
+        .write_all(letter.as_bytes())
+        .expect("checker stdin write must succeed");
+    let out = child.wait_with_output().expect("checker must not hang");
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).to_string(),
+        String::from_utf8_lossy(&out.stderr).to_string(),
+    )
+}
+
+// verifies the trailing-input hardening on the exact public surface: the letter
+// is valid, only the config text carries junk after the first JSON value.
+#[test]
+fn binary_rejects_trailing_config_input_with_exit_2() {
+    const VALID_LETTER: &str = r#"{"version":1,"invocation":{"id":"p","sessionID":"p"},"action":"shell","commands":[{"index":0,"cwd":"/repo","raw":"git push"}]}"#;
+    const VALID_CONFIG: &str = r#"{ "version": 2, "defaults": { "action": "ask" } }"#;
+    for (name, suffix) in [
+        ("trailing second object", r#" {"x":1}"#),
+        ("trailing scalar", " 42"),
+        ("trailing garbage", "\n{oops"),
+    ] {
+        let path = probe_path(
+            &format!("trailing-binary-{name}"),
+            &format!("{VALID_CONFIG}{suffix}"),
+        );
+        let (code, stdout, stderr) = run_checker(&path, VALID_LETTER);
+        assert_eq!(code, 2, "{name} must exit 2 (stderr: {stderr})");
+        assert!(
+            stdout.is_empty(),
+            "{name} must print nothing on stdout: {stdout:?}"
+        );
+        assert!(
+            stderr.contains("config invalid"),
+            "{name} must diagnose config invalid: {stderr}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+    // the clean config keeps exit 0 with a verdict on stdout
+    let clean = probe_path("trailing-binary-clean", VALID_CONFIG);
+    let (code, stdout, stderr) = run_checker(&clean, VALID_LETTER);
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("\"verdict\""),
+        "clean config must produce a verdict on stdout: {stdout:?}{stderr}"
+    );
+    assert_eq!(stderr, "");
+    let _ = std::fs::remove_file(&clean);
+}
+
 #[test]
 fn remainder_dto_probe_accepts_canonical_forms() {
     // canonical `{"none": true}`: the bare prefix allows; any argument beyond

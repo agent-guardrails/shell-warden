@@ -227,7 +227,12 @@ fn duplicate_free_value(text: &str) -> Result<Value, serde_json::Error> {
     }
 
     let mut deserializer = serde_json::Deserializer::from_str(text);
-    StrictValue.deserialize(&mut deserializer)
+    let value = StrictValue.deserialize(&mut deserializer)?;
+    // EOF Edge: a streaming deserializer returns after the first complete
+    // value; everything after it (a second object, a scalar, garbage) would
+    // otherwise be swallowed. `end()` fails on any trailing input.
+    deserializer.end()?;
+    Ok(value)
 }
 
 fn raw_limits_bytes(v: &Value) -> u64 {
@@ -1252,6 +1257,32 @@ mod tests {
             panic!("duplicate struct key must reject");
         };
         assert!(dup_defaults.contains("config invalid"), "{dup_defaults}");
+    }
+
+    /// Trailing input after the first JSON value must reject immediately:
+    /// the strict parser returns on the first complete value, so `end()` is
+    /// what enforces EOF. On the plain text side the expectation is
+    /// "config invalid" through load_str; through the public binary the
+    /// contract is exit 2 with clean stdout (binary side covered in
+    /// tests/pipeline_tests.rs).
+    #[test]
+    fn trailing_json_after_first_value_rejected() {
+        const VALID: &str = r#"{ "version": 2, "defaults": { "action": "ask" } }"#;
+        for (name, suffix) in [
+            ("trailing second object", r#" {"x":1}"#),
+            ("trailing scalar", " 42"),
+            ("trailing garbage", "\n{oops"),
+        ] {
+            let Err(err) = load_str(&format!("{VALID}{suffix}")) else {
+                panic!("trailing input must reject ({name})");
+            };
+            assert!(
+                err.contains("config invalid"),
+                "{name} must fail during config parsing: {err}"
+            );
+        }
+        // and the pristine one-liner still loads
+        assert!(load_str(VALID).is_ok());
     }
 
     #[test]
