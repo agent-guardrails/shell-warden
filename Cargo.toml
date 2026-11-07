@@ -5,7 +5,11 @@ edition = "2024"
 description = "One-shot letter checker of the shell-warden permission system (config v2 command profiles; per-check spawn per ADR-0016)"
 license = "MIT"
 
+[workspace]
+members = ["sw-attrs"]
+
 [dependencies]
+sw-attrs = { path = "sw-attrs" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

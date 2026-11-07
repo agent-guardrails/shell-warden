@@ -3,7 +3,7 @@
 // monotonicity and order-independence property invariants (§Policy resolution
 // properties) and wrapper/nesting behavior. Letter fixtures per 02 §2.2.
 
-use shell_warden::checker::config::load_str;
+use shell_warden::checker::config::{load_path, load_str};
 use shell_warden::checker::letter::Letter;
 use shell_warden::checker::pipeline::evaluate;
 use shell_warden::checker::verdict::{Verdict, VerdictKind};
@@ -495,4 +495,205 @@ fn reorder_rules_options_policies_keeps_verdicts() {
 #[test]
 fn allow_log_oneline_smoke() {
     allow_log_oneline_impl();
+}
+
+// ── Config-v2 canonical wire DTOs (issue #34): fixture probe ────────────────
+//
+// Standalone temporary config files, loaded through the real config entry
+// point (`load_path`): canonical one-level forms load and their allow
+// coverage holds; nested externally tagged, mixed, and unknown forms are
+// rejected during config parsing — before any verdict is produced.
+
+fn probe_config(remainder_value: &str) -> String {
+    format!(
+        r#"{{
+  "version": 2,
+  "defaults": {{ "action": "ask", "message": "No approved command profile matched.", "redirectPolicy": "no-redirects" }},
+  "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
+  "profiles": [
+    {{
+      "id": "git",
+      "executables": ["git"],
+      "options": {{ "oneline": {{ "aliases": ["--oneline"], "arity": 0 }} }},
+      "rules": [
+        {{
+          "id": "git/allow-push-suffix", "action": "allow",
+          "match": {{
+            "classification": "complete",
+            "arguments": {{ "prefix": ["push"], "remainder": {remainder_value} }},
+            "options": {{ "none": true }}, "environment": {{ "none": true }},
+            "paths": {{ "none": true }}, "facts": {{ "none": true }},
+            "nestedParts": {{ "none": true }}
+          }},
+          "redirectPolicy": {{ "mode": "replace", "policies": ["no-redirects"] }}
+        }}
+      ]
+    }}
+  ]
+}}"#
+    )
+}
+
+fn probe_path(name: &str, text: &str) -> std::path::PathBuf {
+    let mut p = std::env::temp_dir();
+    p.push(format!(
+        "shell-warden-34-{}-{}.jsonc",
+        name,
+        std::process::id()
+    ));
+    std::fs::write(&p, text).expect("probe fixture must be writable");
+    p
+}
+
+/// The one-shot decision binary: letter in on stdin, verdict out on stdout,
+/// exit 0 verdict / 2 config invalid with empty stdout (02-letter-verdict).
+/// The letter is fed from a pre-filled file (`Stdio::from(File)`), not from a
+/// pipe: a fail-fast child (config invalid ⇒ exit 2 without reading stdin)
+/// would otherwise race `write_all` into a broken pipe and flake the test.
+fn run_checker(config_path: &std::path::Path, letter: &str) -> (i32, String, String) {
+    use std::process::{Command, Stdio};
+    let letter_path = probe_path("letter", letter);
+    let letter_file = std::fs::File::open(&letter_path).expect("letter fixture must be readable");
+    let out = Command::new(env!("CARGO_BIN_EXE_shell-warden"))
+        .arg("--config")
+        .arg(config_path)
+        .stdin(Stdio::from(letter_file))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("checker binary must run");
+    let _ = std::fs::remove_file(&letter_path);
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).to_string(),
+        String::from_utf8_lossy(&out.stderr).to_string(),
+    )
+}
+
+// verifies the trailing-input hardening on the exact public surface: the letter
+// is valid, only the config text carries junk after the first JSON value.
+#[test]
+fn binary_rejects_trailing_config_input_with_exit_2() {
+    const VALID_LETTER: &str = r#"{"version":1,"invocation":{"id":"p","sessionID":"p"},"action":"shell","commands":[{"index":0,"cwd":"/repo","raw":"git push"}]}"#;
+    const VALID_CONFIG: &str = r#"{ "version": 2, "defaults": { "action": "ask" } }"#;
+    for (name, suffix) in [
+        ("trailing second object", r#" {"x":1}"#),
+        ("trailing scalar", " 42"),
+        ("trailing garbage", "\n{oops"),
+    ] {
+        let path = probe_path(
+            &format!("trailing-binary-{name}"),
+            &format!("{VALID_CONFIG}{suffix}"),
+        );
+        let (code, stdout, stderr) = run_checker(&path, VALID_LETTER);
+        assert_eq!(code, 2, "{name} must exit 2 (stderr: {stderr})");
+        assert!(
+            stdout.is_empty(),
+            "{name} must print nothing on stdout: {stdout:?}"
+        );
+        assert!(
+            stderr.contains("config invalid"),
+            "{name} must diagnose config invalid: {stderr}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+    // the clean config keeps exit 0 with a verdict on stdout
+    let clean = probe_path("trailing-binary-clean", VALID_CONFIG);
+    let (code, stdout, stderr) = run_checker(&clean, VALID_LETTER);
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("\"verdict\""),
+        "clean config must produce a verdict on stdout: {stdout:?}{stderr}"
+    );
+    assert_eq!(stderr, "");
+    let _ = std::fs::remove_file(&clean);
+}
+
+#[test]
+fn remainder_dto_probe_accepts_canonical_forms() {
+    // canonical `{"none": true}`: the bare prefix allows; any argument beyond
+    // the closure asks (proving the remainder semantics, not route effects).
+    let none_path = probe_path("none-canonical", &probe_config(r#"{ "none": true }"#));
+    let none_cfg =
+        load_path(&none_path).unwrap_or_else(|e| panic!("canonical none must load: {e}"));
+    assert_eq!(
+        evaluate(&none_cfg, &letter("git push")).verdict,
+        VerdictKind::Allow
+    );
+    assert_eq!(
+        evaluate(&none_cfg, &letter("git push origin")).verdict,
+        VerdictKind::Ask,
+        "arguments beyond the none closure never allow"
+    );
+
+    // canonical `{"each": {"exact": [...]}}`: members allow, non-members ask.
+    let exact_path = probe_path(
+        "each-exact",
+        &probe_config(r#"{ "each": { "exact": ["origin", "main"] } }"#),
+    );
+    let exact_cfg =
+        load_path(&exact_path).unwrap_or_else(|e| panic!("canonical each-exact must load: {e}"));
+    assert_eq!(
+        evaluate(&exact_cfg, &letter("git push origin main")).verdict,
+        VerdictKind::Allow
+    );
+    assert_eq!(
+        evaluate(&exact_cfg, &letter("git push unknown")).verdict,
+        VerdictKind::Ask,
+        "remainder tokens outside the exact member list never allow"
+    );
+
+    // canonical `{"each": {"within": ...}}` (absolute lexical path root):
+    // lexical paths under the root allow, anything outside asks.
+    let within_path = probe_path(
+        "each-within",
+        &probe_config(r#"{ "each": { "within": "/repo" } }"#),
+    );
+    let within_cfg =
+        load_path(&within_path).unwrap_or_else(|e| panic!("canonical each-within must load: {e}"));
+    assert_eq!(
+        evaluate(&within_cfg, &letter_cwd("git push README.md", "/repo")).verdict,
+        VerdictKind::Allow
+    );
+    assert_eq!(
+        evaluate(&within_cfg, &letter_cwd("git push /etc/passwd", "/repo")).verdict,
+        VerdictKind::Ask,
+        "paths outside the within root never allow"
+    );
+
+    for p in [&none_path, &exact_path, &within_path] {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
+#[test]
+fn remainder_dto_probe_rejects_non_canonical_forms() {
+    for (name, remainder_value) in [
+        // nested externally tagged forms (docs fixtures RemainderPolicy/
+        // nested-serde-none.json, OptionValueCoverage/nested-serde-each.json)
+        ("none-nested", r#"{ "none": { "none": true } }"#),
+        ("each-nested", r#"{ "each": { "each": { "any": true } } }"#),
+        // mixed union arms
+        (
+            "mixed",
+            r#"{ "none": true, "each": { "exact": ["origin"] } }"#,
+        ),
+        // not-the-closed-form values and unknown forms
+        ("false-none", r#"{ "none": false }"#),
+        ("unknown", r#"{ "any": true }"#),
+        (
+            "rich-path-alias",
+            r#"{ "each": { "path": { "within": "/repo" } } }"#,
+        ),
+    ] {
+        let path = probe_path(name, &probe_config(remainder_value));
+        let err = load_path(&path)
+            .err()
+            .unwrap_or_else(|| panic!("{name} probe must not parse"));
+        assert!(
+            err.contains("config invalid"),
+            "{name} probe must fail during config parsing: {err}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
 }
