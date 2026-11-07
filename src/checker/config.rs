@@ -127,19 +127,17 @@ pub fn load_path(path: &Path) -> ConfigResult {
 
 /// Load + validate from a string (used by golden tests directly).
 ///
-/// The schema parse consumes the raw text stream (not the `Value` below it):
-/// `serde_json`'s map normalizes duplicate object keys to last-wins, which
-/// would silently widen a restricted remainder policy (`{"within": "/repo/safe",
-/// "within": "/"}`). Streaming keeps every key visible to the serde visitors,
-/// so struct visitors raise `duplicate field …` and the canonical selectors
-/// reject any second arm — all before any normalized value exists.
+/// `serde_json` normalizes duplicate object keys to last-wins, which silently
+/// widens policies (`{"within": "/repo/safe", "within": "/"}` keeps only the
+/// permissive value; a duplicated `redirectPolicies` entry can downgrade to
+/// allow-or-ask at map-field level). `duplicate_free_value` rejects *any*
+/// duplicate object key at any nesting depth — selectors, structs, and
+/// map-valued fields alike — before a normalized value exists.
 pub fn load_str(text: &str) -> ConfigResult {
     let stripped =
         strip_jsonc(text).map_err(|e| format!("config invalid: JSONC syntax error: {e}"))?;
-    // Value pass serves the configBytes cap only; it must not feed the
-    // schema parse (last-wins duplicate-key collapse).
-    let value: Value =
-        serde_json::from_str(&stripped).map_err(|e| format!("config invalid: JSON error: {e}"))?;
+    let value =
+        duplicate_free_value(&stripped).map_err(|e| format!("config invalid: JSON error: {e}"))?;
     let limit = raw_limits_bytes(&value);
     if text.len() > limit as usize {
         return Err(format!(
@@ -148,9 +146,88 @@ pub fn load_str(text: &str) -> ConfigResult {
         ));
     }
     let raw: RawConfig =
-        serde_json::from_str(&stripped).map_err(|e| format!("config invalid: schema: {e}"))?;
+        serde_json::from_value(value).map_err(|e| format!("config invalid: schema: {e}"))?;
     let config = validate(raw).map_err(|e| format!("config invalid: {e}"))?;
     Ok(config)
+}
+
+/// Build a `Value` from raw JSON text, rejecting duplicate object keys at any
+/// depth (`serde_json::from_str::<Value>` would collapse them last-wins).
+/// Every alternative shape — struct fields, canonical selector arms, and
+/// map-valued fields (`redirectPolicies`, `options`, `match.options.values`) —
+/// therefore carries every raw key to this visitor.
+fn duplicate_free_value(text: &str) -> Result<Value, serde_json::Error> {
+    use serde::de::{DeserializeSeed, MapAccess, SeqAccess, Visitor};
+
+    struct StrictValue;
+
+    impl<'de> DeserializeSeed<'de> for StrictValue {
+        type Value = Value;
+        fn deserialize<D: serde::Deserializer<'de>>(
+            self,
+            deserializer: D,
+        ) -> Result<Value, D::Error> {
+            deserializer.deserialize_any(StrictVisitor)
+        }
+    }
+
+    struct StrictVisitor;
+
+    impl StrictVisitor {
+        fn duplicate<D: serde::de::Error>(key: &str) -> D {
+            D::custom(format!("duplicate object key `{key}`"))
+        }
+    }
+
+    impl<'de> Visitor<'de> for StrictVisitor {
+        type Value = Value;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a JSON value free of duplicate object keys")
+        }
+        fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Value, E> {
+            Ok(Value::Bool(v))
+        }
+        fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Value, E> {
+            Ok(Value::Number(v.into()))
+        }
+        fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Value, E> {
+            Ok(Value::Number(v.into()))
+        }
+        fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Value, E> {
+            serde_json::Number::from_f64(v)
+                .map(Value::Number)
+                .ok_or_else(|| E::custom("non-finite number in config"))
+        }
+        fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Value, E> {
+            Ok(Value::String(v.to_owned()))
+        }
+        fn visit_unit<E: serde::de::Error>(self) -> Result<Value, E> {
+            Ok(Value::Null)
+        }
+        fn visit_none<E: serde::de::Error>(self) -> Result<Value, E> {
+            Ok(Value::Null)
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut access: A) -> Result<Value, A::Error> {
+            let mut out = Vec::new();
+            while let Some(item) = access.next_element_seed(StrictValue)? {
+                out.push(item);
+            }
+            Ok(Value::Array(out))
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<Value, A::Error> {
+            let mut map = serde_json::Map::new();
+            while let Some(key) = access.next_key::<String>()? {
+                if map.contains_key(&key) {
+                    return Err(Self::duplicate::<A::Error>(&key));
+                }
+                map.insert(key, access.next_value_seed(StrictValue)?);
+            }
+            Ok(Value::Object(map))
+        }
+    }
+
+    let mut deserializer = serde_json::Deserializer::from_str(text);
+    StrictValue.deserialize(&mut deserializer)
 }
 
 fn raw_limits_bytes(v: &Value) -> u64 {
@@ -1118,6 +1195,47 @@ mod tests {
             panic!("duplicate none keys must reject");
         };
         assert!(err.contains("config invalid"), "{err}");
+    }
+
+    /// Duplicate keys in map-valued fields must not collapse last-wins: a
+    /// permissive twin can otherwise loosen a restrictive policy. Rejected in
+    /// both orders; the error names the duplicated key.
+    #[test]
+    fn duplicate_map_keys_rejected_in_both_orders() {
+        let permissive_then_restrictive = load_str(
+            r#"{
+  "version": 2,
+  "defaults": { "action": "ask", "redirectPolicy": "p" },
+  "redirectPolicies": {
+    "p": { "redirects": { "none": true }, "paths": { "none": true } },
+    "p": { "redirects": { "none": true }, "paths": { "all": [{ "coordinate": { "redirect": { "operator": ">", "sourceFd": "default", "occurrence": "all" } }, "within": "/repo/safe" }] } }
+  },
+  "profiles": []
+}"#,
+        );
+        let restrictive_then_permissive = load_str(
+            r#"{
+  "version": 2,
+  "defaults": { "action": "ask", "redirectPolicy": "p" },
+  "redirectPolicies": {
+    "p": { "redirects": { "none": true }, "paths": { "all": [{ "coordinate": { "redirect": { "operator": ">", "sourceFd": "default", "occurrence": "all" } }, "within": "/repo/safe" }] } },
+    "p": { "redirects": { "none": true }, "paths": { "none": true } }
+  },
+  "profiles": []
+}"#,
+        );
+        for (order, result) in [
+            ("permissive-then-restrictive", permissive_then_restrictive),
+            ("restrictive-then-permissive", restrictive_then_permissive),
+        ] {
+            let Err(err) = result else {
+                panic!("duplicate map key must reject ({order})");
+            };
+            assert!(
+                err.contains("duplicate object key `p`"),
+                "{order} must fail on the duplicated key: {err}"
+            );
+        }
     }
 
     #[test]
