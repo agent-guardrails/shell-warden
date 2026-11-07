@@ -16,8 +16,9 @@
 use super::evidence::reason;
 use super::evidence::{ArgToken, EnvAssign, EvidenceState, FactObs, Part, RedirectObs};
 use super::grammar::{
-    self, EnvironmentTest, EvidenceClass, FactTest, OptionCoverage, PathCoordinateSelector,
-    PathPolicy, RedirectTest, RemainderPolicy, TokenSelector, ValuesCoverage, VerdictKind,
+    self, EnvironmentTest, EvidenceClass, FactTest, MAX_OPTION_ARITY, OptionCoverageEntry,
+    OptionValueCoverage, PathCoordinateSelector, PathPolicy, PathSelector, RedirectTest,
+    RemainderPolicy, StringValueSelector, TokenSelector, VerdictKind,
 };
 
 // ── Raw-text glob (07 §7.5, OpenCode-compatible) ─────────────────────────────
@@ -133,6 +134,10 @@ pub struct PartFacts<'a> {
     pub canonical: std::collections::BTreeMap<String, Vec<OptionOccurrenceView>>,
     pub path_coords: &'a [PathCoordinateObs],
     pub nested: &'a [NestedResult],
+    /// Command cwd for lexical-path resolution (join + dot-dot normalize).
+    pub cwd: &'a str,
+    /// Compiled `re2-v1` patterns (config-load phase; fail closed on miss).
+    pub regexes: &'a grammar::RegexCache,
 }
 
 // ── Lexical path comparison (design §Lexical path policy) ───────────────────
@@ -167,7 +172,9 @@ pub fn path_within(path: &str, root: &str, cwd: &str) -> bool {
 
 pub fn path_matches_policy(text_path: &str, policy: &PathPolicy, cwd: &str) -> bool {
     if let Some(exact) = &policy.exact {
-        return exact.as_str() == text_path;
+        // the recorded path text is compared in its normalized form
+        // (cwd join + `.`/`..` resolution), matching the path-selector rule
+        return normalized_path(text_path, cwd) == *exact;
     }
     if let Some(within_root) = &policy.within {
         return path_within(text_path, within_root, cwd);
@@ -176,6 +183,68 @@ pub fn path_matches_policy(text_path: &str, policy: &PathPolicy, cwd: &str) -> b
         return !path_within(text_path, outside_root, cwd);
     }
     false
+}
+
+// ── Closed selector semantics ───────────────────────────────────────────────
+
+/// One string-value selector against one complete literal token.
+/// `regex` matches the whole value in the fixed `re2-v1` dialect (cache holds
+/// the `\A(?:…)\z`-anchored compilation), never a substring.
+fn string_value_holds(
+    selector: &StringValueSelector,
+    text: &str,
+    resolvable: bool,
+    regexes: &grammar::RegexCache,
+) -> bool {
+    // a selector only ever selects a complete literal token (an active
+    // expansion placeholder carries the replacement marker and is not literal)
+    if !resolvable {
+        return false;
+    }
+    match selector {
+        StringValueSelector::Any => true,
+        StringValueSelector::OneOf(one_of) => one_of.iter().any(|l| l == text),
+        StringValueSelector::Regex(pattern) => regexes.whole_match(pattern, text),
+    }
+}
+
+/// Lexical path selector against one literal token: cwd-joined, dot-dot
+/// normalized, component-boundary comparisons; no filesystem or symlink I/O.
+/// `exact` also compares the normalized form (cwd join + `.` / `..`
+/// resolution), so `./sub/../file` under cwd `/work/project` equals
+/// `/work/project/file`.
+pub fn path_selector_holds(selector: &PathSelector, text: &str, cwd: &str) -> bool {
+    match selector {
+        PathSelector::Exact { exact } => normalized_path(text, cwd) == *exact,
+        PathSelector::Within { within } => path_within(text, within, cwd),
+        PathSelector::Outside { outside } => !path_within(text, outside, cwd),
+    }
+}
+
+/// `path` normalized lexically against `cwd` (join + `.` / `..` resolution,
+/// never an empty-root-form): `/a/../b`, `./x` and `a//b` reduce on component
+/// boundaries.
+pub fn normalized_path(path: &str, cwd: &str) -> String {
+    let comps = lexical_components(path, cwd);
+    if comps.is_empty() {
+        return "/".to_string();
+    }
+    format!("/{}", comps.join("/"))
+}
+
+/// One token-value selector (string arms, or the `path` arm) against one
+/// literal token.
+fn token_value_holds(
+    selector: &TokenSelector,
+    text: &str,
+    resolvable: bool,
+    regexes: &grammar::RegexCache,
+    cwd: &str,
+) -> bool {
+    match selector {
+        TokenSelector::Str(s) => string_value_holds(s, text, resolvable, regexes),
+        TokenSelector::Path(path) => resolvable && path_selector_holds(path, text, cwd),
+    }
 }
 
 // ── Ordinary predicate satisfaction (ask/deny) ──────────────────────────────
@@ -312,12 +381,12 @@ fn options_holds(o: &grammar::OptionsMatcher, f: &PartFacts) -> bool {
         return false;
     }
     if let Some(values) = &o.values
-        && !values.iter().all(|(id, globs)| {
+        && !values.iter().all(|(id, sel)| {
             f.canonical.get(id).map(|occs| {
                 occs.iter().any(|occ| {
-                    occ.values
-                        .iter()
-                        .any(|(v, _)| globs.iter().any(|g| glob(v, g)))
+                    occ.values.iter().any(|(v, resolvable)| {
+                        token_value_holds(sel, v, *resolvable, f.regexes, f.cwd)
+                    })
                 })
             }) == Some(true)
         })
@@ -432,15 +501,15 @@ fn redirect_test_holds(test: &RedirectTest, o: &RedirectObs) -> bool {
 /// Coordinate selector (static, from config) vs one runtime coordinate tag.
 pub fn coordinate_matches(sel: &PathCoordinateSelector, tag: &PathSourceTag) -> bool {
     match tag {
-        PathSourceTag::Argument { index } => match &sel.argument {
-            Some(pc) => match pc {
-                grammar::PositionalCoordinate::N {
-                    index: n,
-                    remainder,
-                } => *n == *index || *remainder,
-                grammar::PositionalCoordinate::All { all: true } => true,
-                grammar::PositionalCoordinate::All { all: false } => false,
-            },
+        PathSourceTag::Argument { index } => match sel.argument {
+            Some(grammar::PositionalCoordinate {
+                index: n,
+                remainder,
+            }) => {
+                // `{index}` selects that one positional; `{index, remainder:
+                // true}` selects the positionals from the index onwards.
+                if remainder { *index >= n } else { n == *index }
+            }
             None => false,
         },
         PathSourceTag::OptionValue {
@@ -449,15 +518,12 @@ pub fn coordinate_matches(sel: &PathCoordinateSelector, tag: &PathSourceTag) -> 
             value_ordinal,
         } => match &sel.option_value {
             Some(oc) => {
-                oc.option.as_str() == canonical.as_str()
+                oc.option.as_str() == canonical
                     && oc
                         .occurrence
                         .map(|o| o.selects(*occurrence))
                         .unwrap_or(true)
-                    && oc
-                        .value_ordinal
-                        .map(|o| o.selects(*value_ordinal))
-                        .unwrap_or(true)
+                    && oc.value_ordinal == *value_ordinal
             }
             None => false,
         },
@@ -705,7 +771,10 @@ pub fn allow_covers(
                             failures.push(CoverageCode::AllowCoverageMissing);
                         }
                         RemainderPolicy::Each { each } => {
-                            if rest.iter().any(|t| !remainder_fits(each, t, cwd)) {
+                            if rest
+                                .iter()
+                                .any(|t| !remainder_fits(ctx.regexes, each, t, cwd))
+                            {
                                 failures.push(CoverageCode::RemainderUncovered);
                             }
                         }
@@ -728,17 +797,14 @@ pub fn allow_covers(
             let allowed = o.allowed.as_ref().unwrap();
             // every observed occurrence satisfied by exactly one entry shape
             for (canonical, occs) in &ctx.canonical {
-                match allowed
-                    .iter()
-                    .find(|c| c.option.as_str() == canonical.as_str())
-                {
+                match allowed.iter().find(|c| c.option() == canonical.as_str()) {
                     None => failures.push(CoverageCode::OptionNotAllowed),
                     Some(entry) => {
-                        if occs.len() > 1 && !entry.repeatable {
+                        if occs.len() > 1 && !entry.repeatable() {
                             failures.push(CoverageCode::OptionNotRepeatable);
                         }
-                        if !option_values_covers(entry, occs) {
-                            failures.push(CoverageCode::OptionValuesUncovered);
+                        if let Err(code) = option_values_covers(entry, occs, ctx.regexes, cwd) {
+                            failures.push(code);
                         }
                     }
                 }
@@ -747,10 +813,10 @@ pub fn allow_covers(
             for entry in allowed {
                 let seen = ctx
                     .canonical
-                    .get(&entry.option)
+                    .get(entry.option())
                     .map(|v| !v.is_empty())
                     .unwrap_or(false);
-                if entry.required && !seen {
+                if entry.required() && !seen {
                     failures.push(CoverageCode::RequiredOptionMissing);
                 }
             }
@@ -914,29 +980,63 @@ fn exact_covers_args(exact: &[String], positionals: &[ArgToken]) -> Result<(), C
     Ok(())
 }
 
-fn option_values_covers(entry: &OptionCoverage, occs: &[OptionOccurrenceView]) -> bool {
-    let Some(coverage) = &entry.values else {
-        // consumed/inline values must be selected when any exist
-        return !occs.iter().any(|o| !o.values.is_empty());
+/// Option-value coverage of one `options.allowed` entry: every value of every
+/// occurrence satisfies the entry's closed selector. `each` applies one token
+/// selector to every value ordinal of every occurrence; `byPosition` applies
+/// the array-position selector to the corresponding one-based value ordinal.
+/// A zero-arity entry covers only an option with no values; a positive-arity
+/// entry applies after parsing already consumed the fixed value count.
+fn option_values_covers(
+    entry: &OptionCoverageEntry,
+    occs: &[OptionOccurrenceView],
+    regexes: &grammar::RegexCache,
+    cwd: &str,
+) -> Result<(), CoverageCode> {
+    let fail = || CoverageCode::OptionValuesUncovered;
+    let Some(coverage) = entry.values() else {
+        // zero-arity entry: no values may exist (parser-enforced; defensive
+        // because a mismatch would silently call an option "covered")
+        if occs.iter().any(|o| !o.values.is_empty()) {
+            return Err(fail());
+        }
+        return Ok(());
     };
     match coverage {
-        ValuesCoverage::Each { each } => occs.iter().all(|o| {
-            o.values
-                .iter()
-                .all(|(v, resolvable)| *resolvable && each.iter().any(|want| want == v))
-        }),
-        ValuesCoverage::None { none: true } => occs.iter().all(|o| o.values.is_empty()),
-        ValuesCoverage::None { none: false } => false,
+        OptionValueCoverage::Each { each } => {
+            if !occs.iter().all(|o| {
+                o.values
+                    .iter()
+                    .all(|(v, resolvable)| token_value_holds(each, v, *resolvable, regexes, cwd))
+            }) {
+                return Err(fail());
+            }
+        }
+        OptionValueCoverage::ByPosition { by_position } => {
+            if by_position.len() > MAX_OPTION_ARITY as usize {
+                return Err(fail());
+            }
+            for occ in occs {
+                if occ.values.len() != by_position.len() {
+                    return Err(fail());
+                }
+                for (sel, (v, resolvable)) in by_position.iter().zip(occ.values.iter()) {
+                    if !token_value_holds(sel, v, *resolvable, regexes, cwd) {
+                        return Err(fail());
+                    }
+                }
+            }
+        }
     }
+    Ok(())
 }
 
-fn remainder_fits(selector: &TokenSelector, token: &ArgToken, cwd: &str) -> bool {
-    match selector {
-        TokenSelector::Exact(list) => {
-            token.resolvable && list.iter().any(|t| t.as_str() == token.text)
-        }
-        TokenSelector::Within(root) => token.resolvable && path_within(&token.text, root, cwd),
-    }
+fn remainder_fits(
+    regexes: &grammar::RegexCache,
+    selector: &TokenSelector,
+    token: &ArgToken,
+    cwd: &str,
+) -> bool {
+    token_value_holds(selector, &token.text, token.resolvable, regexes, cwd)
 }
 
 /// Every redirect occurrence is covered by some redirect entry (structure).
@@ -1067,5 +1167,88 @@ mod tests {
         assert!(!path_within("/work/repo2", "/work/repo", "/"));
         assert!(path_within("reports/a.txt", "/tmp", "/tmp/work"));
         assert!(!path_within("reports/a.txt", "/var", "/tmp/work"));
+    }
+
+    /// `path.exact` applies the lexical normalization (cwd join + `.`/`..`
+    /// resolution), not a raw string comparison: under cwd `/work/project`
+    /// the token `./sub/../file` is `/work/project/file`.
+    #[test]
+    fn exact_path_selector_normalizes_lexically() {
+        let sel = PathSelector::Exact {
+            exact: "/work/project/file".into(),
+        };
+        assert!(path_selector_holds(&sel, "./sub/../file", "/work/project"));
+        assert!(path_selector_holds(
+            &sel,
+            "/work/project/file",
+            "/other/cwd"
+        ));
+        assert!(path_selector_holds(&sel, "file", "/work/project"));
+        assert!(!path_selector_holds(
+            &sel,
+            "/work/project/file2",
+            "/work/project"
+        ));
+        // a dot-dot climb out of the fixed token never hides its final shape
+        assert!(!path_selector_holds(
+            &sel,
+            "../../etc/passwd",
+            "/work/project"
+        ));
+        assert_eq!(normalized_path("/a//b/./c", "/x"), "/a/b/c");
+        assert_eq!(normalized_path("a/../../b", "/"), "/b");
+    }
+
+    /// The same normalization applies to a `PathPolicy.exact` (redirect and
+    /// non-redirect path policies), not only to the token selector arm.
+    #[test]
+    fn path_policy_exact_normalizes_lexically() {
+        let policy = PathPolicy {
+            exact: Some("/work/project/file".into()),
+            within: None,
+            outside: None,
+        };
+        assert!(path_matches_policy(
+            "./sub/../file",
+            &policy,
+            "/work/project"
+        ));
+        assert!(path_matches_policy("file", &policy, "/work/project"));
+        assert!(!path_matches_policy(
+            "./sub/../../etc/passwd",
+            &policy,
+            "/work/project"
+        ));
+    }
+
+    /// Coordinate semantics after the positional-coordinate form collapse:
+    /// `{index}` selects exactly that positional; `{index, remainder: true}`
+    /// selects the positionals from the index onwards (inclusive).
+    #[test]
+    fn positional_coordinate_selects_index_or_remainder_from_index() {
+        let arg_sel =
+            |index: u32, remainder: bool| grammar::PositionalCoordinate { index, remainder };
+        let tag_at = |k: u32| PathSourceTag::Argument { index: k };
+        let none_sel = PathCoordinateSelector {
+            argument: None,
+            option_value: None,
+            environment: None,
+            redirect: None,
+            analyzer_fact: None,
+        };
+        let sel = PathCoordinateSelector {
+            argument: Some(arg_sel(1, true)),
+            ..none_sel.clone()
+        };
+        // remainder: from the index onwards — index 0 stays out, 1..=2 in
+        assert!(!coordinate_matches(&sel, &tag_at(0)));
+        assert!(coordinate_matches(&sel, &tag_at(1)));
+        assert!(coordinate_matches(&sel, &tag_at(2)));
+        let sel = PathCoordinateSelector {
+            argument: Some(arg_sel(0, false)),
+            ..none_sel
+        };
+        assert!(coordinate_matches(&sel, &tag_at(0)));
+        assert!(!coordinate_matches(&sel, &tag_at(1)));
     }
 }

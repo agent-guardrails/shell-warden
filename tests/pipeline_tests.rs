@@ -552,7 +552,17 @@ fn probe_path(name: &str, text: &str) -> std::path::PathBuf {
 /// would otherwise race `write_all` into a broken pipe and flake the test.
 fn run_checker(config_path: &std::path::Path, letter: &str) -> (i32, String, String) {
     use std::process::{Command, Stdio};
-    let letter_path = probe_path("letter", letter);
+    // unique letter file per call: test threads run in parallel and must not
+    // share the letter fixture the spawned binary reads
+    static CALL: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = CALL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let base = probe_path("letter", "");
+    let letter_path = std::path::PathBuf::from(format!(
+        "{}-{}",
+        base.display().to_string().trim_end_matches(".jsonc"),
+        n
+    ));
+    std::fs::write(&letter_path, letter).expect("letter fixture must be writable");
     let letter_file = std::fs::File::open(&letter_path).expect("letter fixture must be readable");
     let out = Command::new(env!("CARGO_BIN_EXE_shell-warden"))
         .arg("--config")
@@ -626,31 +636,31 @@ fn remainder_dto_probe_accepts_canonical_forms() {
         "arguments beyond the none closure never allow"
     );
 
-    // canonical `{"each": {"exact": [...]}}`: members allow, non-members ask.
-    let exact_path = probe_path(
-        "each-exact",
-        &probe_config(r#"{ "each": { "exact": ["origin", "main"] } }"#),
+    // canonical `{"each": {"oneOf": [...]}}`: members allow, non-members ask.
+    let one_of_path = probe_path(
+        "each-one-of",
+        &probe_config(r#"{ "each": { "oneOf": ["origin", "main"] } }"#),
     );
-    let exact_cfg =
-        load_path(&exact_path).unwrap_or_else(|e| panic!("canonical each-exact must load: {e}"));
+    let one_of_cfg =
+        load_path(&one_of_path).unwrap_or_else(|e| panic!("canonical each-oneOf must load: {e}"));
     assert_eq!(
-        evaluate(&exact_cfg, &letter("git push origin main")).verdict,
+        evaluate(&one_of_cfg, &letter("git push origin main")).verdict,
         VerdictKind::Allow
     );
     assert_eq!(
-        evaluate(&exact_cfg, &letter("git push unknown")).verdict,
+        evaluate(&one_of_cfg, &letter("git push unknown")).verdict,
         VerdictKind::Ask,
-        "remainder tokens outside the exact member list never allow"
+        "remainder tokens outside the oneOf member list never allow"
     );
 
-    // canonical `{"each": {"within": ...}}` (absolute lexical path root):
-    // lexical paths under the root allow, anything outside asks.
+    // canonical `{"each": {"path": {"within": ...}}}` (absolute lexical path
+    // root): lexical paths under the root allow, anything outside asks.
     let within_path = probe_path(
-        "each-within",
-        &probe_config(r#"{ "each": { "within": "/repo" } }"#),
+        "each-path-within",
+        &probe_config(r#"{ "each": { "path": { "within": "/repo" } } }"#),
     );
     let within_cfg =
-        load_path(&within_path).unwrap_or_else(|e| panic!("canonical each-within must load: {e}"));
+        load_path(&within_path).unwrap_or_else(|e| panic!("canonical each-path must load: {e}"));
     assert_eq!(
         evaluate(&within_cfg, &letter_cwd("git push README.md", "/repo")).verdict,
         VerdictKind::Allow
@@ -661,7 +671,7 @@ fn remainder_dto_probe_accepts_canonical_forms() {
         "paths outside the within root never allow"
     );
 
-    for p in [&none_path, &exact_path, &within_path] {
+    for p in [&none_path, &one_of_path, &within_path] {
         let _ = std::fs::remove_file(p);
     }
 }
@@ -674,16 +684,18 @@ fn remainder_dto_probe_rejects_non_canonical_forms() {
         ("none-nested", r#"{ "none": { "none": true } }"#),
         ("each-nested", r#"{ "each": { "each": { "any": true } } }"#),
         // mixed union arms
-        (
-            "mixed",
-            r#"{ "none": true, "each": { "exact": ["origin"] } }"#,
-        ),
+        ("mixed", r#"{ "none": true, "each": { "any": true } }"#),
         // not-the-closed-form values and unknown forms
         ("false-none", r#"{ "none": false }"#),
         ("unknown", r#"{ "any": true }"#),
+        // the interim v0.3.0 `exact-member` and bare `within` alias forms are
+        // not part of the closed contract
+        ("exact-alias", r#"{ "each": { "exact": ["origin"] } }"#),
+        ("within-alias", r#"{ "each": { "within": "/repo" } }"#),
+        // oneOf alternatives must be unique
         (
-            "rich-path-alias",
-            r#"{ "each": { "path": { "within": "/repo" } } }"#,
+            "one-of-duplicates",
+            r#"{ "each": { "oneOf": ["origin", "origin"] } }"#,
         ),
     ] {
         let path = probe_path(name, &probe_config(remainder_value));
@@ -696,4 +708,443 @@ fn remainder_dto_probe_rejects_non_canonical_forms() {
         );
         let _ = std::fs::remove_file(&path);
     }
+}
+
+// ── Option-value coverage + fixed arity (issue 32 matching probes) ─────────
+
+/// A cargo-profile allow probe: one value option covered by a closed
+/// selector plus an optional fixed arity-two rename option. Set
+/// `name_values` to inject the coverage selector; `name_decl` and
+/// `option_id` select the declaration.
+fn option_probe_config(
+    option_id: &str,
+    decl: &str,
+    values: &str,
+    required: bool,
+    repeatable: bool,
+    rename_values: Option<&str>,
+) -> String {
+    let rename_entry = rename_values
+        .map(|v| format!(r#", {{ "option": "rename", "required": false, "repeatable": false, "values": {v} }}"#))
+        .unwrap_or_default();
+    format!(
+        r#"{{
+  "version": 2,
+  "defaults": {{ "action": "ask", "message": "No approved command profile matched.", "redirectPolicy": "no-redirects" }},
+  "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
+  "profiles": [
+    {{
+      "id": "cargo",
+      "executables": ["cargo"],
+      "options": {{
+        {decl},
+        "rename": {{ "aliases": ["--rename"], "arity": 2 }}
+      }},
+      "rules": [
+        {{
+          "id": "cargo/allow-init", "action": "allow",
+          "match": {{
+            "classification": "complete",
+            "arguments": {{ "exact": ["init"] }},
+            "options": {{ "allowed": [
+              {{ "option": "{option_id}", "required": {required}, "repeatable": {repeatable}, "values": {values} }}
+              {rename_entry}
+            ] }},
+            "environment": {{ "none": true }},
+            "paths": {{ "none": true }},
+            "facts": {{ "none": true }},
+            "nestedParts": {{ "none": true }}
+          }},
+          "redirectPolicy": {{ "mode": "replace", "policies": ["no-redirects"] }}
+        }}
+      ]
+    }}
+  ]
+}}"#
+    )
+}
+
+const NAME_DECL: &str = r#""name": { "aliases": ["--name"], "arity": 1 }"#;
+const FILE_DECL: &str = r#""file": { "aliases": ["--file"], "arity": 1 }"#;
+const FILE_INLINE_DECL: &str = r#""file": { "aliases": ["--file"], "arity": 1, "inline": true }"#;
+
+#[test]
+fn option_value_selectors_cover_closed_arms() {
+    // `any` covers one complete literal value
+    let cfg = load_str(&option_probe_config(
+        "name",
+        NAME_DECL,
+        r#"{ "each": { "any": true } }"#,
+        false,
+        true,
+        None,
+    ))
+    .expect("any probe config must load");
+    assert_eq!(
+        evaluate(&cfg, &letter("cargo init --name one")).verdict,
+        VerdictKind::Allow
+    );
+
+    // `oneOf` covers a listed literal only
+    let cfg = load_str(&option_probe_config(
+        "name",
+        NAME_DECL,
+        r#"{ "each": { "oneOf": ["one"] } }"#,
+        false,
+        true,
+        None,
+    ))
+    .expect("oneOf probe config must load");
+    assert_eq!(
+        evaluate(&cfg, &letter("cargo init --name one")).verdict,
+        VerdictKind::Allow
+    );
+    assert_eq!(
+        evaluate(&cfg, &letter("cargo init --name two")).verdict,
+        VerdictKind::Ask,
+        "a oneOf non-member never allows"
+    );
+
+    // whole-value `re2-v1` regex: matches the entire value, never a substring
+    let cfg = load_str(&option_probe_config(
+        "name",
+        NAME_DECL,
+        r#"{ "each": { "regex": "[a-z]+" } }"#,
+        false,
+        true,
+        None,
+    ))
+    .expect("regex probe config must load");
+    assert_eq!(
+        evaluate(&cfg, &letter("cargo init --name abc")).verdict,
+        VerdictKind::Allow
+    );
+    assert_eq!(
+        evaluate(&cfg, &letter("cargo init --name abc1")).verdict,
+        VerdictKind::Ask,
+        "regex selectors match whole values, not substrings"
+    );
+
+    // lexical `path` selector with component-boundary containment (a `file`
+    // option carries path-like values)
+    let cfg = load_str(&option_probe_config(
+        "file",
+        FILE_DECL,
+        r#"{ "each": { "path": { "within": "/work/repo" } } }"#,
+        false,
+        true,
+        None,
+    ))
+    .expect("path probe config must load");
+    assert_eq!(
+        evaluate(
+            &cfg,
+            &letter_cwd("cargo init --file /work/repo/src", "/repo")
+        )
+        .verdict,
+        VerdictKind::Allow
+    );
+    // `/work/repo2` is NOT within `/work/repo` (component boundary)
+    assert_eq!(
+        evaluate(
+            &cfg,
+            &letter_cwd("cargo init --file /work/repo2/src", "/repo")
+        )
+        .verdict,
+        VerdictKind::Ask
+    );
+}
+
+#[test]
+fn repeated_occurrences_and_each_coverage() {
+    // two `--file` occurrences, one selector, both values must satisfy it
+    let cfg = load_str(&option_probe_config(
+        "file",
+        FILE_DECL,
+        r#"{ "each": { "oneOf": ["a", "b"] } }"#,
+        false,
+        true,
+        None,
+    ))
+    .expect("each probe config must load");
+    // repeated occurrences are individual-covered; an uncovered value fails
+    assert_eq!(
+        evaluate(&cfg, &letter_cwd("cargo init --file a --file b", "/repo")).verdict,
+        VerdictKind::Allow
+    );
+    assert_eq!(
+        evaluate(&cfg, &letter_cwd("cargo init --file a --file x", "/repo")).verdict,
+        VerdictKind::Ask,
+        "one uncovered value prevents the allow — no first-or-last acting"
+    );
+
+    // `repeatable: false` rejects the second occurrence for positive arity
+    let cfg = load_str(&option_probe_config(
+        "file",
+        FILE_DECL,
+        r#"{ "each": { "oneOf": ["a", "b"] } }"#,
+        false,
+        false,
+        None,
+    ))
+    .expect("repeatable probe config must load");
+    assert_eq!(
+        evaluate(&cfg, &letter_cwd("cargo init --file a --file b", "/repo")).verdict,
+        VerdictKind::Ask,
+        "option-not-repeatable: occurrences are never collapsed"
+    );
+}
+
+#[test]
+fn fixed_arity_probes() {
+    // missing value for a declared arity-one option is invalid evidence —
+    // the arity-two rename probe (issue 32 red test "cargo init --name")
+    let cfg = load_str(&option_probe_config(
+        "name",
+        NAME_DECL,
+        r#"{ "each": { "any": true } }"#,
+        false,
+        true,
+        None,
+    ))
+    .expect("arity probe config must load");
+    assert_eq!(
+        evaluate(&cfg, &letter("cargo init --name")).verdict,
+        VerdictKind::Ask,
+        "an option value that is never supplied is invalid evidence"
+    );
+
+    // byPosition: the rename option consumes exactly two tokens; selectors
+    // apply per ordinal (this is the fixed-arity rename probe)
+    let cfg = load_str(&option_probe_config(
+        "name",
+        NAME_DECL,
+        r#"{ "each": { "any": true } }"#,
+        false,
+        true,
+        Some(
+            r#"{ "byPosition": [ { "oneOf": ["old"] }, { "path": { "within": "/work/project" } } ] }"#,
+        ),
+    ))
+    .expect("byPosition probe config must load");
+    assert_eq!(
+        evaluate(
+            &cfg,
+            &letter_cwd("cargo init --rename old /work/project/new", "/repo")
+        )
+        .verdict,
+        VerdictKind::Allow
+    );
+    // swapped ordinals do not satisfy the positional selectors
+    assert_eq!(
+        evaluate(
+            &cfg,
+            &letter_cwd("cargo init --rename new /work/project/old", "/repo")
+        )
+        .verdict,
+        VerdictKind::Ask
+    );
+    // arity two: only one value supplied — invalid, never a variable read
+    assert_eq!(
+        evaluate(&cfg, &letter_cwd("cargo init --rename old", "/repo")).verdict,
+        VerdictKind::Ask
+    );
+    // an inline `--rename=x` is rejected: the option never declared inline
+    assert_eq!(
+        evaluate(
+            &cfg,
+            &letter_cwd("cargo init --rename=x /work/project/new", "/repo")
+        )
+        .verdict,
+        VerdictKind::Ask
+    );
+}
+
+// ── Review regressions: fail-closed option parsing and path coordinates ─────
+
+/// `rm -rf /` with a policy that allows `-r`/`-f` but no positional arguments
+/// must never allow: the cluster is one argv token and the argument `/`
+/// stays an uncovered positional (historical bug: the cluster swallowed the
+/// following argv token, a fail-open allow).
+#[test]
+fn short_option_cluster_never_swallows_the_argument() {
+    let config = r#"
+{
+  "version": 2,
+  "defaults": { "action": "ask", "redirectPolicy": "no-redirects" },
+  "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
+  "profiles": [
+    {
+      "id": "rm", "executables": ["rm"],
+      "options": { "recursive": { "aliases": ["-r"], "arity": 0 }, "force": { "aliases": ["-f"], "arity": 0 } },
+      "rules": [
+        {
+          "id": "rm/allow-recursive-force", "action": "allow",
+          "match": {
+            "classification": "complete",
+            "arguments": { "exact": [] },
+            "options": { "allowed": [
+              { "option": "recursive", "required": false, "repeatable": false },
+              { "option": "force", "required": false, "repeatable": false }
+            ] },
+            "environment": { "none": true },
+            "paths": { "none": true },
+            "facts": { "none": true },
+            "nestedParts": { "none": true }
+          },
+          "redirectPolicy": { "mode": "replace", "policies": ["no-redirects"] }
+        }
+      ]
+    }
+  ]
+}"#;
+    let cfg = load_str(config).expect("cluster probe config must load");
+    assert_eq!(
+        evaluate(&cfg, &letter("rm -rf /")).verdict,
+        VerdictKind::Ask,
+        "the `/` argument stays an uncovered positional — no fail-open allow"
+    );
+    assert_eq!(
+        evaluate(&cfg, &letter("rm -r -f /")).verdict,
+        VerdictKind::Ask
+    );
+    assert_eq!(
+        evaluate(&cfg, &letter("rm -rf")).verdict,
+        VerdictKind::Allow,
+        "the flag-only cluster still allows"
+    );
+}
+
+/// `{index, remainder: true}` path sources select the positionals from the
+/// index onwards (inclusive) — not every positional (historical bug: the
+/// index was ignored).
+#[test]
+fn remainder_path_source_selects_from_the_index() {
+    let config = |index: u32| {
+        format!(
+            r#"
+{{
+  "version": 2,
+  "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
+  "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
+  "profiles": [
+    {{
+      "id": "cargo", "executables": ["cargo"],
+      "options": {{}},
+      "pathSources": [{{ "argument": {{ "index": {index}, "remainder": true }} }}],
+      "rules": [
+        {{
+          "id": "cargo/allow-init-a", "action": "allow",
+          "match": {{
+            "classification": "complete",
+            "arguments": {{ "exact": ["init", "a"] }},
+            "options": {{ "none": true }},
+            "environment": {{ "none": true }},
+            "paths": {{ "none": true }},
+            "facts": {{ "none": true }},
+            "nestedParts": {{ "none": true }}
+          }},
+          "redirectPolicy": {{ "mode": "replace", "policies": ["no-redirects"] }}
+        }}
+      ]
+    }}
+  ]
+}}"#
+        )
+    };
+    // positionals of `cargo init a` are [init(0), a(1)]: with `{index: 2,
+    // remainder: true}` no coordinate may be produced → paths none holds
+    let cfg = load_str(&config(2)).expect("remainder probe config must load");
+    assert_eq!(
+        evaluate(&cfg, &letter_cwd("cargo init a", "/repo")).verdict,
+        VerdictKind::Allow,
+        "indices below the remaindes start stay unselected"
+    );
+    // with `{index: 1, remainder: true}` the index-1 positional exists and
+    // the `{ "none": true }` paths policy can no longer allow
+    let cfg = load_str(&config(1)).expect("remainder probe config must load");
+    assert_eq!(
+        evaluate(&cfg, &letter_cwd("cargo init a", "/repo")).verdict,
+        VerdictKind::Ask,
+        "the coordinate is produced from the bound index onwards"
+    );
+}
+
+// Ask/deny ordinary predicate: `options.values` now carries one closed token// selector per canonical option; the existential test is ∃ occurrence × value.
+// The empty value arrives as an *inline* form (`--message=`, declared
+// `inline: true`), because an empty argument token is dropped by the parser.
+#[test]
+fn options_values_predicate_uses_closed_token_selector() {
+    let config = r#"
+{
+  "version": 2,
+  "defaults": { "action": "ask", "redirectPolicy": "no-redirects" },
+  "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
+  "profiles": [
+    {
+      "id": "cargo",
+      "executables": ["cargo"],
+      "options": {
+        "message": { "aliases": ["--message"], "arity": 1, "inline": true }
+      },
+      "rules": [
+        {
+          "id": "cargo/deny-empty", "action": "deny",
+          "message": "empty commit message is forbidden",
+          "match": {
+            "arguments": { "exact": ["commit"] },
+            "options": { "values": { "message": { "regex": "" } } }
+          }
+        }
+      ]
+    }
+  ]
+}"#;
+    let cfg = load_str(config).expect("predicate probe config must load");
+    assert_eq!(
+        evaluate(&cfg, &letter("cargo commit --message=")).verdict,
+        VerdictKind::Deny,
+        "an empty inline value whole-matches the empty regex"
+    );
+    assert_eq!(
+        evaluate(&cfg, &letter("cargo commit --message=fix")).verdict,
+        VerdictKind::Ask,
+        "a non-matching value keeps the deny rule unselected"
+    );
+}
+
+/// Through the real binary with a temporary standalone config: the exact
+/// red/green probe battery from issue 32 (fixed arity, repeated `--file`,
+/// inline arity one, `each` coverage).
+#[test]
+fn binary_option_probes_exit_with_verdicts() {
+    let config = option_probe_config(
+        "file",
+        FILE_INLINE_DECL,
+        r#"{ "each": { "oneOf": ["a", "b"] } }"#,
+        false,
+        true,
+        None,
+    );
+    let config_path = probe_path("option-binary-probe", &config);
+    for (raw, expected) in [
+        // inline arity-one value covered by `each`
+        ("cargo init --file=a", "allow"),
+        ("cargo init --file a", "allow"),
+        ("cargo init --file b --file a", "allow"),
+        ("cargo init --file x", "ask"),
+        ("cargo init --file", "ask"),
+    ] {
+        let raw_letter = format!(
+            r#"{{"version":1,"invocation":{{"id":"p","sessionID":"p"}},"action":"shell","commands":[{{"index":0,"raw":"{raw}","cwd":"/repo"}}]}}"#
+        );
+        let (code, stdout, stderr) = run_checker(&config_path, &raw_letter);
+        assert_eq!(code, 0, "{raw} must exit 0: {stderr}");
+        assert!(
+            stdout.contains(&format!("\"verdict\": \"{expected}\""))
+                || stdout.contains(&format!("\"verdict\":\"{expected}\"")),
+            "{raw} must be {expected}: {stdout}"
+        );
+    }
+    let _ = std::fs::remove_file(&config_path);
 }
