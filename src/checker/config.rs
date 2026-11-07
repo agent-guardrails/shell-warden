@@ -544,8 +544,10 @@ fn validate_path_selector(p: &PathSelector) -> Result<(), String> {
 }
 
 /// The normalized form of an absolute lexical path, or `None` when the text
-/// is not absolute/normalized enough for a config root. Normalization is
-/// lexical only: component boundaries, no I/O (no symlink resolution).
+/// falls outside the published pattern (`^/` with no `//`, no `.` / `..`
+/// components). A single trailing slash is boundary-preserved and accepted
+/// (`/repo/` — docs schema `AbsoluteLexicalPath`); `//`, an interior empty
+/// component, `.` and `..` are invalid input, not implicitly normalized.
 fn normalized_absolute(value: &str) -> Option<String> {
     if !value.starts_with('/') {
         return None;
@@ -554,13 +556,92 @@ fn normalized_absolute(value: &str) -> Option<String> {
         return Some("/".into());
     }
     let comps: Vec<&str> = value[1..].split('/').collect();
-    for comp in &comps {
+    for (i, comp) in comps.iter().enumerate() {
         match *comp {
-            "" | "." | ".." => return None,
+            // `//` (an empty component anywhere except the single trailing
+            // boundary) shifts component comparison — invalid input; a `.` or
+            // `..` component is invalid outright
+            "." | ".." => return None,
+            "" if i + 1 == comps.len() => {}
+            "" => return None,
             _ => {}
         }
     }
-    Some(format!("/{}", comps.join("/")))
+    Some(format!("/{}", comps[..comps.len() - 1].join("/")))
+}
+
+// ── path coordinate selectors: one closed arm + option-grammar closure ──────
+
+/// A path coordinate selector (schema: `PathCoordinateSelector` oneOf) carries
+/// **exactly one** coordinate arm; an `optionValue` arm must reference a
+/// declared canonical option inside its fixed arity. A malformed selector
+/// would never match runtime coordinates and could silently let a broad
+/// policy win.
+fn validate_path_coordinate_selector(
+    sel: &PathCoordinateSelector,
+    profile: Option<&Profile>,
+    allow_redirect: bool,
+) -> Result<(), String> {
+    let set = [
+        sel.argument.is_some(),
+        sel.option_value.is_some(),
+        sel.environment.is_some(),
+        sel.redirect.is_some(),
+        sel.analyzer_fact.is_some(),
+    ]
+    .iter()
+    .filter(|b| **b)
+    .count();
+    if set != 1 {
+        return Err(
+            "path coordinate selector must select exactly one coordinate \
+             (argument/optionValue/environment/redirect/analyzerFact)"
+                .to_string(),
+        );
+    }
+    if !allow_redirect && sel.redirect.is_some() {
+        return Err(
+            "redirect coordinates come from the redirect policy, not a non-redirect path coordinate"
+                .to_string(),
+        );
+    }
+    if let Some(profile) = profile
+        && let Some(ov) = &sel.option_value
+    {
+        validate_option_value_coordinate(profile, ov)?;
+    }
+    Ok(())
+}
+
+/// The `optionValue` coordinate must name a declared canonical option and stay
+/// inside its fixed arity: a silent miss would let a path value slip through a
+/// `{ "none": true }` paths policy.
+fn validate_option_value_coordinate(
+    profile: &Profile,
+    ov: &OptionValueCoordinate,
+) -> Result<(), String> {
+    let Some(spec) = profile.options.get(&ov.option) else {
+        return Err(format!(
+            "path coordinate optionValue references undeclared option \"{}\"",
+            ov.option
+        ));
+    };
+    if spec.arity == 0 {
+        return Err(format!(
+            "path coordinate optionValue references zero-arity option \"{}\"",
+            ov.option
+        ));
+    }
+    if ov.value_ordinal == 0 || ov.value_ordinal > spec.arity as u32 {
+        return Err(format!(
+            "path coordinate optionValue valueOrdinal {} is outside 1..={}",
+            ov.value_ordinal, spec.arity
+        ));
+    }
+    // a `occurrence: 0` selector never matches (parse rejected), but a
+    // declared occurrence must still be a plain ordinal — Occurrence::N
+    // only carries positive numbers after deserialization
+    Ok(())
 }
 
 fn validate_profile(
@@ -694,40 +775,9 @@ fn validate_profile(
         ));
     }
     for sel in &profile.path_sources {
-        if is_empty_selector(sel) {
-            return Err(format!(
-                "profile \"{}\": empty path source selector",
-                profile.id
-            ));
-        }
+        validate_path_coordinate_selector(sel, Some(profile), false)?;
         if let Some(ov) = &sel.option_value {
-            // the option-value coordinate must name a declared canonical
-            // option and stay inside its fixed arity: a silent miss would let
-            // a path value slip through a `{ "none": true }` paths policy
-            let Some(spec) = profile.options.get(&ov.option) else {
-                return Err(format!(
-                    "profile \"{}\": path source optionValue references undeclared option \"{}\"",
-                    profile.id, ov.option
-                ));
-            };
-            if spec.arity == 0 {
-                return Err(format!(
-                    "profile \"{}\": path source optionValue references zero-arity option \"{}\"",
-                    profile.id, ov.option
-                ));
-            }
-            if ov.value_ordinal == 0 || ov.value_ordinal > spec.arity as u32 {
-                return Err(format!(
-                    "profile \"{}\": optionValue valueOrdinal {} is outside 1..={}",
-                    profile.id, ov.value_ordinal, spec.arity
-                ));
-            }
-        }
-        if sel.redirect.is_some() {
-            return Err(format!(
-                "profile \"{}\": redirect targets come from the redirect policy, not pathSources",
-                profile.id
-            ));
+            validate_option_value_coordinate(profile, ov)?;
         }
     }
 
@@ -794,18 +844,24 @@ fn validate_profile(
         }
         if let Some(m) = &hint.r#match {
             validate_ordinary_match_shape(m)?;
+            // hint matches can name path coordinates: same single-arm +
+            // option-grammar closure as ask/deny rules
+            if let Some(paths) = &m.paths {
+                let lists = [&paths.any, &paths.all];
+                for list in lists.into_iter().flatten() {
+                    for e in list {
+                        validate_path_coordinate_selector(&e.coordinate, Some(profile), true)?;
+                        validate_path_policy(&e.policy())?;
+                    }
+                }
+            }
         }
     }
     Ok(())
 }
 
-fn is_empty_selector(sel: &PathCoordinateSelector) -> bool {
-    sel.argument.is_none()
-        && sel.option_value.is_none()
-        && sel.environment.is_none()
-        && sel.redirect.is_none()
-        && sel.analyzer_fact.is_none()
-}
+// The empty-selector case is covered by the exactly-one-arm validation of
+// `validate_path_coordinate_selector`.
 
 fn validate_redirect_coverage(c: &RedirectCoverage) -> Result<(), String> {
     let RedirectCoverage::All { all } = c else {
@@ -847,6 +903,9 @@ fn validate_redirect_path_coverage(c: &PathCoverage) -> Result<(), String> {
                 "redirect policy path entries must select a redirect coordinate".to_string(),
             );
         }
+        // single-arm selector: `redirect` + any other coordinate arm is a
+        // multi-arm shape the public schema rejects
+        validate_path_coordinate_selector(&e.coordinate, None, true)?;
         validate_path_policy(&e.policy())?;
     }
     Ok(())
@@ -1162,14 +1221,11 @@ fn validate_allow_match(
         (Some(true), None, None) => {}
         (None | Some(false), None, Some(all)) if !all.is_empty() => {
             for e in all {
-                if (e.coordinate.redirect.is_some() || e.coordinate.option_value.is_some())
-                    && e.coordinate.redirect.is_some()
-                {
-                    return Err(
-                        "redirect coordinates are covered by the redirect policy, not match.paths"
-                            .to_string(),
-                    );
-                }
+                // redirect coordinates come from the effective redirect
+                // policy; the non-redirect selector must be single-arm and
+                // must reference the profile's option grammar when it names
+                // an option value
+                validate_path_coordinate_selector(&e.coordinate, Some(profile), false)?;
                 validate_path_policy(&e.policy())?;
             }
         }
@@ -1257,6 +1313,10 @@ fn validate_ask_deny_match(rule: &Rule, profile: &Profile) -> Result<(), String>
         let lists = [&paths.any, &paths.all];
         for list in lists.into_iter().flatten() {
             for e in list {
+                // ask/deny may inspect redirect coordinates, but the selector
+                // is single-arm and its optionValue arm must reference the
+                // profile's option grammar
+                validate_path_coordinate_selector(&e.coordinate, Some(profile), true)?;
                 validate_path_policy(&e.policy())?;
             }
         }
@@ -1559,6 +1619,11 @@ mod tests {
             ("(?i: core)", "(?i:safe"),
             ("(?m) dot", "(?m)"),
             ("(?-u) flags", "(?-u)"),
+            // every supported flag letter is configuration, including the
+            // CRLF-mode `R` (historical bypass: the letter blacklist missed it)
+            ("(?iR) safe", "(?iR)safe"),
+            ("(?R) crlf", "(?R)"),
+            ("(?x) spaced", "(?x)a b"),
         ] {
             expect_invalid(
                 name,
@@ -1574,7 +1639,8 @@ mod tests {
                 "flag",
             );
         }
-        // named groups and bare non-capturing groups remain legal dialect
+        // named groups, bare non-capturing groups and a character class
+        // carrying a `(?i)` member stay legal dialect
         assert!(
             load_str(&cargo_config(
                 r#""name": { "aliases": ["--name"], "arity": 1 }"#,
@@ -1593,18 +1659,28 @@ mod tests {
             ))
             .is_ok()
         );
+        assert!(
+            load_str(&cargo_config(
+                r#""name": { "aliases": ["--name"], "arity": 1 }"#,
+                None,
+                r#"{ "allowed": [{ "option": "name", "required": false, "repeatable": false,
+                    "values": { "each": { "regex": "[(?i)]" } } }] }"#,
+            ))
+            .is_ok()
+        );
     }
 
     /// Selector (and policy) roots must be normalized absolute lexical paths:
-    /// `//`, `.` and `..` components and trailing slashes shift the
-    /// component-boundary semantics and would widen coverage.
+    /// `//` and `.` / `..` components shift the component-boundary semantics
+    /// and would widen coverage; a single trailing slash is boundary-neutral
+    /// and accepted (docs schema `AbsoluteLexicalPath`).
     #[test]
     fn non_normalized_lexical_roots_rejected() {
         for (name, root) in [
             ("double slash", "//work/project"),
             ("dot component", "/work/./project"),
             ("dot-dot component", "/work/repo/.."),
-            ("trailing slash", "/work/project/"),
+            ("interior double slash", "/work//project"),
         ] {
             expect_invalid(
                 name,
@@ -1620,7 +1696,8 @@ mod tests {
                 "root",
             );
         }
-        // the bare root "/" normalizes to itself and stays valid
+        // the bare root "/" normalizes to itself and stays valid, and a
+        // single trailing slash is boundary-neutral (schema-accepted)
         assert!(
             load_str(&cargo_config(
                 r#""name": { "aliases": ["--name"], "arity": 1 }"#,
@@ -1629,6 +1706,34 @@ mod tests {
                     "values": { "each": { "path": { "within": "/" } } } }] }"#,
             ))
             .is_ok()
+        );
+        assert!(
+            load_str(&cargo_config(
+                r#""name": { "aliases": ["--name"], "arity": 1 }"#,
+                None,
+                r#"{ "allowed": [{ "option": "name", "required": false, "repeatable": false,
+                    "values": { "each": { "path": { "within": "/work/project/" } } } }] }"#,
+            ))
+            .is_ok()
+        );
+        // `/repo//` still carries an interior empty component and rejects
+        assert!(
+            load_str(&cargo_config(
+                r#""name": { "aliases": ["--name"], "arity": 1 }"#,
+                None,
+                r#"{ "allowed": [{ "option": "name", "required": false, "repeatable": false,
+                    "values": { "each": { "path": { "within": "/work/" } } } }] }"#,
+            ))
+            .is_ok()
+        );
+        assert!(
+            load_str(&cargo_config(
+                r#""name": { "aliases": ["--name"], "arity": 1 }"#,
+                None,
+                r#"{ "allowed": [{ "option": "name", "required": false, "repeatable": false,
+                    "values": { "each": { "path": { "within": "/work//" } } } }] }"#,
+            ))
+            .is_err()
         );
         // the same rule guards redirect-policy path roots
         let Err(err) = load_str(
@@ -1684,6 +1789,123 @@ mod tests {
             "zero-arity option value",
             &base(r#""file": { "aliases": ["-v"], "arity": 0 }"#, 1),
             "zero-arity",
+        );
+    }
+
+    /// Cross-coordinate validation extends to matching path entries
+    /// (ask/deny/allow + hints): a mistyped `optionValue` coordinate or a
+    /// multi-arm selector in a rule's `paths` entry is invalid config instead
+    /// of a dead selector a broad parallel allow can win with.
+    #[test]
+    fn path_rule_coordinates_validate_against_the_profile_grammar() {
+        let rule_config = |coordinate: &str| {
+            format!(
+                r#"{{
+  "version": 2,
+  "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
+  "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
+  "profiles": [{{
+      "id": "cargo",
+      "executables": ["cargo"],
+      "options": {{ "file": {{ "aliases": ["--file"], "arity": 1 }} }},
+      "rules": [{{
+        "id": "deny-file-path", "action": "deny",
+        "match": {{
+          "arguments": {{ "exact": ["run"] }},
+          "paths": {{ "any": [{{ "coordinate": {coordinate}, "within": "/etc" }}] }}
+        }}
+      }}]
+  }}]
+}}"#
+            )
+        };
+        // healthy single-arm deny predicate loads
+        assert!(
+            load_str(&rule_config(
+                r#"{ "optionValue": { "option": "file", "valueOrdinal": 1 } }"#
+            ))
+            .is_ok()
+        );
+        // mistyped option name in the deny coordinate: dead selector
+        expect_invalid(
+            "deny mistyped option",
+            &rule_config(r#"{ "optionValue": { "option": "filee", "valueOrdinal": 1 } }"#),
+            "undeclared option",
+        );
+        // ordinal beyond the declared arity
+        expect_invalid(
+            "deny unreachable ordinal",
+            &rule_config(r#"{ "optionValue": { "option": "file", "valueOrdinal": 2 } }"#),
+            "outside 1..=",
+        );
+        // multi-arm coordinate selector (schema oneOf)
+        expect_invalid(
+            "multi-arm coordinate",
+            &rule_config(
+                r#"{ "optionValue": { "option": "file", "valueOrdinal": 1 }, "environment": "all" }"#,
+            ),
+            "exactly one coordinate",
+        );
+        // the same closure applies to an allow rule's paths entries
+        let allow_config = format!(
+            r#"{{
+  "version": 2,
+  "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
+  "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
+  "profiles": [{{
+      "id": "cargo",
+      "executables": ["cargo"],
+      "options": {{ "file": {{ "aliases": ["--file"], "arity": 1 }} }},
+      "pathSources": [{{ "optionValue": {{ "option": "file", "valueOrdinal": 1 }} }}],
+      "rules": [{{
+        "id": "allow-init", "action": "allow",
+        "match": {{
+          "classification": "complete",
+          "arguments": {{ "exact": ["init"] }},
+          "options": {{ "none": true }},
+          "environment": {{ "none": true }},
+          "paths": {{ "all": [{{ "coordinate": {coordinate}, "within": "/etc" }}] }},
+          "facts": {{ "none": true }},
+          "nestedParts": {{ "none": true }}
+        }},
+        "redirectPolicy": {{ "mode": "replace", "policies": ["no-redirects"] }}
+      }}]
+  }}]
+}}
+"#,
+            coordinate = r#"{ "optionValue": { "option": "filee", "valueOrdinal": 1 } }"#
+        );
+        expect_invalid(
+            "allow mistyped coordinate",
+            &allow_config,
+            "undeclared option",
+        );
+    }
+
+    /// Occurrence selectors are 1-based: `occurrence: 0` would silently match
+    /// no runtime coordinate (fail-open hole for never-produced coordinates).
+    #[test]
+    fn zero_occurrence_selector_rejected() {
+        // ...in a pathSources optionValue coordinate
+        let bad_source = r#"{ "version": 2,
+  "defaults": { "action": "ask", "redirectPolicy": "no-redirects" },
+  "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
+  "profiles": [{ "id": "cargo", "executables": ["cargo"],
+    "options": { "file": { "aliases": ["--file"], "arity": 1 } },
+    "pathSources": [{ "optionValue": { "option": "file", "valueOrdinal": 1, "occurrence": 0 } }],
+    "rules": [], "analyzer": "generic-v1" }] }"#;
+        expect_invalid("optionValue occurrence 0", bad_source, "1-based");
+        // ...in a redirect policy entry's occurrence (the untagged redirect
+        // coverage arm reports a generic union failure, still fail-closed)
+        let bad_redirect = r#"{ "version": 2,
+  "defaults": { "action": "ask" },
+  "redirectPolicies": { "p": { "redirects": { "all": [{ "sourceFd": "default", "operator": ">", "occurrence": 0, "target": { "kind": "literalPath" } }] },
+    "paths": { "all": [{ "coordinate": { "redirect": { "operator": ">", "sourceFd": "default", "occurrence": "all" } }, "within": "/tmp" }] } } },
+  "profiles": [] }"#;
+        expect_invalid(
+            "redirect entry occurrence 0",
+            bad_redirect,
+            "config invalid",
         );
     }
 

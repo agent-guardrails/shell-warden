@@ -172,7 +172,9 @@ pub fn path_within(path: &str, root: &str, cwd: &str) -> bool {
 
 pub fn path_matches_policy(text_path: &str, policy: &PathPolicy, cwd: &str) -> bool {
     if let Some(exact) = &policy.exact {
-        return exact.as_str() == text_path;
+        // the recorded path text is compared in its normalized form
+        // (cwd join + `.`/`..` resolution), matching the path-selector rule
+        return normalized_path(text_path, cwd) == *exact;
     }
     if let Some(within_root) = &policy.within {
         return path_within(text_path, within_root, cwd);
@@ -1195,6 +1197,28 @@ mod tests {
         ));
         assert_eq!(normalized_path("/a//b/./c", "/x"), "/a/b/c");
         assert_eq!(normalized_path("a/../../b", "/"), "/b");
+    }
+
+    /// The same normalization applies to a `PathPolicy.exact` (redirect and
+    /// non-redirect path policies), not only to the token selector arm.
+    #[test]
+    fn path_policy_exact_normalizes_lexically() {
+        let policy = PathPolicy {
+            exact: Some("/work/project/file".into()),
+            within: None,
+            outside: None,
+        };
+        assert!(path_matches_policy(
+            "./sub/../file",
+            &policy,
+            "/work/project"
+        ));
+        assert!(path_matches_policy("file", &policy, "/work/project"));
+        assert!(!path_matches_policy(
+            "./sub/../../etc/passwd",
+            &policy,
+            "/work/project"
+        ));
     }
 
     /// Coordinate semantics after the positional-coordinate form collapse:

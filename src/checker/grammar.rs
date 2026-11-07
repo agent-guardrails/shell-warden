@@ -234,6 +234,14 @@ impl<'de> Deserialize<'de> for Occurrence {
                 }
             }
             fn visit_u64<E: serde::de::Error>(self, n: u64) -> Result<Self::Value, E> {
+                // occurrence ordinals are 1-based (design §Closed evidence
+                // catalogs): a 0 selector would silently match nothing — a
+                // fail-open hole for never-produced coordinates
+                if n == 0 {
+                    return Err(E::custom(
+                        "occurrence must be \"all\" or a 1-based ordinal (0 is invalid)",
+                    ));
+                }
                 u32::try_from(n)
                     .map(Occurrence::N)
                     .map_err(|_| E::custom("occurrence number exceeds u32"))
@@ -1211,59 +1219,66 @@ impl RegexCache {
 }
 
 /// Validate the fixed `re2-v1` dialect beyond the regex crate's grammar: no
-/// inline flag groups (`(?i)`, `(?m)`, `(?im-r:…)`, …) — matching is
+/// inline flag groups (`(?i)`, `(?R)`, `(?im-r:…)`, …) — matching is
 /// case-sensitive with no configurable flags. Named groups (`(?P<n>…)`,
-/// `(?<n>…)`) and a bare non-capturing `(?:…)`, are fine. The regex crate's
-/// compile step catches backreferences and look-around.
+/// `(?<n>…)`) and the non-capturing core `(?:…)` are fine; a backreference or
+/// look-around subexpression fails the regex crate's own compilation. The
+/// scanner skips escaped bytes and character classes, so `[(?i)]` stays a
+/// class, not a flag group.
 fn compile_anchored_re2(pattern: &str) -> Result<regex::Regex, String> {
     reject_inline_flags(pattern)?;
     regex::Regex::new(&format!(r"\A(?:{pattern})\z"))
         .map_err(|e| format!("re2-v1 pattern compile failed: {e}"))
 }
 
+/// Advance past the rest of a character class, given the offset of the byte
+/// right after the `[`; returns the offset of the first byte after the closing
+/// `]` (or the end when the class never terminates — that fails compile).
+fn skip_char_class(bytes: &[u8], after_open: usize) -> usize {
+    let mut k = after_open;
+    // a `]` right after `[` or `[^` is a literal member (POSIX semantics)
+    if k < bytes.len() && bytes[k] == b'^' {
+        k += 1;
+    }
+    while k < bytes.len() {
+        match bytes[k] {
+            b'\\' => k += 2,
+            b']' => return k + 1,
+            _ => k += 1,
+        }
+    }
+    bytes.len()
+}
+
 fn reject_inline_flags(pattern: &str) -> Result<(), String> {
     let bytes = pattern.as_bytes();
     let mut i = 0usize;
     while i < bytes.len() {
-        i += 1;
-        // a backslash escape consumes the next byte (`\(` is a literal paren)
-        if bytes[i - 1] == b'\\' {
-            i += 1;
-            continue;
-        }
-        if bytes[i - 1] != b'(' || i >= bytes.len() || bytes[i] != b'?' {
-            continue;
-        }
-        // `(?…` group: decide flags vs named / non-capturing
-        let flag_letters: &[u8] = b"imsxUu";
-        let mut k = i + 1;
-        let mut chars: Vec<u8> = Vec::new();
-        let mut saw_dash = false;
-        while k < bytes.len() {
-            let b = bytes[k];
-            match b {
-                b'<' => {
-                    // `(?P<name>` / `(?<name>` — a named group, allowed
-                    break;
-                }
-                b':' | b')' => break,
-                b'-' => saw_dash = true,
-                _ => chars.push(b),
+        match bytes[i] {
+            b'\\' => {
+                // an escape consumes the next byte (`\(` is a literal paren)
+                i += 2;
             }
-            k += 1;
-        }
-        if bytes.get(i + 1) == Some(&b'P') || bytes.get(i + 1) == Some(&b'<') {
-            continue; // named group forms are dialect-legal
-        }
-        // any inline flag letter (or a flags-off group `(?-x)`) is a
-        // configurable setting and therefore outside `re2-v1`
-        let is_flag_group =
-            (!chars.is_empty() && chars.iter().all(|c| flag_letters.contains(c))) || saw_dash;
-        if is_flag_group {
-            return Err(format!(
-                "re2-v1 pattern uses an inline flag group at byte {i} — \
-                 the dialect allows no configured flags (case-sensitive whole-value matching only)"
-            ));
+            b'[' => {
+                i = skip_char_class(bytes, i + 1);
+            }
+            b'(' if bytes.get(i + 1) == Some(&b'?') => {
+                // `(?…` group: only `(?P<name>`, `(?<name>` and `(?:…)` are
+                // dialect-legal — any other arm is inline flag configuration
+                match bytes.get(i + 2) {
+                    Some(&b':') | Some(&b'P') | Some(&b'<') | Some(&b'\'') => {
+                        i += 2;
+                    }
+                    _ => {
+                        return Err(format!(
+                            "re2-v1 pattern uses an inline flag group at byte {i} — \
+                             the dialect allows no configured flags \
+                             (case-sensitive whole-value matching only)"
+                        ));
+                    }
+                }
+            }
+            _ => i += 1,
         }
     }
     Ok(())
