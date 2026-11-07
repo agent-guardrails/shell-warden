@@ -476,13 +476,136 @@ pub struct EnvironmentTest {
     pub prefix: Option<bool>,
 }
 
+// ── Typed fact-value selectors (design §Closed evidence catalogs: analyzer
+// facts do not reuse token selectors implicitly; a closed typed-value selector
+// first agrees with the fact type from the analyzer catalog, then applies one
+// of `any`, scalar `exact`, `string`, `integer`, `number`, `boolean`, or
+// `path`). One-level canonical forms only: exactly one discriminator at the
+// union level, no nested Serde alias, no coercion between catalog types.
+
+/// One scalar typed value accepted by the `exact` arm: string, finite
+/// number, or boolean. Arrays, objects, and null have no scalar wire form.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ScalarValue {
+    Str(String),
+    Num(serde_json::Number),
+    Bool(bool),
+}
+
+impl<'de> Deserialize<'de> for ScalarValue {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let v = serde_json::Value::deserialize(deserializer)?;
+        match v {
+            serde_json::Value::Bool(b) => Ok(ScalarValue::Bool(b)),
+            serde_json::Value::Number(n) => Ok(ScalarValue::Num(n)),
+            serde_json::Value::String(s) => Ok(ScalarValue::Str(s)),
+            _ => Err(serde::de::Error::custom(
+                "typed exact scalar must be a string, number, or boolean",
+            )),
+        }
+    }
+}
+
+impl Serialize for ScalarValue {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            ScalarValue::Str(s) => serializer.serialize_str(s),
+            ScalarValue::Num(n) => n.serialize(serializer),
+            ScalarValue::Bool(b) => serializer.serialize_bool(*b),
+        }
+    }
+}
+
+/// Closed string-value selector (design): `{"any": true}`, `{"oneOf": [...]}`
+/// (non-empty, duplicate-free), or `{"regex": pattern}` (whole-value
+/// `re2-v1` matching). String semantics only — no path normalization and no
+/// containment checks.
+#[derive(Debug, Clone, PartialEq, sw_attrs::GrammarDocAttrs)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub enum StringValueSelector {
+    /// Every fact string matches.
+    Any,
+    /// The fact string is one of these literals.
+    OneOf { one_of: Vec<String> },
+    /// The fact string matches this whole-value `re2-v1` pattern.
+    Regex { pattern: String },
+}
+
+/// Closed lexical path selector (design §Lexical path policy): one of
+/// `exact` / `within` / `outside` against an absolute lexical path. No I/O
+/// and no string→path coercion.
+#[derive(Debug, Clone, PartialEq, sw_attrs::GrammarDocAttrs)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub enum PathSelector {
+    Exact { exact: String },
+    Within { within: String },
+    Outside { outside: String },
+}
+
+/// Closed inclusive integer bounds; at least one bound is required (checked
+/// in config validation) and both ends are inclusive.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct IntegerBounds {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<i64>,
+}
+
+/// Closed inclusive number bounds; at least one bound is required (checked
+/// in config validation) and both ends are inclusive. Bounds are finite JSON
+/// numbers.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct NumberBounds {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<f64>,
+}
+
+/// Closed typed-value selector for analyzer facts: one of
+/// `{"any": true}`, `{"exact": scalar}`, `{"string": stringValueSelector}`,
+/// `{"integer": bounds}`, `{"number": bounds}`, `{"boolean": true|false}`, or
+/// `{"path": pathSelector}`. Never coerces a typed fact to another type.
+#[derive(Debug, Clone, PartialEq, sw_attrs::GrammarDocAttrs)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub enum TypedValueSelector {
+    /// Every fact value matches.
+    Any,
+    /// Exact scalar equality within the fact's catalog type.
+    Exact(ScalarValue),
+    /// String-value semantics on a string-typed fact.
+    String { string: StringValueSelector },
+    /// Closed inclusive integer bounds on an integer-typed fact.
+    Integer { integer: IntegerBounds },
+    /// Closed inclusive number bounds on a number-typed fact.
+    Number { number: NumberBounds },
+    /// Exact boolean equality on a boolean-typed fact.
+    Boolean { boolean: bool },
+    /// Lexical path semantics on a path-typed fact.
+    Path { path: PathSelector },
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct FactTest {
-    pub analyzer: Option<String>,
-    pub name: String,
+    /// Closed analyzer id (`generic-v1`, `sed-v1`, …); required for allow
+    /// fact entries, optional for ask/deny fact tests.
     #[serde(default)]
-    pub value: Option<String>,
+    pub analyzer: Option<String>,
+    /// Closed analyzer version ("1"); defaults to the matching analyzer
+    /// when omitted in ask/deny.
+    #[serde(default)]
+    pub version: Option<String>,
+    pub name: String,
+    /// One-based occurrence ordinal ("all" = every occurrence).
+    #[serde(default)]
+    pub occurrence: Option<Occurrence>,
+    /// Typed value selector (None = every observed value matches).
+    #[serde(default)]
+    pub value: Option<TypedValueSelector>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -674,6 +797,299 @@ impl serde::Serialize for TokenSelector {
         match self {
             TokenSelector::Exact(exact) => map.serialize_entry("exact", exact)?,
             TokenSelector::Within(within) => map.serialize_entry("within", within)?,
+        }
+        map.end()
+    }
+}
+
+// ── Typed fact-value selector wire forms (one-level, below the snapshot
+// marker region like every other hand-implemented canonical union) ───────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StringValueField {
+    Any,
+    OneOf,
+    Regex,
+}
+
+impl<'de> serde::Deserialize<'de> for StringValueField {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct V;
+        impl serde::de::Visitor<'_> for V {
+            type Value = StringValueField;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a string-value selector arm: `any`, `oneOf`, or `regex`")
+            }
+            fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<Self::Value, E> {
+                match s {
+                    "any" => Ok(StringValueField::Any),
+                    "oneOf" => Ok(StringValueField::OneOf),
+                    "regex" => Ok(StringValueField::Regex),
+                    other => Err(E::unknown_field(other, &["any", "oneOf", "regex"])),
+                }
+            }
+        }
+        deserializer.deserialize_str(V)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for StringValueSelector {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = StringValueSelector;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(
+                    "a one-level string-value selector: {\"any\": true}, {\"oneOf\": [literal, ...]} \
+                     or {\"regex\": pattern}",
+                )
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
+                let field = map
+                    .next_key::<StringValueField>()?
+                    .ok_or_else(|| serde::de::Error::custom("empty string-value selector"))?;
+                let selector = match field {
+                    StringValueField::Any => {
+                        let any: bool = map.next_value()?;
+                        if !any {
+                            return Err(serde::de::Error::custom(
+                                "string-value selector any requires {\"any\": true}",
+                            ));
+                        }
+                        StringValueSelector::Any
+                    }
+                    StringValueField::OneOf => StringValueSelector::OneOf {
+                        one_of: map.next_value()?,
+                    },
+                    StringValueField::Regex => StringValueSelector::Regex {
+                        pattern: map.next_value()?,
+                    },
+                };
+                if map.next_key::<StringValueField>()?.is_some() {
+                    return Err(serde::de::Error::custom(
+                        "mixed string-value selector arms: use exactly one of any/oneOf/regex",
+                    ));
+                }
+                Ok(selector)
+            }
+        }
+        deserializer.deserialize_map(V)
+    }
+}
+
+impl serde::Serialize for StringValueSelector {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(1))?;
+        match self {
+            StringValueSelector::Any => map.serialize_entry("any", &true)?,
+            StringValueSelector::OneOf { one_of } => map.serialize_entry("oneOf", one_of)?,
+            StringValueSelector::Regex { pattern } => map.serialize_entry("regex", pattern)?,
+        }
+        map.end()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathSelectorField {
+    Exact,
+    Within,
+    Outside,
+}
+
+impl<'de> serde::Deserialize<'de> for PathSelectorField {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct V;
+        impl serde::de::Visitor<'_> for V {
+            type Value = PathSelectorField;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a path selector arm: `exact`, `within`, or `outside`")
+            }
+            fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<Self::Value, E> {
+                match s {
+                    "exact" => Ok(PathSelectorField::Exact),
+                    "within" => Ok(PathSelectorField::Within),
+                    "outside" => Ok(PathSelectorField::Outside),
+                    other => Err(E::unknown_field(other, &["exact", "within", "outside"])),
+                }
+            }
+        }
+        deserializer.deserialize_str(V)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for PathSelector {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = PathSelector;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(
+                    "a one-level path selector: {\"exact\": path}, {\"within\": root} \
+                     or {\"outside\": root}",
+                )
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
+                let field = map
+                    .next_key::<PathSelectorField>()?
+                    .ok_or_else(|| serde::de::Error::custom("empty path selector"))?;
+                let selector = match field {
+                    PathSelectorField::Exact => PathSelector::Exact {
+                        exact: map.next_value()?,
+                    },
+                    PathSelectorField::Within => PathSelector::Within {
+                        within: map.next_value()?,
+                    },
+                    PathSelectorField::Outside => PathSelector::Outside {
+                        outside: map.next_value()?,
+                    },
+                };
+                if map.next_key::<PathSelectorField>()?.is_some() {
+                    return Err(serde::de::Error::custom(
+                        "mixed path selector arms: use exactly one of exact/within/outside",
+                    ));
+                }
+                Ok(selector)
+            }
+        }
+        deserializer.deserialize_map(V)
+    }
+}
+
+impl serde::Serialize for PathSelector {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(1))?;
+        match self {
+            PathSelector::Exact { exact } => map.serialize_entry("exact", exact)?,
+            PathSelector::Within { within } => map.serialize_entry("within", within)?,
+            PathSelector::Outside { outside } => map.serialize_entry("outside", outside)?,
+        }
+        map.end()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TypedValueField {
+    Any,
+    Exact,
+    String,
+    Integer,
+    Number,
+    Boolean,
+    Path,
+}
+
+impl<'de> serde::Deserialize<'de> for TypedValueField {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct V;
+        impl serde::de::Visitor<'_> for V {
+            type Value = TypedValueField;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(
+                    "a typed-value selector arm: `any`, `exact`, `string`, `integer`, \
+                     `number`, `boolean`, or `path`",
+                )
+            }
+            fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<Self::Value, E> {
+                match s {
+                    "any" => Ok(TypedValueField::Any),
+                    "exact" => Ok(TypedValueField::Exact),
+                    "string" => Ok(TypedValueField::String),
+                    "integer" => Ok(TypedValueField::Integer),
+                    "number" => Ok(TypedValueField::Number),
+                    "boolean" => Ok(TypedValueField::Boolean),
+                    "path" => Ok(TypedValueField::Path),
+                    other => Err(E::unknown_field(
+                        other,
+                        &[
+                            "any", "exact", "string", "integer", "number", "boolean", "path",
+                        ],
+                    )),
+                }
+            }
+        }
+        deserializer.deserialize_str(V)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for TypedValueSelector {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = TypedValueSelector;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(
+                    "a one-level typed-value selector: {\"any\": true}, {\"exact\": scalar}, \
+                     {\"string\": …}, {\"integer\": …}, {\"number\": …}, {\"boolean\": true|false} \
+                     or {\"path\": …}",
+                )
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
+                let field = map
+                    .next_key::<TypedValueField>()?
+                    .ok_or_else(|| serde::de::Error::custom("empty typed-value selector"))?;
+                let selector = match field {
+                    TypedValueField::Any => {
+                        let any: bool = map.next_value()?;
+                        if !any {
+                            return Err(serde::de::Error::custom(
+                                "typed-value selector any requires {\"any\": true}",
+                            ));
+                        }
+                        TypedValueSelector::Any
+                    }
+                    TypedValueField::Exact => TypedValueSelector::Exact(map.next_value()?),
+                    TypedValueField::String => TypedValueSelector::String {
+                        string: map.next_value()?,
+                    },
+                    TypedValueField::Integer => TypedValueSelector::Integer {
+                        integer: map.next_value()?,
+                    },
+                    TypedValueField::Number => TypedValueSelector::Number {
+                        number: map.next_value()?,
+                    },
+                    TypedValueField::Boolean => TypedValueSelector::Boolean {
+                        boolean: map.next_value()?,
+                    },
+                    TypedValueField::Path => TypedValueSelector::Path {
+                        path: map.next_value()?,
+                    },
+                };
+                if map.next_key::<TypedValueField>()?.is_some() {
+                    return Err(serde::de::Error::custom(
+                        "mixed typed-value selector arms: use exactly one of \
+                         any/exact/string/integer/number/boolean/path",
+                    ));
+                }
+                Ok(selector)
+            }
+        }
+        deserializer.deserialize_map(V)
+    }
+}
+
+impl serde::Serialize for TypedValueSelector {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(1))?;
+        match self {
+            TypedValueSelector::Any => map.serialize_entry("any", &true)?,
+            TypedValueSelector::Exact(exact) => map.serialize_entry("exact", exact)?,
+            TypedValueSelector::String { string } => map.serialize_entry("string", string)?,
+            TypedValueSelector::Integer { integer } => map.serialize_entry("integer", integer)?,
+            TypedValueSelector::Number { number } => map.serialize_entry("number", number)?,
+            TypedValueSelector::Boolean { boolean } => map.serialize_entry("boolean", boolean)?,
+            TypedValueSelector::Path { path } => map.serialize_entry("path", path)?,
         }
         map.end()
     }
@@ -1090,6 +1506,241 @@ mod tests {
                 }),
                 contains_any: None,
             }
+        );
+    }
+
+    // ── Typed fact-value selectors (issue #35): canonical wire forms ────────
+
+    #[test]
+    fn typed_value_selector_parses_every_arm() {
+        let any: TypedValueSelector = serde_json::from_value(json!({ "any": true })).unwrap();
+        assert_eq!(any, TypedValueSelector::Any);
+        let exact =
+            serde_json::from_value::<TypedValueSelector>(json!({ "exact": "inPlace" })).unwrap();
+        assert_eq!(
+            exact,
+            TypedValueSelector::Exact(ScalarValue::Str("inPlace".into()))
+        );
+        let number_exact =
+            serde_json::from_value::<TypedValueSelector>(json!({ "exact": 5 })).unwrap();
+        assert_eq!(
+            number_exact,
+            TypedValueSelector::Exact(ScalarValue::Num(serde_json::Number::from(5)))
+        );
+        let boolean_exact =
+            serde_json::from_value::<TypedValueSelector>(json!({ "exact": false })).unwrap();
+        assert_eq!(
+            boolean_exact,
+            TypedValueSelector::Exact(ScalarValue::Bool(false))
+        );
+        let string = serde_json::from_value::<TypedValueSelector>(
+            json!({ "string": { "oneOf": ["readOnly"] } }),
+        )
+        .unwrap();
+        assert_eq!(
+            string,
+            TypedValueSelector::String {
+                string: StringValueSelector::OneOf {
+                    one_of: vec!["readOnly".into()]
+                }
+            }
+        );
+        let integer = serde_json::from_value::<TypedValueSelector>(
+            json!({ "integer": { "min": 1, "max": 9 } }),
+        )
+        .unwrap();
+        assert_eq!(
+            integer,
+            TypedValueSelector::Integer {
+                integer: IntegerBounds {
+                    min: Some(1),
+                    max: Some(9)
+                }
+            }
+        );
+        let number =
+            serde_json::from_value::<TypedValueSelector>(json!({ "number": { "min": 0.0 } }))
+                .unwrap();
+        assert_eq!(
+            number,
+            TypedValueSelector::Number {
+                number: NumberBounds {
+                    min: Some(0.0),
+                    max: None
+                }
+            }
+        );
+        let boolean =
+            serde_json::from_value::<TypedValueSelector>(json!({ "boolean": true })).unwrap();
+        assert_eq!(boolean, TypedValueSelector::Boolean { boolean: true });
+        let path = serde_json::from_value::<TypedValueSelector>(
+            json!({ "path": { "within": "/work/project" } }),
+        )
+        .unwrap();
+        assert_eq!(
+            path,
+            TypedValueSelector::Path {
+                path: PathSelector::Within {
+                    within: "/work/project".into()
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn typed_value_selector_wire_forms_canonical_roundtrip() {
+        for (wire, selector) in [
+            (json!({ "any": true }), TypedValueSelector::Any),
+            (
+                json!({ "exact": "inPlace" }),
+                TypedValueSelector::Exact(ScalarValue::Str("inPlace".into())),
+            ),
+            (
+                json!({ "string": { "regex": "[a-z]+" } }),
+                TypedValueSelector::String {
+                    string: StringValueSelector::Regex {
+                        pattern: "[a-z]+".into(),
+                    },
+                },
+            ),
+            (
+                json!({ "integer": { "max": 42 } }),
+                TypedValueSelector::Integer {
+                    integer: IntegerBounds {
+                        min: None,
+                        max: Some(42),
+                    },
+                },
+            ),
+            (
+                json!({ "boolean": false }),
+                TypedValueSelector::Boolean { boolean: false },
+            ),
+            (
+                json!({ "path": { "outside": "/work/private" } }),
+                TypedValueSelector::Path {
+                    path: PathSelector::Outside {
+                        outside: "/work/private".into(),
+                    },
+                },
+            ),
+        ] {
+            let parsed: TypedValueSelector = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(parsed, selector);
+            assert_eq!(
+                serde_json::to_value(&parsed).unwrap(),
+                wire,
+                "serialization must stay canonical"
+            );
+        }
+    }
+
+    #[test]
+    fn typed_value_selector_rejects_non_canonical_forms() {
+        // not the closed form
+        assert!(serde_json::from_value::<TypedValueSelector>(json!({ "any": false })).is_err());
+        // nested externally tagged arm
+        assert!(
+            serde_json::from_value::<TypedValueSelector>(json!({ "any": { "any": true } }))
+                .is_err()
+        );
+        assert!(
+            serde_json::from_value::<TypedValueSelector>(
+                json!({ "string": { "each": { "any": true } } })
+            )
+            .is_err(),
+            "string arm has no each/token union"
+        );
+        // mixed union arms
+        assert!(
+            serde_json::from_value::<TypedValueSelector>(json!({
+                "any": true, "exact": "x"
+            }))
+            .is_err()
+        );
+        // exact carries no array/object/null scalar
+        assert!(serde_json::from_value::<TypedValueSelector>(json!({ "exact": ["a"] })).is_err());
+        assert!(serde_json::from_value::<TypedValueSelector>(json!({ "exact": null })).is_err());
+        // unknown arm
+        assert!(serde_json::from_value::<TypedValueSelector>(json!({ "glob": "*" })).is_err());
+        // empty object
+        assert!(serde_json::from_value::<TypedValueSelector>(json!({})).is_err());
+    }
+
+    #[test]
+    fn string_value_selector_shapes() {
+        let any: StringValueSelector = serde_json::from_value(json!({ "any": true })).unwrap();
+        assert_eq!(any, StringValueSelector::Any);
+        let regex =
+            serde_json::from_value::<StringValueSelector>(json!({ "regex": "^[a-z]+$" })).unwrap();
+        assert_eq!(
+            regex,
+            StringValueSelector::Regex {
+                pattern: "^[a-z]+$".into()
+            }
+        );
+        // `{"any": false}` is not the canonical form; nested and mixed arms reject
+        assert!(serde_json::from_value::<StringValueSelector>(json!({ "any": false })).is_err());
+        assert!(
+            serde_json::from_value::<StringValueSelector>(json!({ "any": { "any": true } }))
+                .is_err()
+        );
+        assert!(
+            serde_json::from_value::<StringValueSelector>(json!({ "oneOf": ["a"], "regex": "b" }))
+                .is_err()
+        );
+        assert!(serde_json::from_value::<StringValueSelector>(json!({})).is_err());
+    }
+
+    #[test]
+    fn path_selector_shapes() {
+        let exact: PathSelector =
+            serde_json::from_value(json!({ "exact": "/work/project/README.md" })).unwrap();
+        assert_eq!(
+            exact,
+            PathSelector::Exact {
+                exact: "/work/project/README.md".into()
+            }
+        );
+        assert!(
+            serde_json::from_value::<PathSelector>(json!({
+                "exact": "/a", "within": "/b"
+            }))
+            .is_err(),
+            "one selector per path entry, never two operations"
+        );
+        assert!(
+            serde_json::from_value::<PathSelector>(json!({ "within": { "exact": "/a" } })).is_err()
+        );
+        assert!(serde_json::from_value::<PathSelector>(json!({})).is_err());
+    }
+
+    /// `FactTest` carries typed optional fields with canonical defaults.
+    #[test]
+    fn fact_test_typed_fields_parse() {
+        let t: FactTest = serde_json::from_value(json!({
+            "analyzer": "sed-v1", "version": "1", "name": "executionPrimitive",
+            "occurrence": "all", "value": { "exact": "inPlace" }
+        }))
+        .unwrap();
+        assert_eq!(t.analyzer.as_deref(), Some("sed-v1"));
+        assert_eq!(t.version.as_deref(), Some("1"));
+        assert_eq!(t.occurrence, Some(Occurrence::All));
+        assert_eq!(
+            t.value,
+            Some(TypedValueSelector::Exact(ScalarValue::Str(
+                "inPlace".into()
+            )))
+        );
+        // `name`-only test stays valid for ask/deny
+        let plain: FactTest = serde_json::from_value(json!({ "name": "programForm" })).unwrap();
+        assert!(plain.analyzer.is_none() && plain.value.is_none() && plain.occurrence.is_none());
+        // old bare-string value wire form is gone (no coercion, no aliases)
+        assert!(
+            serde_json::from_value::<FactTest>(
+                json!({ "name": "programForm", "value": "inPlace" })
+            )
+            .is_err()
         );
     }
 }
