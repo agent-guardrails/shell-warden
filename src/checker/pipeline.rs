@@ -313,6 +313,7 @@ fn evaluate_part_rules(
         canonical,
         path_coords: &path_coords,
         nested: &nested,
+        cwd,
     };
 
     // every matching rule is evaluated and emits its vote (monotonicity)

@@ -12,6 +12,10 @@ members = ["sw-attrs"]
 sw-attrs = { path = "sw-attrs" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# `re2-v1` string-value regex selectors (design): the regex crate implements
+# RE2-compatible syntax/semantics — whole-value matching, no backreferences,
+# no look-around, case-sensitive, no configurable flags.
+regex = "1"
 
 # The release artifact: the one-shot letter checker (02-letter-verdict, ADR-0016).
 # Spawned per check by the hook; no server, no long-lived process.
