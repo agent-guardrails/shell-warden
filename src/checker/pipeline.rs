@@ -499,8 +499,15 @@ fn path_coordinates(
                 }
             }
         }
-        if sel.environment.is_some() {
+        // the environment coordinate selects only the occurrences it names
+        // (1-based assignment ordinals), not every assignment
+        if let Some(env) = &sel.environment {
             for (k, a) in part.assigns.iter().enumerate() {
+                if let Some(osel) = &env.occurrence
+                    && !osel.selects(k as u32 + 1)
+                {
+                    continue;
+                }
                 let value = match a.text.split_once('=') {
                     Some((_, v)) => v.to_string(),
                     None => String::new(),

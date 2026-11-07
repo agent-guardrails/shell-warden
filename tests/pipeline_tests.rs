@@ -1070,7 +1070,113 @@ fn remainder_path_source_selects_from_the_index() {
     );
 }
 
-// Ask/deny ordinary predicate: `options.values` now carries one closed token// selector per canonical option; the existential test is ∃ occurrence × value.
+// ── Review round 3 regressions ──────────────────────────────────────────────
+
+/// Ask/deny path predicates respect the entry's lexical policy: a deny rule
+/// over `paths.any [{ within: "/home" }]` must fire only when the recorded
+/// path coordinate text actually lies within the root.
+#[test]
+fn ask_deny_path_predicates_apply_lexical_policy() {
+    let config = r#"
+{
+  "version": 2,
+  "defaults": { "action": "ask", "redirectPolicy": "no-redirects" },
+  "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
+  "profiles": [
+    {
+      "id": "rm", "executables": ["rm"],
+      "options": {},
+      "pathSources": [{ "argument": { "index": 0 } }],
+      "rules": [
+        {
+          "id": "rm/deny-home", "action": "deny",
+          "message": "removing home parts is forbidden",
+          "match": {
+            "arguments": { "prefix": [] },
+            "paths": { "any": [{ "coordinate": { "argument": { "index": 0 } }, "within": "/home/denied" }] }
+          }
+        }
+      ]
+    }
+  ]
+}"#;
+    let cfg = load_str(config).expect("path predicate probe config must load");
+    assert_eq!(
+        evaluate(&cfg, &letter_cwd("rm /home/denied/x", "/repo")).verdict,
+        VerdictKind::Deny,
+        "a coordinate inside the within-root fires the deny"
+    );
+    assert_eq!(
+        evaluate(&cfg, &letter_cwd("rm /etc/hosts", "/repo")).verdict,
+        VerdictKind::Ask,
+        "the same coordinate tag outside the within-root never fires deny"
+    );
+}
+
+/// The environment path coordinate produces only the occurrences it names
+/// (1-based assignment ordinals).
+#[test]
+fn environment_coordinate_produces_selected_occurrences() {
+    // paths { none: true } with an allow rule: any produced coordinate
+    // blocks the allow, so the verdict shows which assignments were selected
+    let config = |occurrence_json: &str| {
+        format!(
+            r#"
+{{
+  "version": 2,
+  "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
+  "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
+  "profiles": [
+    {{
+      "id": "echo", "executables": ["echo"],
+      "options": {{}},
+      "pathSources": [{{ "environment": {{ "occurrence": {occurrence_json} }} }}],
+      "rules": [
+        {{
+          "id": "echo/allow", "action": "allow",
+          "match": {{
+            "classification": "complete", "arguments": {{ "exact": [] }},
+            "options": {{ "none": true }},
+            "environment": {{ "all": [{{ "name": "A" }}, {{ "name": "B" }}] }},
+            "paths": {{ "none": true }},
+            "facts": {{ "none": true }}, "nestedParts": {{ "none": true }}
+          }},
+          "redirectPolicy": {{ "mode": "replace", "policies": ["no-redirects"] }}
+        }}
+      ]
+    }}
+  ]
+}}"#
+        )
+    };
+    // one assignment (`B`): occurrence 2 selects nothing → allow; occurrence
+    // 1 selects it → blocked by paths { none: true }
+    let unselected = load_str(&config("2")).expect("env probe (2) config must load");
+    assert_eq!(
+        evaluate(&unselected, &letter("B=1 echo")).verdict,
+        VerdictKind::Allow,
+        "occurrence 2 does not select assignment ordinal 1"
+    );
+    let selected = load_str(&config("1")).expect("env probe (1) config must load");
+    assert_eq!(
+        evaluate(&selected, &letter("B=1 echo")).verdict,
+        VerdictKind::Ask,
+        "occurrence 1 selects the assignment ordinal 1"
+    );
+    // occurrence-less coordinate selects every assignment
+    let every = load_str(&config("\"all\"")).expect("env probe (all) config must load");
+    assert_eq!(
+        evaluate(&every, &letter("B=1 echo")).verdict,
+        VerdictKind::Ask
+    );
+    // the object coordinate form carries the selector end-to-end
+    let two = load_str(&config("2")).expect("env probe (2) config must load");
+    assert_eq!(
+        evaluate(&two, &letter("A=1 B=2 echo")).verdict,
+        VerdictKind::Ask,
+        "the second assignment is selected by the occurrence-2 selector"
+    );
+} // selector per canonical option; the existential test is ∃ occurrence × value.
 // The empty value arrives as an *inline* form (`--message=`, declared
 // `inline: true`), because an empty argument token is dropped by the parser.
 #[test]

@@ -173,8 +173,9 @@ pub fn path_within(path: &str, root: &str, cwd: &str) -> bool {
 pub fn path_matches_policy(text_path: &str, policy: &PathPolicy, cwd: &str) -> bool {
     if let Some(exact) = &policy.exact {
         // the recorded path text is compared in its normalized form
-        // (cwd join + `.`/`..` resolution), matching the path-selector rule
-        return normalized_path(text_path, cwd) == *exact;
+        // (cwd join + `.`/`..` resolution + trailing-slash neutrality),
+        // matching the path-selector rule
+        return normalized_path(text_path, cwd) == normalized_path(exact, "");
     }
     if let Some(within_root) = &policy.within {
         return path_within(text_path, within_root, cwd);
@@ -211,11 +212,12 @@ fn string_value_holds(
 /// Lexical path selector against one literal token: cwd-joined, dot-dot
 /// normalized, component-boundary comparisons; no filesystem or symlink I/O.
 /// `exact` also compares the normalized form (cwd join + `.` / `..`
-/// resolution), so `./sub/../file` under cwd `/work/project` equals
-/// `/work/project/file`.
+/// resolution, both sides), so `./sub/../file` under cwd `/work/project` is
+/// `/work/project/file` and a schema-accepted `/repo/` root matches the
+/// normalized candidate `/repo`.
 pub fn path_selector_holds(selector: &PathSelector, text: &str, cwd: &str) -> bool {
     match selector {
-        PathSelector::Exact { exact } => normalized_path(text, cwd) == *exact,
+        PathSelector::Exact { exact } => normalized_path(text, cwd) == normalized_path(exact, ""),
         PathSelector::Within { within } => path_within(text, within, cwd),
         PathSelector::Outside { outside } => !path_within(text, outside, cwd),
     }
@@ -299,7 +301,7 @@ pub fn predicate_holds(m: &grammar::Match, f: &PartFacts) -> bool {
         return false;
     }
     if let Some(p) = paths
-        && !paths_matcher_holds(p, f.path_coords)
+        && !paths_matcher_holds(p, f.path_coords, f.cwd)
     {
         return false;
     }
@@ -528,7 +530,10 @@ pub fn coordinate_matches(sel: &PathCoordinateSelector, tag: &PathSourceTag) -> 
             None => false,
         },
         PathSourceTag::Environment { occurrence } => match &sel.environment {
-            Some(o) => o.selects(*occurrence),
+            Some(env) => env
+                .occurrence
+                .map(|o| o.selects(*occurrence))
+                .unwrap_or(true),
             None => false,
         },
         PathSourceTag::AnalyzerFact {
@@ -553,24 +558,32 @@ pub fn coordinate_matches(sel: &PathCoordinateSelector, tag: &PathSourceTag) -> 
     }
 }
 
-/// Ask/deny path predicates over the runtime coordinates they may select.
-pub fn paths_matcher_holds(p: &grammar::PathsMatcher, coords: &[PathCoordinateObs]) -> bool {
+/// Ask/deny path predicates over the runtime coordinates they may select:
+/// an entry matches one coordinate when the coordinate selector matches AND
+/// the recorded path is a resolvable literal satisfying the entry's lexical
+/// policy (`exact`/`within`/`outside`) — a tag-only match would fire deny/ask
+/// on paths the entry's policy never named.
+pub fn paths_matcher_holds(
+    p: &grammar::PathsMatcher,
+    coords: &[PathCoordinateObs],
+    cwd: &str,
+) -> bool {
     if let Some(true) = p.none
         && !coords.is_empty()
     {
         return false;
     }
     if let Some(any) = &p.any {
-        if !any.is_empty()
-            && !any.iter().any(|entry| {
-                coords
-                    .iter()
-                    .any(|c| coordinate_matches(&entry.coordinate, &c.source))
-            })
-        {
+        if any.is_empty() {
             return false;
         }
-        if any.is_empty() {
+        if !any.iter().any(|entry| {
+            coords.iter().any(|c| {
+                c.resolvable
+                    && coordinate_matches(&entry.coordinate, &c.source)
+                    && path_matches_policy(&c.path, &entry.policy(), cwd)
+            })
+        }) {
             return false;
         }
     }
@@ -580,8 +593,11 @@ pub fn paths_matcher_holds(p: &grammar::PathsMatcher, coords: &[PathCoordinateOb
         }
         if !coords.is_empty()
             && !coords.iter().all(|c| {
-                all.iter()
-                    .any(|entry| coordinate_matches(&entry.coordinate, &c.source))
+                all.iter().any(|entry| {
+                    c.resolvable
+                        && coordinate_matches(&entry.coordinate, &c.source)
+                        && path_matches_policy(&c.path, &entry.policy(), cwd)
+                })
             })
         {
             return false;

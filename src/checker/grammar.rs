@@ -310,8 +310,11 @@ pub struct PathCoordinateSelector {
     pub argument: Option<PositionalCoordinate>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub option_value: Option<OptionValueCoordinate>,
+    /// Environment-assignment coordinate (closed object form
+    /// `{ "occurrence": occurrenceSelector }`, docs schema
+    /// `EnvironmentCoordinate`).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub environment: Option<Occurrence>,
+    pub environment: Option<EnvironmentCoordinate>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub redirect: Option<RedirectCoordinate>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -339,6 +342,15 @@ pub struct OptionValueCoordinate {
 pub struct RedirectCoordinate {
     pub operator: RedirectOp,
     pub source_fd: FdSelector,
+    #[serde(default)]
+    pub occurrence: Option<Occurrence>,
+}
+
+/// Environment-assignment coordinate selector (closed, docs schema
+/// `EnvironmentCoordinate`): `{ "occurrence": occurrenceSelector }`.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct EnvironmentCoordinate {
     #[serde(default)]
     pub occurrence: Option<Occurrence>,
 }
@@ -1219,69 +1231,53 @@ impl RegexCache {
 }
 
 /// Validate the fixed `re2-v1` dialect beyond the regex crate's grammar: no
-/// inline flag groups (`(?i)`, `(?R)`, `(?im-r:…)`, …) — matching is
-/// case-sensitive with no configurable flags. Named groups (`(?P<n>…)`,
-/// `(?<n>…)`) and the non-capturing core `(?:…)` are fine; a backreference or
-/// look-around subexpression fails the regex crate's own compilation. The
-/// scanner skips escaped bytes and character classes, so `[(?i)]` stays a
-/// class, not a flag group.
+/// inline flag groups — matching is case-sensitive with no configurable
+/// flags. The check walks the parsed AST (`regex-syntax`), so no hand-rolled
+/// scanner can misread character classes, POSIX classes, escapes or nested
+/// class sets: a `(?i)` *inside* a class is just a member, and only genuine
+/// flag items (which change matching behavior globally or per-rune) are
+/// rejected. Backreferences and look-around fail the regex crate's own
+/// compilation.
 fn compile_anchored_re2(pattern: &str) -> Result<regex::Regex, String> {
     reject_inline_flags(pattern)?;
     regex::Regex::new(&format!(r"\A(?:{pattern})\z"))
         .map_err(|e| format!("re2-v1 pattern compile failed: {e}"))
 }
 
-/// Advance past the rest of a character class, given the offset of the byte
-/// right after the `[`; returns the offset of the first byte after the closing
-/// `]` (or the end when the class never terminates — that fails compile).
-fn skip_char_class(bytes: &[u8], after_open: usize) -> usize {
-    let mut k = after_open;
-    // a `]` right after `[` or `[^` is a literal member (POSIX semantics)
-    if k < bytes.len() && bytes[k] == b'^' {
-        k += 1;
-    }
-    while k < bytes.len() {
-        match bytes[k] {
-            b'\\' => k += 2,
-            b']' => return k + 1,
-            _ => k += 1,
-        }
-    }
-    bytes.len()
+fn reject_inline_flags(pattern: &str) -> Result<(), String> {
+    let ast = regex_syntax::ast::parse::Parser::new()
+        .parse(pattern)
+        .map_err(|e| format!("re2-v1 pattern syntax: {e}"))?;
+    reject_flag_items(&ast).map_err(|_| {
+        "re2-v1 pattern uses an inline flag group — the dialect allows no configured \
+         flags (case-sensitive whole-value matching only)"
+            .to_string()
+    })
 }
 
-fn reject_inline_flags(pattern: &str) -> Result<(), String> {
-    let bytes = pattern.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\\' => {
-                // an escape consumes the next byte (`\(` is a literal paren)
-                i += 2;
-            }
-            b'[' => {
-                i = skip_char_class(bytes, i + 1);
-            }
-            b'(' if bytes.get(i + 1) == Some(&b'?') => {
-                // `(?…` group: only `(?P<name>`, `(?<name>` and `(?:…)` are
-                // dialect-legal — any other arm is inline flag configuration
-                match bytes.get(i + 2) {
-                    Some(&b':') | Some(&b'P') | Some(&b'<') | Some(&b'\'') => {
-                        i += 2;
-                    }
-                    _ => {
-                        return Err(format!(
-                            "re2-v1 pattern uses an inline flag group at byte {i} — \
-                             the dialect allows no configured flags \
-                             (case-sensitive whole-value matching only)"
-                        ));
-                    }
-                }
-            }
-            _ => i += 1,
+/// Depth-first AST walk: reject every inline flags item (`(?flags)` /
+/// `(?flags:…)` / `(?-flags)`); named groups and `(?:…)` are Ast::Group arms
+/// and stay legal.
+fn reject_flag_items(ast: &regex_syntax::ast::Ast) -> Result<(), ()> {
+    use regex_syntax::ast::{Ast, GroupKind};
+    match ast {
+        // `(?flags)` items and `(?flags:…)` groups both configure flags
+        Ast::Flags(_) => Err(()),
+        Ast::Group(x) if matches!(x.kind, GroupKind::NonCapturing(ref f) if !f.items.is_empty()) => {
+            Err(())
         }
+        Ast::Empty(_)
+        | Ast::Assertion(_)
+        | Ast::Dot(_)
+        | Ast::Literal(_)
+        | Ast::ClassUnicode(_)
+        | Ast::ClassPerl(_)
+        | Ast::ClassBracketed(_) => Ok(()),
+        Ast::Repetition(x) => reject_flag_items(&x.ast),
+        Ast::Alternation(x) => x.asts.iter().try_for_each(reject_flag_items),
+        Ast::Concat(x) => x.asts.iter().try_for_each(reject_flag_items),
+        Ast::Group(x) => reject_flag_items(&x.ast),
     }
-    Ok(())
 }
 
 // ── Profiles ────────────────────────────────────────────────────────────────

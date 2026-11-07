@@ -610,6 +610,41 @@ fn validate_path_coordinate_selector(
     {
         validate_option_value_coordinate(profile, ov)?;
     }
+    if let Some(profile) = profile
+        && let Some(fc) = &sel.analyzer_fact
+    {
+        validate_analyzer_fact_coordinate(profile, fc)?;
+    }
+    Ok(())
+}
+
+/// The `analyzerFact` coordinate must name a fact in the closed catalog of the
+/// profile's *declared* analyzer: a mistyped fact name would silently produce
+/// no coordinate and let a path value pass a `{ "none": true }` paths policy.
+fn validate_analyzer_fact_coordinate(profile: &Profile, fc: &FactCoordinate) -> Result<(), String> {
+    let Some(analyzer) = profile.analyzer else {
+        return Err(format!(
+            "path coordinate analyzerFact \"{}\" references an analyzer, but the profile declares none",
+            fc.name
+        ));
+    };
+    if let Some(id) = &fc.analyzer
+        && id != analyzer.id()
+    {
+        return Err(format!(
+            "path coordinate analyzerFact \"{}\" references analyzer \"{}\" outside the profile analyzer {}",
+            fc.name,
+            id,
+            analyzer.id()
+        ));
+    }
+    if !super::analyzers::knows_fact(analyzer, &fc.name) {
+        return Err(format!(
+            "path coordinate analyzerFact \"{}\" is not in the {} fact catalog",
+            fc.name,
+            analyzer.id()
+        ));
+    }
     Ok(())
 }
 
@@ -912,8 +947,9 @@ fn validate_redirect_path_coverage(c: &PathCoverage) -> Result<(), String> {
 }
 
 /// Lexical path policy: exactly one selector; trusted roots are absolute *and*
-/// normalized (no `//`, no `.`/`..` components, no trailing slash — a
-/// non-normalized root would silently widen coverage).
+/// normalized (no `//`, no `.`/`..` components), within the schema's
+/// `AbsoluteLexicalPath` byte cap (4096) — a non-normalized root would
+/// silently widen coverage.
 fn validate_path_policy(p: &PathPolicy) -> Result<(), String> {
     let set = p.exact.is_some() as u8 + p.within.is_some() as u8 + p.outside.is_some() as u8;
     if set != 1 {
@@ -925,6 +961,11 @@ fn validate_path_policy(p: &PathPolicy) -> Result<(), String> {
             "within" => p.within.as_deref().unwrap_or("/"),
             _ => p.outside.as_deref().unwrap_or("/"),
         };
+        if val.len() > MAX_PATH_BYTES {
+            return Err(format!(
+                "path policy {root} root exceeds {MAX_PATH_BYTES} UTF-8 bytes"
+            ));
+        }
         if !val.starts_with('/') {
             return Err(format!(
                 "path policy {root} root \"{val}\" must be an absolute lexical path"
@@ -1616,7 +1657,7 @@ mod tests {
     fn inline_regex_flags_rejected() {
         for (name, pattern) in [
             ("(?i) safe", "(?i)safe"),
-            ("(?i: core)", "(?i:safe"),
+            ("(?i: core)", "(?i:safe)"),
             ("(?m) dot", "(?m)"),
             ("(?-u) flags", "(?-u)"),
             // every supported flag letter is configuration, including the
@@ -1659,15 +1700,26 @@ mod tests {
             ))
             .is_ok()
         );
-        assert!(
-            load_str(&cargo_config(
-                r#""name": { "aliases": ["--name"], "arity": 1 }"#,
-                None,
-                r#"{ "allowed": [{ "option": "name", "required": false, "repeatable": false,
-                    "values": { "each": { "regex": "[(?i)]" } } }] }"#,
-            ))
-            .is_ok()
-        );
+        // nested class sets and POSIX classes with a `(?i)` member: no
+        // scanner ambiguity — the AST parser sees class members, not flags
+        for (name, pattern) in [
+            ("nested class set", "[a&&[b](?i)]"),
+            ("posix class", "[[:alpha:](?i)]"),
+        ] {
+            assert!(
+                load_str(&cargo_config(
+                    r#""name": { "aliases": ["--name"], "arity": 1 }"#,
+                    None,
+                    &format!(
+                        r#"{{ "allowed": [{{ "option": "name", "required": false, "repeatable": false,
+                    "values": {{ "each": {{ "regex": "{}" }} }} }}] }}"#,
+                        pattern
+                    ),
+                ))
+                .is_ok(),
+                "{name} pattern must be dialect-legal"
+            );
+        }
     }
 
     /// Selector (and policy) roots must be normalized absolute lexical paths:
@@ -1838,11 +1890,12 @@ mod tests {
             &rule_config(r#"{ "optionValue": { "option": "file", "valueOrdinal": 2 } }"#),
             "outside 1..=",
         );
-        // multi-arm coordinate selector (schema oneOf)
+        // multi-arm coordinate selector (schema oneOf) — including the
+        // closed object form `{ "occurrence": … }` for the environment arm
         expect_invalid(
             "multi-arm coordinate",
             &rule_config(
-                r#"{ "optionValue": { "option": "file", "valueOrdinal": 1 }, "environment": "all" }"#,
+                r#"{ "optionValue": { "option": "file", "valueOrdinal": 1 }, "environment": { "occurrence": "all" } }"#,
             ),
             "exactly one coordinate",
         );
@@ -1907,6 +1960,117 @@ mod tests {
             bad_redirect,
             "config invalid",
         );
+    }
+
+    /// A pathSources `analyzerFact` coordinate must name a fact in the closed
+    /// catalog of the profile's declared analyzer: otherwise the coordinate
+    /// is never produced and a `{ "none": true }` paths policy silently
+    /// covers emitted path-valued evidence.
+    #[test]
+    fn analyzer_fact_coordinate_validates_the_fact_catalog() {
+        let fact_config = |analyzer: Option<&str>, fact: &str, fact_analyzer: &str| {
+            let analyzer_field = analyzer
+                .map(|a| format!(r#""analyzer": "{a}", "#))
+                .unwrap_or_default();
+            format!(
+                r#"{{
+  "version": 2,
+  "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
+  "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
+  "profiles": [{{
+      "id": "sed", "executables": ["sed"],
+      "options": {{ "expression": {{ "aliases": ["-e"], "arity": 1 }} }},
+      {analyzer_field}
+      "pathSources": [{{ "analyzerFact": {{ "name": "{fact}", "analyzer": "{fact_analyzer}" }} }}],
+      "rules": []
+  }}]
+}}"#
+            )
+        };
+        for (name, text, needle) in [
+            (
+                "mistyped fact",
+                fact_config(Some("sed-v1"), "inPlacee", "sed-v1"),
+                "fact catalog",
+            ),
+            (
+                "profile declares no analyzer",
+                fact_config(None, "executionPrimitive", "sed-v1"),
+                "profile declares none",
+            ),
+            (
+                "fact analyzer mismatch",
+                fact_config(Some("sed-v1"), "executionPrimitive", "export-v1"),
+                "outside the profile analyzer",
+            ),
+        ] {
+            expect_invalid(name, &text, needle);
+        }
+        // the correct catalog entry is accepted
+        assert!(load_str(&fact_config(Some("sed-v1"), "executionPrimitive", "sed-v1")).is_ok());
+    }
+
+    /// The environment path coordinate must be the closed object form
+    /// `{ "occurrence": occurrenceSelector }` (docs schema
+    /// `EnvironmentCoordinate`).
+    #[test]
+    fn environment_coordinate_object_form() {
+        let source_config = |env_coordinate: &str| {
+            format!(
+                r#"{{
+  "version": 2,
+  "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
+  "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
+  "profiles": [{{
+      "id": "echo", "executables": ["echo"],
+      "options": {{}},
+      "pathSources": [{{ "environment": {env_coordinate} }}],
+      "rules": []
+  }}]
+}}"#
+            )
+        };
+        // healthy object form (with and without an occurrence selector)
+        assert!(load_str(&source_config(r#"{ "occurrence": "all" }"#)).is_ok());
+        assert!(
+            load_str(&source_config(r"{ }")).is_ok(),
+            "an occurrence-less environment coordinate selects every assignment"
+        );
+        // the bare scalar form is schema-rejected and never parses
+        expect_invalid(
+            "scalar environment coordinate",
+            &source_config(r#""all""#),
+            "EnvironmentCoordinate",
+        );
+    }
+
+    /// `PathPolicy` roots use the schema's `AbsoluteLexicalPath` limit (4096
+    /// UTF-8 bytes), like the token path selector.
+    #[test]
+    fn path_policy_root_byte_limit() {
+        let long_root = format!("/{}", "x".repeat(4096));
+        let bad = format!(
+            r#"{{
+  "version": 2,
+  "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
+  "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
+  "profiles": [{{
+      "id": "cargo", "executables": ["cargo"],
+      "options": {{}},
+      "rules": [{{
+        "id": "allow", "action": "allow",
+        "match": {{
+          "classification": "complete", "arguments": {{ "exact": [] }},
+          "options": {{ "none": true }}, "environment": {{ "none": true }},
+          "paths": {{ "all": [{{ "coordinate": {{ "argument": {{ "index": 0 }} }}, "within": "{long_root}" }}] }},
+          "facts": {{ "none": true }}, "nestedParts": {{ "none": true }}
+        }},
+        "redirectPolicy": {{ "mode": "replace", "policies": ["no-redirects"] }}
+      }}]
+  }}]
+}}"#
+        );
+        expect_invalid("path policy root limit", &bad, "4096");
     }
 
     /// A selector arm with the payload of the wrong type is a parse error

@@ -118,6 +118,7 @@ name = "shell-warden"
 version = "0.3.0"
 dependencies = [
  "regex",
+ "regex-syntax",
  "serde",
  "serde_json",
  "sw-attrs",
