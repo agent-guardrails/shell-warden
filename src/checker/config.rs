@@ -1675,6 +1675,43 @@ mod tests {
         );
     }
 
+    /// The fixed `re2-v1` dialect freezes RE2 semantics: Perl class shortcuts
+    /// and word boundaries are ASCII-defined in RE2 but match Unicode in the
+    /// pinned engine, so they fail config load (a `\w+` selector would
+    /// otherwise whole-match `é` and silently widen allow coverage).
+    #[test]
+    fn re2_v1_perl_class_shortcuts_rejected() {
+        expect_invalid(
+            "perl word class",
+            &cargo_config(
+                r#""name": { "aliases": ["--name"], "arity": 1 }"#,
+                None,
+                r#"{ "allowed": [{ "option": "name", "required": false, "repeatable": false,
+                    "values": { "each": { "regex": "\\w+" } } }] }"#,
+            ),
+            "Perl class shortcuts",
+        );
+        // explicit spellings stay dialect-legal
+        assert!(
+            load_str(&cargo_config(
+                r#""name": { "aliases": ["--name"], "arity": 1 }"#,
+                None,
+                r#"{ "allowed": [{ "option": "name", "required": false, "repeatable": false,
+                    "values": { "each": { "regex": "[0-9A-Za-z_]+" } } }] }"#,
+            ))
+            .is_ok()
+        );
+        assert!(
+            load_str(&cargo_config(
+                r#""name": { "aliases": ["--name"], "arity": 1 }"#,
+                None,
+                r#"{ "allowed": [{ "option": "name", "required": false, "repeatable": false,
+                    "values": { "each": { "regex": "\\p{L}" } } }] }"#,
+            ))
+            .is_ok()
+        );
+    }
+
     /// The fixed `re2-v1` dialect allows no flag configuration: inline flag
     /// groups would silently change case sensitivity or anchoring, so every
     /// `(?flags…)` / `(?flags:…)` / `(?-flags…)` form is invalid config —

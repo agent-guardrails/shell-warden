@@ -1253,7 +1253,65 @@ fn reject_inline_flags(pattern: &str) -> Result<(), String> {
          flags (case-sensitive whole-value matching only)"
             .to_string()
     })?;
-    reject_rust_class_sets(&ast)
+    reject_rust_class_sets(&ast)?;
+    reject_re2_ascii_mismatches(&ast)
+}
+
+/// The `re2-v1` dialect freezes RE2 semantics: in RE2 the Perl class
+/// shortcuts (`\w`, `\d`, `\s`, …) and word boundaries (`\b`, `\B`) are
+/// ASCII-defined, while the pinned Rust engine matches them Unicode-aware —
+/// a `\w+` selector would whole-match `é` and silently widen allow
+/// coverage through the regex selector. These constructs are rejected
+/// (fail closed); spell the class explicitly — `[0-9]`, `[0-9A-Za-z_]`,
+/// POSIX `[:word:]` — or use the Unicode classes RE2 also defines
+/// (`\p{L}`), which carry the intended semantics in both engines.
+fn reject_re2_ascii_mismatches(ast: &regex_syntax::ast::Ast) -> Result<(), String> {
+    use regex_syntax::ast::{AssertionKind, Ast, ClassPerlKind};
+    fn reject(ast: &Ast) -> Option<&'static str> {
+        match ast {
+            Ast::ClassPerl(p) => Some(match p.kind {
+                ClassPerlKind::Digit => r"\d",
+                ClassPerlKind::Space => r"\s",
+                ClassPerlKind::Word => r"\w",
+            }),
+            Ast::Assertion(a) => match a.kind {
+                AssertionKind::WordBoundary => Some(r"\b"),
+                AssertionKind::NotWordBoundary => Some(r"\B"),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+    // negated shortcut shapes (\D, \W, \S) also surface as ClassPerl
+    let mut construct: Option<&'static str> = None;
+    fn walk(ast: &regex_syntax::ast::Ast, construct: &mut Option<&'static str>) {
+        if construct.is_some() {
+            return;
+        }
+        if let Some(c) = reject(ast) {
+            *construct = Some(c);
+            return;
+        }
+        use regex_syntax::ast::Ast;
+        match ast {
+            Ast::Alternation(x) => x.asts.iter().for_each(|a| walk(a, construct)),
+            Ast::Concat(x) => x.asts.iter().for_each(|a| walk(a, construct)),
+            Ast::Repetition(x) => walk(&x.ast, construct),
+            Ast::Group(x) => walk(&x.ast, construct),
+            _ => {}
+        }
+    }
+    walk(ast, &mut construct);
+    if let Some(c) = construct {
+        return Err(format!(
+            "re2-v1 pattern uses `{c}` in its engine's Unicode sense — RE2 defines \
+             Perl class shortcuts and word boundaries as ASCII, and a Unicode match \
+             would silently widen allow coverage; spell the class explicitly \
+             ([0-9], [0-9A-Za-z_], [:word:]) or use the Unicode class RE2 defines \
+             (e.g. \\p{{L}})"
+        ));
+    }
+    Ok(())
 }
 
 /// The `re2-v1` dialect freezes the RE2 character-class subset: bracketed

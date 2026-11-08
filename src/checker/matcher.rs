@@ -1176,6 +1176,46 @@ mod tests {
         assert!(glob("git status", "*"));
     }
 
+    /// The exact `re2-v1` semantics lock (review P1): the RE2 dialect defines
+    /// Perl class shortcuts and word boundaries as ASCII, but the pinned
+    /// engine matches them Unicode-aware — so those constructs fail config
+    /// load instead of silently widening allow coverage.
+    #[test]
+    fn re2_v1_ascii_class_shortcuts_rejected() {
+        use crate::checker::grammar::RegexCache;
+        for (name, pattern) in [
+            ("word class", r"\w+"),
+            ("negated word class", r"\W"),
+            ("digit class", r"\d"),
+            ("negated digit class", r"\D"),
+            ("space class", r"\s"),
+            ("negated space class", r"\S"),
+            ("word boundary", r"\bfoo"),
+            ("not-word boundary", r"\Bfoo"),
+        ] {
+            assert!(
+                RegexCache::compile(pattern).is_err(),
+                "{name} must invalidate the config (RE2 ASCII semantics)"
+            );
+        }
+        // the spelled-out forms carry exactly the documented semantics: an
+        // explicitly ASCII class never matches é, the Unicode spellings RE2
+        // defines match é the same way the pinned engine does, and non-ASCII
+        // literals match themselves (RE2 UTF-8 literals)
+        let ascii_word = RegexCache::compile(r"[0-9A-Za-z_]+").unwrap();
+        assert!(!ascii_word.whole_match(r"[0-9A-Za-z_]+", "é"));
+        assert!(ascii_word.whole_match(r"[0-9A-Za-z_]+", "__w9"));
+        let unicode = RegexCache::compile(r"\p{L}").unwrap();
+        assert!(unicode.whole_match(r"\p{L}", "é"));
+        let posix = RegexCache::compile(r"[:alpha:]").unwrap();
+        assert!(!posix.whole_match(r"[:alpha:]", "é"));
+        let literal = RegexCache::compile("café").unwrap();
+        assert!(literal.whole_match("café", "café"));
+        assert!(!literal.whole_match("café", "cafe"));
+    }
+
+    /// Component-prefix semantics of the lexical path policy:
+    /// `/work/repo2` is NOT within `/work/repo`.
     #[test]
     fn componeent_prefix_semantics() {
         assert!(path_within("/work/repo", "/work/repo", "/"));
