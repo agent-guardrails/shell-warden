@@ -209,7 +209,7 @@ const config = {
         type: { aliases: ["-type"], arity: 0 }, maxDepth: { aliases: ["-maxdepth"], arity: 0 },
         minDepth: { aliases: ["-mindepth"], arity: 0 }, print: { aliases: ["-print"], arity: 0 },
         mtime: { aliases: ["-mtime"], arity: 0 }, size: { aliases: ["-size"], arity: 0 },
-        not: { aliases: ["-not", "!"], arity: 0 }
+        not: { aliases: ["-not"], arity: 0 }
       },
       rules: [allowRule("find/allow-read", [], ["name", "iname", "type", "maxDepth", "minDepth", "print", "mtime", "size", "not"])],
     },

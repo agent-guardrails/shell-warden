@@ -777,6 +777,32 @@ fn validate_profile(
                     profile.id
                 ));
             }
+            // parser-visible alias grammar (design §Profiles, option
+            // grammars): the option parser only treats dash-prefixed argv
+            // tokens as option tokens, the bare `--` token is the terminator,
+            // the bare `-` token is a positional, and inline forms split at
+            // the first `=`. Anything outside that shape can load but never
+            // be observed as a declared option — dead canonical policies.
+            if !alias.starts_with('-') {
+                return Err(format!(
+                    "profile \"{}\": option \"{canonical}\" alias \"{alias}\" must begin with a dash",
+                    profile.id
+                ));
+            }
+            if alias == "-" || alias == "--" {
+                return Err(format!(
+                    "profile \"{}\": option \"{canonical}\" alias \"{alias}\" is a parser boundary \
+                     (the bare dash is a positional, `--` is the terminator) and can never be observed",
+                    profile.id
+                ));
+            }
+            if alias.contains('=') {
+                return Err(format!(
+                    "profile \"{}\": option \"{canonical}\" alias \"{alias}\" contains '=': \
+                     inline forms split at the first '=', so this alias can never match",
+                    profile.id
+                ));
+            }
             if !seen_alias.insert(alias.clone()) {
                 return Err(format!(
                     "profile \"{}\": duplicate option alias \"{alias}\"",
@@ -1701,10 +1727,12 @@ mod tests {
             .is_ok()
         );
         // nested class sets and POSIX classes with a `(?i)` member: no
-        // scanner ambiguity — the AST parser sees class members, not flags
+        // scanner ambiguity — the AST parser sees class members, not flags;
+        // genuinely RE2-compatible class-literal cases only
         for (name, pattern) in [
-            ("nested class set", "[a&&[b](?i)]"),
-            ("posix class", "[[:alpha:](?i)]"),
+            ("posix class", r"[[:alpha:](?i)]"),
+            ("escaped member", r"[\\](?i)]"),
+            ("escaped char then members", r"[\\x41(?i)]"),
         ] {
             assert!(
                 load_str(&cargo_config(
@@ -1718,6 +1746,26 @@ mod tests {
                 ))
                 .is_ok(),
                 "{name} pattern must be dialect-legal"
+            );
+        }
+        // Rust-only class-set syntax is outside RE2 and outside the dialect
+        for (name, pattern) in [
+            ("nested class set", "[a&&[b](?i)]"),
+            ("nested class", "[[b]]"),
+            ("intersection operator", "[a&&b]"),
+        ] {
+            expect_invalid(
+                name,
+                &cargo_config(
+                    r#""name": { "aliases": ["--name"], "arity": 1 }"#,
+                    None,
+                    &format!(
+                        r#"{{ "allowed": [{{ "option": "name", "required": false, "repeatable": false,
+                    "values": {{ "each": {{ "regex": "{}" }} }} }}] }}"#,
+                        pattern
+                    ),
+                ),
+                "RE2",
             );
         }
     }
@@ -2010,6 +2058,78 @@ mod tests {
         assert!(load_str(&fact_config(Some("sed-v1"), "executionPrimitive", "sed-v1")).is_ok());
     }
 
+    /// The analyzer-fact coordinate validator runs at every call site —
+    /// pathSources, ask/deny rule paths entries, allow rule paths entries and
+    /// fallback hints — so one missed call site cannot restore the
+    /// dead-coordinate fail-open.
+    #[test]
+    fn analyzer_fact_coordinates_validate_at_every_call_site() {
+        let path_entries = |list_kind: &str, fact: &str| {
+            format!(
+                r#""{list_kind}": [{{ "coordinate": {{ "analyzerFact": {{ "name": "{fact}", "analyzer": "sed-v1" }} }}, "within": "/work" }}]"#
+            )
+        };
+        let site_config = |site: &str, fact: &str| {
+            let rule_block = match site {
+                "deny" => format!(
+                    r#""rules": [{{ "id": "d", "action": "deny", "message": "m",
+                      "match": {{ "arguments": {{ "prefix": [] }},
+                      "paths": {{ {} }} }} }}]"#,
+                    path_entries("any", fact)
+                ),
+                "allow" => format!(
+                    r#""rules": [{{ "id": "a", "action": "allow",
+                      "match": {{
+                        "classification": "complete", "arguments": {{ "exact": [] }},
+                        "options": {{ "none": true }}, "environment": {{ "none": true }},
+                        "paths": {{ {} }},
+                        "facts": {{ "none": true }}, "nestedParts": {{ "none": true }}
+                      }},
+                      "redirectPolicy": {{ "mode": "replace", "policies": ["no-redirects"] }} }}]"#,
+                    path_entries("all", fact)
+                ),
+                _ => format!(
+                    r#""rules": [], "fallbackHints": [{{ "id": "h", "message": "m",
+                      "match": {{ "arguments": {{ "prefix": [] }},
+                      "paths": {{ {} }} }} }}]"#,
+                    path_entries("any", fact)
+                ),
+            };
+            format!(
+                r#"{{
+  "version": 2,
+  "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
+  "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
+  "profiles": [{{
+      "id": "sed", "executables": ["sed"],
+      "options": {{ "expression": {{ "aliases": ["-e"], "arity": 1 }} }},
+      "analyzer": "sed-v1",
+      {rule_block}
+  }}]
+}}"#
+            )
+        };
+        // the valid control at every site is accepted
+        for site in ["deny", "allow", "hint"] {
+            let text = site_config(site, "executionPrimitive");
+            let loaded = load_str(&text);
+            assert!(
+                loaded.is_ok(),
+                "valid analyzerFact at the {} site must load: {}",
+                site,
+                loaded.err().unwrap_or_default()
+            );
+        }
+        // a mistyped catalog name is rejected at every site
+        for site in ["deny", "allow", "hint"] {
+            expect_invalid(
+                &format!("{site} site mistyped fact"),
+                &site_config(site, "inPlacee"),
+                "fact catalog",
+            );
+        }
+    }
+
     /// The environment path coordinate must be the closed object form
     /// `{ "occurrence": occurrenceSelector }` (docs schema
     /// `EnvironmentCoordinate`).
@@ -2044,12 +2164,99 @@ mod tests {
         );
     }
 
+    /// The option parser only observes dash-prefixed argv tokens, treats the
+    /// bare `--` token as the terminator (a bare `-` as a positional) and
+    /// splits inline forms at the first `=`. Aliases outside that grammar
+    /// would load but never be observed — dead canonical-option policies.
+    #[test]
+    fn option_aliases_must_be_parser_visible() {
+        let alias_config = |alias_literal: &str| {
+            format!(
+                r#"{{
+  "version": 2,
+  "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
+  "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
+  "profiles": [{{
+      "id": "cargo", "executables": ["cargo"],
+      "options": {{ "name": {{ "aliases": ["--name"], "arity": 1 }},
+        "flag": {{ "aliases": [{alias_literal}], "arity": 0 }} }},
+      "rules": []
+  }}]
+}}"#
+            )
+        };
+        for (name, alias_literal, needle) in [
+            (
+                "bare alias without dash",
+                r#""name""#,
+                "must begin with a dash",
+            ),
+            ("the terminator token", r#""--""#, "never be observed"),
+            ("inline-shaped alias", r#""--name=x""#, "can never match"),
+            ("bare dash", r#""-""#, "never be observed"),
+        ] {
+            expect_invalid(name, &alias_config(alias_literal), needle);
+        }
+        // dash-prefixed parse-visible aliases stay legal
+        assert!(
+            load_str(&alias_config(r#""--flag""#)).is_ok(),
+            "long alias must load"
+        );
+        assert!(
+            load_str(&alias_config(r#""-f""#)).is_ok(),
+            "short alias must load"
+        );
+        assert!(
+            load_str(&alias_config(r#""-rf""#)).is_ok(),
+            "multi-char short alias is exact-match visible"
+        );
+    }
+
+    /// Fixed arity boundary: arity 4 is valid (four consumed values), arity 5
+    /// is invalid — the 0..=4 bound is exact.
+    #[test]
+    fn option_arity_four_is_upper_bound() {
+        let arity_config = |arity: u32| {
+            format!(
+                r#"{{
+  "version": 2,
+  "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
+  "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
+  "profiles": [{{
+      "id": "cargo", "executables": ["cargo"],
+      "options": {{ "quad": {{ "aliases": ["--quad"], "arity": {arity} }} }},
+      "rules": []
+  }}]
+}}"#
+            )
+        };
+        assert!(load_str(&arity_config(4)).is_ok(), "arity 4 is valid");
+        expect_invalid("arity 5", &arity_config(5), "exceeds 4");
+    }
+
     /// `PathPolicy` roots use the schema's `AbsoluteLexicalPath` limit (4096
-    /// UTF-8 bytes), like the token path selector.
+    /// UTF-8 bytes) across every arm: 4096 bytes accepted, 4097 rejected.
     #[test]
     fn path_policy_root_byte_limit() {
-        let long_root = format!("/{}", "x".repeat(4096));
-        let bad = format!(
+        for (name, arm) in [
+            ("exact", "exact"),
+            ("within", "within"),
+            ("outside", "outside"),
+        ] {
+            // '/' + 4095 'x' = exactly the 4096-byte cap → accepted
+            let ok = path_policy_config(arm, &format!("/{}", "x".repeat(4095)));
+            assert!(
+                load_str(&ok).is_ok(),
+                "{name} at exactly 4096 bytes must be accepted"
+            );
+            // '/' + 4096 'x' = 4097 bytes → rejected
+            let bad = path_policy_config(arm, &format!("/{}", "x".repeat(4096)));
+            expect_invalid(&format!("{name} 4097 bytes"), &bad, "4096");
+        }
+    }
+
+    fn path_policy_config(arm: &str, root: &str) -> String {
+        format!(
             r#"{{
   "version": 2,
   "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
@@ -2057,20 +2264,20 @@ mod tests {
   "profiles": [{{
       "id": "cargo", "executables": ["cargo"],
       "options": {{}},
+      "pathSources": [{{ "argument": {{ "index": 0 }} }}],
       "rules": [{{
         "id": "allow", "action": "allow",
         "match": {{
-          "classification": "complete", "arguments": {{ "exact": [] }},
+          "classification": "complete", "arguments": {{ "exact": ["init"] }},
           "options": {{ "none": true }}, "environment": {{ "none": true }},
-          "paths": {{ "all": [{{ "coordinate": {{ "argument": {{ "index": 0 }} }}, "within": "{long_root}" }}] }},
+          "paths": {{ "all": [{{ "coordinate": {{ "argument": {{ "index": 0 }} }}, "{arm}": "{root}" }}] }},
           "facts": {{ "none": true }}, "nestedParts": {{ "none": true }}
         }},
         "redirectPolicy": {{ "mode": "replace", "policies": ["no-redirects"] }}
       }}]
   }}]
 }}"#
-        );
-        expect_invalid("path policy root limit", &bad, "4096");
+        )
     }
 
     /// A selector arm with the payload of the wrong type is a parse error

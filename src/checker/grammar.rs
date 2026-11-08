@@ -1252,7 +1252,49 @@ fn reject_inline_flags(pattern: &str) -> Result<(), String> {
         "re2-v1 pattern uses an inline flag group — the dialect allows no configured \
          flags (case-sensitive whole-value matching only)"
             .to_string()
-    })
+    })?;
+    reject_rust_class_sets(&ast)
+}
+
+/// The `re2-v1` dialect freezes the RE2 character-class subset: bracketed
+/// classes contain literals, ranges, POSIX/Unicode/Perl classes — never
+/// nested bracketed classes or `&&`/`--`/`~~` set operations (Rust-only
+/// class-set syntax; RE2 reads those bytes as literal members, so accepting
+/// them would make conforming implementations disagree).
+fn reject_rust_class_sets(ast: &regex_syntax::ast::Ast) -> Result<(), String> {
+    fn invalid(kind: &str) -> String {
+        format!(
+            "re2-v1 pattern uses a Rust-only character-class {kind} \
+             (nested bracketed classes and set operators &&/--/~~ are not \
+             RE2-compatible)"
+        )
+    }
+    fn walk_class(set: &regex_syntax::ast::ClassSet) -> Result<(), String> {
+        use regex_syntax::ast::{ClassSet, ClassSetItem};
+        match set {
+            ClassSet::Item(item) => match item {
+                ClassSetItem::Bracketed(_) => Err(invalid("nested class")),
+                ClassSetItem::Union(u) => u
+                    .items
+                    .iter()
+                    .try_for_each(|it| walk_class(&ClassSet::Item(it.clone()))),
+                _ => Ok(()),
+            },
+            ClassSet::BinaryOp(_) => Err(invalid("set operation")),
+        }
+    }
+    fn walk(ast: &regex_syntax::ast::Ast) -> Result<(), String> {
+        use regex_syntax::ast::Ast;
+        match ast {
+            Ast::ClassBracketed(b) => walk_class(&b.kind),
+            Ast::Alternation(x) => x.asts.iter().try_for_each(walk),
+            Ast::Concat(x) => x.asts.iter().try_for_each(walk),
+            Ast::Repetition(x) => walk(&x.ast),
+            Ast::Group(x) => walk(&x.ast),
+            _ => Ok(()),
+        }
+    }
+    walk(ast)
 }
 
 /// Depth-first AST walk: reject every inline flags item (`(?flags)` /

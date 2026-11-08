@@ -1187,7 +1187,8 @@ mod tests {
 
     /// `path.exact` applies the lexical normalization (cwd join + `.`/`..`
     /// resolution), not a raw string comparison: under cwd `/work/project`
-    /// the token `./sub/../file` is `/work/project/file`.
+    /// the token `./sub/../file` is `/work/project/file`. A schema-accepted
+    /// trailing-slash root (`/work/project/`) is equal to the slashless root.
     #[test]
     fn exact_path_selector_normalizes_lexically() {
         let sel = PathSelector::Exact {
@@ -1213,6 +1214,18 @@ mod tests {
         ));
         assert_eq!(normalized_path("/a//b/./c", "/x"), "/a/b/c");
         assert_eq!(normalized_path("a/../../b", "/"), "/b");
+        // a schema-accepted trailing-slash root matches the bare root
+        assert!(path_selector_holds(
+            &PathSelector::Exact {
+                exact: "/work/project/file/".into(),
+            },
+            "file",
+            "/work/project"
+        ));
+        assert_eq!(
+            normalized_path("/work/project/", ""),
+            normalized_path("/work/project", "")
+        );
     }
 
     /// The same normalization applies to a `PathPolicy.exact` (redirect and
@@ -1234,6 +1247,18 @@ mod tests {
             "./sub/../../etc/passwd",
             &policy,
             "/work/project"
+        ));
+        // a trailing-slash exact root is equal to the slashless root
+        let policy = PathPolicy {
+            exact: Some("/work/project/file/".into()),
+            within: None,
+            outside: None,
+        };
+        assert!(path_matches_policy("file", &policy, "/work/project"));
+        assert!(path_matches_policy(
+            "/work/project/file",
+            &policy,
+            "/other/cwd"
         ));
     }
 

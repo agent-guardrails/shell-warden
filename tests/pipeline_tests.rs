@@ -1074,33 +1074,40 @@ fn remainder_path_source_selects_from_the_index() {
 
 /// Ask/deny path predicates respect the entry's lexical policy: a deny rule
 /// over `paths.any [{ within: "/home" }]` must fire only when the recorded
-/// path coordinate text actually lies within the root.
+/// path coordinate text actually lies within the root. The `exact` and
+/// `outside` arms, unresolvable (non-literal) paths, and the `paths.all`
+/// universal form behave accordingly.
 #[test]
 fn ask_deny_path_predicates_apply_lexical_policy() {
-    let config = r#"
-{
+    let config = |list_kind: &str, policy_arm: &str, root: &str| {
+        format!(
+            r#"
+{{
   "version": 2,
-  "defaults": { "action": "ask", "redirectPolicy": "no-redirects" },
-  "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
+  "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
+  "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
   "profiles": [
-    {
+    {{
       "id": "rm", "executables": ["rm"],
-      "options": {},
-      "pathSources": [{ "argument": { "index": 0 } }],
+      "options": {{}},
+      "pathSources": [{{ "argument": {{ "index": 0, "remainder": true }} }}],
       "rules": [
-        {
-          "id": "rm/deny-home", "action": "deny",
-          "message": "removing home parts is forbidden",
-          "match": {
-            "arguments": { "prefix": [] },
-            "paths": { "any": [{ "coordinate": { "argument": { "index": 0 } }, "within": "/home/denied" }] }
-          }
-        }
+        {{
+          "id": "rm/deny-protected", "action": "deny",
+          "message": "protected path",
+          "match": {{
+            "arguments": {{ "prefix": [] }},
+            "paths": {{ "{list_kind}": [{{ "coordinate": {{ "argument": {{ "index": 0, "remainder": true }} }}, "{policy_arm}": "{root}" }}] }}
+          }}
+        }}
       ]
-    }
+    }}
   ]
-}"#;
-    let cfg = load_str(config).expect("path predicate probe config must load");
+}}"#
+        )
+    };
+    let cfg = load_str(&config("any", "within", "/home/denied"))
+        .expect("path predicate probe config must load");
     assert_eq!(
         evaluate(&cfg, &letter_cwd("rm /home/denied/x", "/repo")).verdict,
         VerdictKind::Deny,
@@ -1111,6 +1118,134 @@ fn ask_deny_path_predicates_apply_lexical_policy() {
         VerdictKind::Ask,
         "the same coordinate tag outside the within-root never fires deny"
     );
+
+    // `exact` (normalized): the deny fires only at the exact path
+    let cfg =
+        load_str(&config("any", "exact", "/home/denied/x")).expect("exact probe config must load");
+    assert_eq!(
+        evaluate(&cfg, &letter_cwd("rm /home/denied/x", "/repo")).verdict,
+        VerdictKind::Deny
+    );
+    assert_eq!(
+        evaluate(&cfg, &letter_cwd("rm /home/denied/x2", "/repo")).verdict,
+        VerdictKind::Ask
+    );
+
+    // `outside`: the deny fires only outside the root
+    let cfg = load_str(&config("any", "outside", "/etc")).expect("outside probe config must load");
+    assert_eq!(
+        evaluate(&cfg, &letter_cwd("rm /home/denied/x", "/repo")).verdict,
+        VerdictKind::Deny
+    );
+    assert_eq!(
+        evaluate(&cfg, &letter_cwd("rm /etc/hosts", "/repo")).verdict,
+        VerdictKind::Ask
+    );
+
+    // an unresolvable path (active expansion) is never a literal the lexical
+    // policy can compare against: the deny stays silent
+    let cfg = load_str(&config("any", "within", "/home/denied"))
+        .expect("unresolved probe config must load");
+    let v = evaluate(&cfg, &letter_cwd("rm $HOME/x", "/repo"));
+    assert_eq!(v.verdict, VerdictKind::Ask);
+    // the deny rule was evaluated but not matched-equal: no deny vote recorded
+    let facts = run_facts(&v);
+    assert!(
+        facts["matched"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|id| id.as_str().unwrap() != "rm/deny-protected"),
+        "an unresolvable path must not activate the lexical deny rule: {facts}"
+    );
+
+    // `paths.all` requires EVERY coordinate to satisfy its entry: one
+    // in-policy coordinate plus one out-of-policy never fires
+    let cfg =
+        load_str(&config("all", "within", "/home/denied")).expect("all probe config must load");
+    assert_eq!(
+        evaluate(&cfg, &letter_cwd("rm /home/denied/x", "/repo")).verdict,
+        VerdictKind::Deny,
+        "a single covered coordinate satisfies an all-policy"
+    );
+    assert_eq!(
+        evaluate(&cfg, &letter_cwd("rm /home/denied/x /etc/hosts", "/repo")).verdict,
+        VerdictKind::Ask,
+        "the uncovered second coordinate suppresses the deny"
+    );
+
+    // an `ask` rule under a deny default only records when its own policy holds
+    let ask_config = config("any", "within", "/etc").replace(
+        r#""action": "deny", "message": "protected path""#,
+        r#""action": "ask", "message": "asked path""#,
+    );
+    let cfg = load_str(&ask_config).expect("ask probe config must load");
+    let facts = run_facts(&evaluate(&cfg, &letter_cwd("rm /etc/hosts", "/repo")));
+    assert!(
+        facts["matched"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|id| id.as_str().unwrap() == "rm/deny-protected"),
+        "the ask rule fires (and votes) when its path policy holds: {facts}"
+    );
+    let facts = run_facts(&evaluate(&cfg, &letter_cwd("rm /home/x", "/repo")));
+    assert!(
+        facts["matched"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|id| id.as_str().unwrap() != "rm/deny-protected"),
+        "the ask rule stays silent outside its path policy: {facts}"
+    );
+}
+
+/// A schema-accepted trailing-slash exact root equals the slashless root
+/// through a real rule evaluation: both spellings cover the same coordinate.
+#[test]
+fn trailing_slash_exact_root_matches_normalized() {
+    let config = |root: &str| {
+        format!(
+            r#"
+{{
+  "version": 2,
+  "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
+  "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
+  "profiles": [
+    {{
+      "id": "cargo", "executables": ["cargo"],
+      "options": {{ "file": {{ "aliases": ["--file"], "arity": 1 }} }},
+      "pathSources": [{{ "optionValue": {{ "option": "file", "valueOrdinal": 1 }} }}],
+      "rules": [
+        {{
+          "id": "cargo/allow-init", "action": "allow",
+          "match": {{
+            "classification": "complete",
+            "arguments": {{ "exact": ["init"] }},
+            "options": {{ "allowed": [{{ "option": "file", "required": false, "repeatable": false,
+              "values": {{ "each": {{ "any": true }} }} }}] }},
+            "environment": {{ "none": true }},
+            "paths": {{ "all": [{{ "coordinate": {{ "optionValue": {{ "option": "file", "valueOrdinal": 1 }} }}, "exact": "{root}" }}] }},
+            "facts": {{ "none": true }}, "nestedParts": {{ "none": true }}
+          }},
+          "redirectPolicy": {{ "mode": "replace", "policies": ["no-redirects"] }}
+        }}
+      ]
+    }}
+  ]
+}}"#
+        )
+    };
+    // the slashless candidate matches both exact spellings
+    for root in ["/work/repo/file", "/work/repo/file/"] {
+        let cfg = load_str(&config(root))
+            .unwrap_or_else(|e| panic!("exact {root} config must load: {e}"));
+        assert_eq!(
+            evaluate(&cfg, &letter_cwd("cargo init --file file", "/work/repo")).verdict,
+            VerdictKind::Allow,
+            "--file file under cwd /work/repo is /work/repo/file: exact {root} covers it"
+        );
+    }
 }
 
 /// The environment path coordinate produces only the occurrences it names
