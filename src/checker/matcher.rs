@@ -713,7 +713,15 @@ fn typed_value_matches_type(
         }
         grammar::TypedValueSelector::Number { number } => {
             t == super::analyzers::FactValueType::Number
-                && numeric_bounds_hold(value.parse::<f64>().ok(), number.min, number.max)
+                && numeric_bounds_hold(
+                    // `NaN`/`inf` texts parse as f64 but cannot be rejected by
+                    // bound comparisons (NaN compares false both ways, so it
+                    // would satisfy every bounded selector) — treat them as
+                    // unparsable, like any other non-numeric fact text
+                    value.parse::<f64>().ok().filter(|v| v.is_finite()),
+                    number.min,
+                    number.max,
+                )
         }
         grammar::TypedValueSelector::Boolean { boolean } => {
             t == super::analyzers::FactValueType::Boolean
@@ -1678,6 +1686,44 @@ mod tests {
         assert!(matches(r#"{ "exact": 5 }"#, Integer, "5", "/"));
         assert!(matches(r#"{ "exact": 5 }"#, Number, "5.0", "/"));
         assert!(matches(r#"{ "exact": 5.5 }"#, Number, "5.5", "/"));
+    }
+
+    /// Non-finite number texts (`NaN`, infinities, overflow-to-inf) never
+    /// match a bounded number selector: they parse as `f64`, but bound
+    /// comparisons cannot reject a NaN (it compares false both ways), so
+    /// they are treated as unparsable — fail closed like any other
+    /// non-numeric fact text.
+    #[test]
+    fn non_finite_number_values_never_match_bounded_selectors() {
+        use analyzers::FactValueType::Number;
+        for text in ["NaN", "inf", "-inf", "infinity", "1e999"] {
+            assert!(
+                !matches(r#"{ "number": { "min": 0.0 } }"#, Number, text, "/"),
+                "{text} must not satisfy a min-only bound"
+            );
+            assert!(
+                !matches(r#"{ "number": { "max": 9.5 } }"#, Number, text, "/"),
+                "{text} must not satisfy a max-only bound"
+            );
+            assert!(
+                !matches(
+                    r#"{ "number": { "min": 0.5, "max": 9.5 } }"#,
+                    Number,
+                    text,
+                    "/"
+                ),
+                "{text} must not satisfy closed bounds"
+            );
+        }
+        // finite values keep selecting through the same selectors
+        assert!(matches(
+            r#"{ "number": { "min": 0.5, "max": 9.5 } }"#,
+            Number,
+            "9.5",
+            "/"
+        ));
+        // exact scalar equality fails closed on non-finite text as well
+        assert!(!matches(r#"{ "exact": 5 }"#, Number, "NaN", "/"));
     }
 
     #[test]
