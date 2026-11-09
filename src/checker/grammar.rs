@@ -1878,6 +1878,10 @@ pub struct RedirectTest {
     pub source_fd: Option<FdSelector>,
     #[serde(default)]
     pub target_kind: Option<TargetKindKind>,
+    /// Which redirect occurrence(s) this entry selects: `"all"` or a 1-based
+    /// ordinal (design §Closed evidence catalogs). Omitted = unconstrained.
+    #[serde(default)]
+    pub occurrence: Option<Occurrence>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -2517,6 +2521,60 @@ mod tests {
             serde_json::from_value::<FactTest>(
                 json!({ "name": "programForm", "value": "inPlace" })
             )
+            .is_err()
+        );
+    }
+
+    // ── RedirectTest ────────────────────────────────────────────────────────
+
+    /// The schema-supported occurrence selector parses in both documented
+    /// forms (docs fixtures RedirectMatcher/all.json and RedirectMatcher/any.json).
+    #[test]
+    fn redirect_test_parses_occurrence_selector_forms() {
+        let all: RedirectTest = serde_json::from_value(json!({ "occurrence": "all" })).unwrap();
+        assert_eq!(all.occurrence, Some(Occurrence::All));
+        let first: RedirectTest = serde_json::from_value(json!({ "occurrence": 1 })).unwrap();
+        assert_eq!(first.occurrence, Some(Occurrence::N(1)));
+        // the battery-fixture `RedirectMatcher/all.json` entry carries all
+        // four dimensions
+        let fixture: RedirectTest = serde_json::from_value(json!({
+            "operator": ">&",
+            "sourceFd": 2,
+            "targetKind": "fd",
+            "occurrence": 1
+        }))
+        .unwrap();
+        assert_eq!(fixture.occurrence, Some(Occurrence::N(1)));
+        assert_eq!(fixture.source_fd, Some(FdSelector::Number(2)));
+        assert_eq!(fixture.target_kind, Some(TargetKindKind::Fd));
+        // an omitted occurrence stays unconstrained
+        let plain: RedirectTest = serde_json::from_value(json!({ "operator": ">" })).unwrap();
+        assert!(plain.occurrence.is_none());
+    }
+
+    /// Zero and otherwise invalid occurrence forms stay rejected: ordinals
+    /// are 1-based (a 0 selector would silently match nothing), and the
+    /// selector union is closed.
+    #[test]
+    fn redirect_test_rejects_invalid_occurrence_forms() {
+        for (name, form) in [
+            ("zero ordinal", json!({ "occurrence": 0 })),
+            ("negative ordinal", json!({ "occurrence": -1 })),
+            ("fractional ordinal", json!({ "occurrence": 1.5 })),
+            ("boolean", json!({ "occurrence": true })),
+            ("unknown word", json!({ "occurrence": "every" })),
+        ] {
+            assert!(
+                serde_json::from_value::<RedirectTest>(form).is_err(),
+                "{name} must be rejected"
+            );
+        }
+        // unknown fields remain rejected alongside the new dimension
+        assert!(
+            serde_json::from_value::<RedirectTest>(json!({
+                "occurrence": "all",
+                "target": "/tmp/out"
+            }))
             .is_err()
         );
     }

@@ -2446,6 +2446,48 @@ mod tests {
             bad_redirect,
             "config invalid",
         );
+        // ...in an ask/deny RedirectTest's occurrence (match.redirects arm,
+        // the same fail-closed parse rejection as every other occurrence arm)
+        let bad_test = r#"{ "version": 2,
+  "defaults": { "action": "ask" },
+  "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
+  "profiles": [{ "id": "git", "executables": ["git"], "rules": [
+    { "id": "r", "action": "ask", "message": "redirects",
+      "match": { "redirects": { "any": [{ "operator": ">", "sourceFd": "default", "targetKind": "literalPath", "occurrence": 0 }] } } }
+  ] }] }"#;
+        expect_invalid("redirect test occurrence 0", bad_test, "config invalid");
+    }
+
+    /// `RedirectTest.occurrence` — the schema-supported occurrence selector —
+    /// parses in both documented forms (docs fixtures RedirectMatcher/all.json
+    /// and RedirectMatcher/any.json) and applies to `any` and `all` alike.
+    #[test]
+    fn redirect_matcher_occurrence_selector_wire_shapes() {
+        let rule = |occurrence: &str| {
+            format!(
+                r#"{{
+  "version": 2,
+  "defaults": {{ "action": "ask" }},
+  "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
+  "profiles": [{{ "id": "git", "executables": ["git"], "rules": [
+    {{ "id": "r", "action": "ask", "message": "redirects",
+      "match": {{ "redirects": {{ "all": [{{ "operator": ">&", "sourceFd": 2, "targetKind": "fd", "occurrence": {occurrence} }}] }} }} }}
+  ] }}]
+}}"#
+            )
+        };
+        // battery-fixture forms: one-based ordinal and `"all"`
+        assert!(load_str(&rule("1")).is_ok(), "occurrence 1 must load");
+        assert!(
+            load_str(&rule(r#""all""#)).is_ok(),
+            "occurrence \"all\" must load"
+        );
+        // other invalid occurrence forms stay rejected
+        expect_invalid(
+            "redirect test occurrence word",
+            &rule(r#""every""#),
+            "config invalid",
+        );
     }
 
     /// A pathSources `analyzerFact` coordinate must name a fact in the closed

@@ -530,7 +530,11 @@ fn redirect_test_holds(test: &RedirectTest, o: &RedirectObs) -> bool {
         Some(grammar::TargetKindKind::Fd) => o.is_fd_target,
         None => true,
     };
-    op_ok && fd_ok && kind_ok
+    let occurrence_ok = match test.occurrence {
+        Some(occ) => occ.selects(o.ordinal),
+        None => true,
+    };
+    op_ok && fd_ok && kind_ok && occurrence_ok
 }
 
 /// Coordinate selector (static, from config) vs one runtime coordinate tag.
@@ -1896,6 +1900,70 @@ mod tests {
             !string_selector_matches(&bad, "a", &grammar::RegexCache::default()),
             "uncompilable patterns never match"
         );
+    }
+
+    /// Occurrence selection in redirect tests (issue #42): entries select
+    /// 1-based occurrence ordinals, `"all"` selects every occurrence, and an
+    /// omitted selector is unconstrained. One shared predicate serves both
+    /// matcher arms — `any` (∃ item × ∃ entry) and `all` (∀ item ∃ entry).
+    #[test]
+    fn redirect_occurrence_selects_one_based_ordinal_in_any_and_all() {
+        let obs = |ordinal: u32| RedirectObs {
+            op: Some(grammar::RedirectOp::Out),
+            source_fd: None,
+            target: "/tmp/out".into(),
+            target_resolvable: true,
+            is_fd_target: false,
+            span: (0, 1),
+            ordinal,
+        };
+        let occ = |wire: &str| -> RedirectTest {
+            serde_json::from_str(&format!(r#"{{ "occurrence": {wire} }}"#)).unwrap()
+        };
+        let unconstrained: RedirectTest = serde_json::from_str("{}").unwrap();
+        let occ_all = occ(r#""all""#);
+        let occ_1 = occ("1");
+        let occ_2 = occ("2");
+        let occ_3 = occ("3");
+
+        // helper level, one-based boundary: ordinal 1 selects the first
+        // occurrence only — never a zero-based or off-by-one position
+        assert!(redirect_test_holds(&occ_1, &obs(1)));
+        assert!(!redirect_test_holds(&occ_1, &obs(2)));
+        assert!(redirect_test_holds(&occ_2, &obs(2)));
+        assert!(!redirect_test_holds(&occ_2, &obs(1)));
+        // `"all"` and the omitted selector are unconstrained
+        assert!(redirect_test_holds(&occ_all, &obs(1)));
+        assert!(redirect_test_holds(&occ_all, &obs(2)));
+        assert!(redirect_test_holds(&unconstrained, &obs(1)));
+        // an ordinal beyond the observed count matches nothing
+        assert!(!redirect_test_holds(&occ_3, &obs(2)));
+
+        // matcher level, same predicate through both arms
+        let any = |tests: Vec<RedirectTest>| grammar::RedirectMatcher {
+            none: None,
+            any: Some(tests),
+            all: None,
+        };
+        let all = |tests: Vec<RedirectTest>| grammar::RedirectMatcher {
+            none: None,
+            any: None,
+            all: Some(tests),
+        };
+        let both = [obs(1), obs(2)];
+
+        // `any`: one observed occurrence satisfying the entry suffices
+        assert!(redirects_holds(&any(vec![occ_1.clone()]), &both));
+        assert!(redirects_holds(&any(vec![occ_all.clone()]), &both));
+        // `all` with an ordinal entry: the second occurrence has no
+        // satisfying entry, so the arm fails even though `any` holds
+        assert!(!redirects_holds(&all(vec![occ_1.clone()]), &both));
+        assert!(redirects_holds(
+            &all(vec![occ_1.clone(), occ_2.clone()]),
+            &both
+        ));
+        // a selected entry covers every occurrence in both arms
+        assert!(redirects_holds(&all(vec![occ_all]), &both));
     }
 
     // ── Issue #40: environment selectors — value + occurrence semantics ─────
