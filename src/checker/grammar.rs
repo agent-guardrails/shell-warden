@@ -669,6 +669,17 @@ pub struct FactTest {
     pub value: Option<TypedValueSelector>,
 }
 
+/// Deserializes a present optional value and rejects JSON `null`: the
+/// public schema has no nullable selectors — an explicit `null` is not
+/// "absent", it is a wire typo that must fail config parsing, never pass.
+fn present_not_null<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    Ok(Some(T::deserialize(deserializer)?))
+}
+
 /// One nested-part selector (`NestedPartTest` in the public config-v2
 /// schema): every field is optional, but at least one selector must be
 /// present (schema `minProperties: 1`, enforced at config validation).
@@ -679,21 +690,21 @@ pub struct FactTest {
 pub struct NestedPartTest {
     /// Closed relation vocabulary (`chain`, `pipeline`, `wrapper`,
     /// `command-substitution`, `analyzer-command`).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "present_not_null")]
     pub relation: Option<Relation>,
     /// Selected profile for the nested part: a declared profile id, or the
     /// literal `none` selecting parts with no selected profile.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "present_not_null")]
     pub profile: Option<String>,
     /// Match only when the nested part itself is in this evidence state.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "present_not_null")]
     pub classification: Option<EvidenceClass>,
     /// A nested part must already reduce to this verdict for the parent's
     /// nesting-coverage policy to cover it.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "present_not_null")]
     pub verdict: Option<VerdictKind>,
     /// One-based relation-occurrence ordinal (`all` = every occurrence).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "present_not_null")]
     pub occurrence: Option<Occurrence>,
 }
 
@@ -2634,6 +2645,29 @@ mod tests {
             serde_json::from_value::<NestedPartTest>(json!({ "state": "complete" })).is_err(),
             "interim state field must not parse"
         );
+    }
+
+    /// An explicit `null` is never an absent selector: the public schema has
+    /// no nullable fields, and a null must fail config parsing instead of
+    /// widening the selector (review P1 finding).
+    #[test]
+    fn nested_part_test_rejects_explicit_null_selectors() {
+        for field in [
+            "relation",
+            "occurrence",
+            "profile",
+            "classification",
+            "verdict",
+        ] {
+            let mut raw = json!({ "relation": "chain" });
+            raw[field] = serde_json::Value::Null;
+            assert!(
+                serde_json::from_value::<NestedPartTest>(raw).is_err(),
+                "explicit null `{field}` must not parse"
+            );
+        }
+        // the absent form keeps parsing: absence is a closed selector
+        assert!(serde_json::from_value::<NestedPartTest>(json!({ "relation": "chain" })).is_ok());
     }
 
     /// Serialization emits the canonical hyphenated wire form.
