@@ -2011,10 +2011,11 @@ mod tests {
             !ordinal.iter().any(|t| env_test_matches(t, &assign, &cache)),
             "an ordinal-2 entry never covers the first assignment"
         );
+    }
+
     // ── Nested-part selectors (issue #41) ────────────────────────────────────
 
     use crate::checker::grammar::{NESTED_PROFILE_NONE, NestedPartTest, Relation};
-    use serde_json::json;
 
     fn nested_part_result() -> NestedResult {
         NestedResult {

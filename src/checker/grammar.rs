@@ -2527,6 +2527,9 @@ mod tests {
         assert!(
             serde_json::from_value::<EnvironmentTest>(json!({ "name": "LANG", "match": "prefix" }))
                 .is_err()
+        );
+    }
+
     // ── NestedPartTest + closed relation vocabulary (issue #41) ─────────────
 
     /// The authoritative fixture body (docs
