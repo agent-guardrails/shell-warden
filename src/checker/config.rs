@@ -493,6 +493,15 @@ fn precompile_match_selectors(m: &Match, regexes: &mut RegexCache) -> Result<(),
             precompile_fact_test_selectors(e, regexes)?;
         }
     }
+    if let Some(env) = &m.environment {
+        for e in env.any.iter().chain(env.all.iter()).flatten() {
+            // the `re2-v1` regex arm of an environment string-value selector
+            // is precompiled at config load — fail closed on a bad pattern
+            if let Some(StringValueSelector::Regex(pattern)) = &e.value {
+                regexes.add(pattern)?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1294,6 +1303,15 @@ fn validate_allow_match(
             for e in all {
                 if e.name.is_empty() || e.name.len() > 128 {
                     return Err("environment entry name out of bounds".to_string());
+                }
+                // the schema mandates `prefix` and `occurrence` on allow
+                // environment entries (`EnvironmentPolicy`): a missing
+                // dimension is invalid config — coverage is never synthesized
+                // from an omitted field
+                if e.prefix.is_none() || e.occurrence.is_none() {
+                    return Err(
+                        "allow environment entries require prefix and occurrence".to_string()
+                    );
                 }
             }
         }
@@ -2852,5 +2870,122 @@ mod tests {
             load_str(good).is_ok(),
             "sed-v1 read-only option table must load"
         );
+    }
+
+    // ── Issue #40: environment selectors — config-level validation ──────────
+
+    /// Minimal sed-v1 profile whose allow rule carries the given `environment`
+    /// coverage text; probe-only (never a live configuration).
+    fn sed_fact_config_environment(env: &str) -> String {
+        format!(
+            r#"{{
+  "version": 2,
+  "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
+  "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
+  "profiles": [{{
+    "id": "sed",
+    "executables": ["sed"],
+    "options": {{}},
+    "analyzer": "sed-v1",
+    "rules": [{{
+      "id": "sed/allow-probe", "action": "allow",
+      "match": {{
+        "classification": "complete", "arguments": {{ "exact": [] }},
+        "options": {{ "none": true }}, "environment": {env},
+        "paths": {{ "none": true }}, "facts": {{ "none": true }},
+        "nestedParts": {{ "none": true }}
+      }}
+    }}]
+  }}]
+}}"#
+        )
+    }
+
+    /// The authoritative `EnvironmentPolicy/complete` fixture shape parses and
+    /// validates: required `prefix` + `occurrence`, optional string-value
+    /// selector (`AllowMatch/complete-coverage` carries the one-of form).
+    #[test]
+    fn allow_environment_complete_policy_accepted() {
+        assert!(
+            load_str(&sed_fact_config_environment(
+                r#"{ "all": [{ "name": "LANG", "prefix": true, "occurrence": "all" }] }"#,
+            ))
+            .is_ok(),
+            "name + prefix + occurrence (no value selector) is the complete EnvironmentPolicy form"
+        );
+        assert!(
+            load_str(&sed_fact_config_environment(
+                r#"{ "all": [{ "name": "LANG", "value": { "oneOf": ["C", "C.UTF-8"] }, "prefix": true, "occurrence": "all" }] }"#,
+            ))
+            .is_ok(),
+            "the one-of string-value selector parses on allow entries"
+        );
+    }
+
+    /// The authoritative `EnvironmentPolicy/missing-occurrence` fixture is
+    /// invalid: schema-mandated allow dimensions are never synthesized.
+    #[test]
+    fn allow_environment_missing_occurrence_rejected() {
+        expect_invalid(
+            "missing-occurrence",
+            &sed_fact_config_environment(r#"{ "all": [{ "name": "LANG", "prefix": true }] }"#),
+            "allow environment entries require prefix and occurrence",
+        );
+    }
+
+    /// `prefix` is the other schema-mandated allow dimension.
+    #[test]
+    fn allow_environment_missing_prefix_rejected() {
+        expect_invalid(
+            "missing-prefix",
+            &sed_fact_config_environment(r#"{ "all": [{ "name": "LANG", "occurrence": "all" }] }"#),
+            "allow environment entries require prefix and occurrence",
+        );
+    }
+
+    /// An invalid `re2-v1` arm in an environment value selector fails config
+    /// load — the pattern is precompiled at load (fail closed).
+    #[test]
+    fn allow_environment_invalid_value_regex_rejected() {
+        expect_invalid(
+            "invalid-env-value-regex",
+            &sed_fact_config_environment(
+                r#"{ "all": [{ "name": "LANG", "value": { "regex": "(?=safe)safe" }, "prefix": true, "occurrence": "all" }] }"#,
+            ),
+            "re2-v1",
+        );
+    }
+
+    /// Ordinary ask/deny environment tests accept the string-value selector
+    /// plus occurrence while `name` alone stays valid.
+    #[test]
+    fn ordinary_environment_selector_fields_validate() {
+        let deny_config = |env: &str| {
+            format!(
+                r#"{{
+  "version": 2,
+  "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
+  "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
+  "profiles": [{{
+    "id": "sed",
+    "executables": ["sed"],
+    "options": {{}},
+    "rules": [{{
+      "id": "sed/deny-env", "action": "deny", "message": "denied environment",
+      "match": {{ "classification": "complete", "environment": {env} }}
+    }}]
+  }}]
+}}"#
+            )
+        };
+        // `any` form with the full selector set (EnvironmentMatcher/any.json)
+        assert!(
+            load_str(&deny_config(
+                r#"{ "any": [{ "name": "LANG", "value": { "oneOf": ["C", "C.UTF-8"] }, "prefix": true, "occurrence": "all" }] }"#,
+            ))
+            .is_ok()
+        );
+        // name-only tests stay valid for ask/deny
+        assert!(load_str(&deny_config(r#"{ "all": [{ "name": "LANG" }] }"#)).is_ok());
     }
 }
