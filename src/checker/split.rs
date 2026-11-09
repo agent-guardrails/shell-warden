@@ -117,6 +117,7 @@ fn extract_raw(
                     text: tok.text.clone(),
                     resolvable: tok.resolvable,
                     span: tok.span,
+                    ordinal: (assigns.len() + 1) as u32,
                 });
                 continue;
             }
@@ -196,6 +197,7 @@ fn split_heredoc_like(
                 text: tok.text.clone(),
                 resolvable: tok.resolvable,
                 span: tok.span,
+                ordinal: (assigns.len() + 1) as u32,
             });
             continue;
         }
@@ -398,6 +400,7 @@ fn emit_sh_children(
                     text: tok.text.clone(),
                     resolvable: tok.resolvable,
                     span: tok.span,
+                    ordinal: (assigns.len() + 1) as u32,
                 });
                 continue;
             }

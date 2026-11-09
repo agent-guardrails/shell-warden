@@ -638,10 +638,15 @@ pub struct OptionsMatcher {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct EnvironmentTest {
     pub name: String,
-    /// Literal value (exact) — optional = unconstrained.
-    pub value: Option<String>,
+    /// String-value selector (`any`/`oneOf`/`regex`) — optional = unconstrained.
+    #[serde(default)]
+    pub value: Option<StringValueSelector>,
     /// Assignment must sit in the command prefix (`FOO=1 cmd`) when true.
+    #[serde(default)]
     pub prefix: Option<bool>,
+    /// One-based occurrence ordinal (`"all"` = every occurrence).
+    #[serde(default)]
+    pub occurrence: Option<Occurrence>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -2467,6 +2472,46 @@ mod tests {
                 json!({ "name": "programForm", "value": "inPlace" })
             )
             .is_err()
+        );
+    }
+
+    /// `EnvironmentTest` parses the authoritative `EnvironmentMatcher/any`
+    /// fixture shape: string-value selector plus occurrence; `name` alone
+    /// stays valid for ask/deny; the bare-string value form is gone.
+    #[test]
+    fn environment_test_value_selector_and_occurrence_parse() {
+        let t: EnvironmentTest = serde_json::from_value(json!({
+            "name": "LANG",
+            "value": { "oneOf": ["C", "C.UTF-8"] },
+            "prefix": true,
+            "occurrence": "all"
+        }))
+        .unwrap();
+        assert_eq!(t.name, "LANG");
+        assert_eq!(
+            t.value,
+            Some(StringValueSelector::OneOf(vec![
+                "C".into(),
+                "C.UTF-8".into()
+            ]))
+        );
+        assert_eq!(t.prefix, Some(true));
+        assert_eq!(t.occurrence, Some(Occurrence::All));
+        // `name`-only test stays valid for ask/deny (docs EnvironmentTest def:
+        // every dimension but the name is optional)
+        let plain: EnvironmentTest = serde_json::from_value(json!({ "name": "LANG" })).unwrap();
+        assert!(plain.value.is_none() && plain.prefix.is_none() && plain.occurrence.is_none());
+        // old bare-string value wire form is gone (no coercion, no aliases)
+        assert!(
+            serde_json::from_value::<EnvironmentTest>(
+                json!({ "name": "LANG", "value": "C.UTF-8" })
+            )
+            .is_err()
+        );
+        // unknown keys fail closed
+        assert!(
+            serde_json::from_value::<EnvironmentTest>(json!({ "name": "LANG", "match": "prefix" }))
+                .is_err()
         );
     }
 }

@@ -81,6 +81,8 @@ pub struct EnvAssign {
     pub text: String,
     pub resolvable: bool,
     pub span: (usize, usize),
+    /// 1-based occurrence ordinal in source order within the part.
+    pub ordinal: u32,
 }
 
 /// Redirect evidence: closed operator, source FD (None = default), typed

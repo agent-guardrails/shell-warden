@@ -283,6 +283,141 @@ fn environment_assignment_prevents_allow() {
     assert_eq!(v.verdict, VerdictKind::Ask);
 }
 
+// ── Issue #40: environment selector conformance (docs fixtures) ─────────────
+
+/// `EnvironmentMatcher/any.json`: a deny test carries the one-of string-value
+/// selector, the prefix flag, and the occurrence; any matching assignment
+/// denies, non-matching values fall through to the default.
+#[test]
+fn environment_any_value_selector_denies_matching_assignment() {
+    const CFG: &str = r#"{  "version": 2,
+  "defaults": { "action": "ask", "redirectPolicy": "no-redirects" },
+  "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
+  "profiles": [
+    {
+      "id": "git", "executables": ["git"],
+      "options": {},
+      "rules": [
+        {
+          "id": "git/deny-env", "action": "deny", "message": "no pinned env overrides",
+          "match": {
+            "classification": "complete",
+            "environment": { "any": [
+              { "name": "GIT_DIR", "value": { "oneOf": ["/tmp/repo"] }, "prefix": true, "occurrence": "all" }
+            ] }
+          }
+        }
+      ]
+    }
+  ]
+}"#;
+    assert_eq!(
+        run(CFG, "GIT_DIR=/tmp/repo git status").verdict,
+        VerdictKind::Deny
+    );
+    assert_eq!(
+        run(CFG, "GIT_DIR=/elsewhere git status").verdict,
+        VerdictKind::Ask,
+        "a non-listed value never satisfies the one-of selector"
+    );
+    assert_eq!(
+        run(CFG, "GIT_DIR=/tmp/repoX git status").verdict,
+        VerdictKind::Ask,
+        "one-of matches whole values only"
+    );
+}
+
+/// `EnvironmentPolicy/complete.json` through an allow rule: `occurrence`-with
+/// `prefix` and the one-of value selector cover the assignment, so the allow
+/// votes; an uncovered value blocks the vote (fail closed, no synthesized
+/// coverage).
+#[test]
+fn allow_environment_coverage_by_selector_and_occurrence() {
+    const CFG: &str = r#"{  "version": 2,
+  "defaults": { "action": "ask", "redirectPolicy": "no-redirects" },
+  "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
+  "profiles": [
+    {
+      "id": "sed",
+      "executables": ["sed"],
+      "options": {
+        "noPrint": { "aliases": ["-n"], "arity": 0 },
+        "extendedRegexp": { "aliases": ["-E"], "arity": 0 }
+      },
+      "analyzer": "sed-v1",
+      "rules": [
+        {
+          "id": "sed/allow-read",
+          "action": "allow",
+          "match": {
+            "classification": "complete",
+            "arguments": { "exact": ["s/a/b/", "file"] },
+            "options": { "allowed": [{ "option": "extendedRegexp", "required": true, "repeatable": false }] },
+            "environment": { "all": [
+              { "name": "LANG", "value": { "oneOf": ["C", "C.UTF-8"] }, "prefix": true, "occurrence": "all" }
+            ] },
+            "paths": { "none": true },
+            "facts": { "all": [
+              { "analyzer": "sed-v1", "version": "1", "name": "executionPrimitive", "occurrence": "all", "value": { "exact": "readOnly" } },
+              { "analyzer": "sed-v1", "version": "1", "name": "programForm", "occurrence": "all", "value": { "exact": "positional" } }
+            ] },
+            "nestedParts": { "none": true }
+          }
+        }
+      ]
+    }
+  ]
+}"#;
+    assert_eq!(
+        run(CFG, "LANG=C.UTF-8 sed -E s/a/b/ file").verdict,
+        VerdictKind::Allow,
+        "the LANG=C.UTF-8 assignment is covered by the complete policy"
+    );
+    assert_eq!(
+        run(CFG, "LANG=en_US.UTF-8 sed -E s/a/b/ file").verdict,
+        VerdictKind::Ask,
+        "an uncovered assignment blocks the allow vote"
+    );
+    assert_eq!(
+        run(CFG, "sed -E s/a/b/ file").verdict,
+        VerdictKind::Allow,
+        "no assignment: the all-form coverage is vacuously satisfied"
+    );
+}
+
+/// The authoritative `EnvironmentPolicy/missing-occurrence.json` fixture is
+/// rejected at config load — no coverage is synthesized from omitted
+/// schema-mandated dimensions.
+#[test]
+fn allow_environment_missing_occurrence_fails_config_load() {
+    const CFG: &str = r#"{  "version": 2,
+  "defaults": { "action": "ask", "redirectPolicy": "no-redirects" },
+  "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
+  "profiles": [
+    {
+      "id": "sed", "executables": ["sed"], "options": {}, "analyzer": "sed-v1",
+      "rules": [
+        {
+          "id": "sed/allow-read", "action": "allow",
+          "match": {
+            "classification": "complete",
+            "arguments": { "exact": ["s/a/b/", "file"] },
+            "options": { "none": true },
+            "environment": { "all": [{ "name": "LANG", "prefix": true }] },
+            "paths": { "none": true }, "facts": { "none": true }, "nestedParts": { "none": true }
+          }
+        }
+      ]
+    }
+  ]
+}"#;
+    let err = load_str(CFG).expect_err("missing-occurrence allow env must fail config load");
+    assert!(
+        err.contains("require prefix and occurrence"),
+        "the error must name the missing dimensions: {err}"
+    );
+}
+
 #[test]
 fn chain_reduces_both_parts() {
     let v = run(SKETCH, "git status; git push --force");
@@ -1566,7 +1701,10 @@ fn environment_coordinate_produces_selected_occurrences() {
           "match": {{
             "classification": "complete", "arguments": {{ "exact": [] }},
             "options": {{ "none": true }},
-            "environment": {{ "all": [{{ "name": "A" }}, {{ "name": "B" }}] }},
+            "environment": {{ "all": [
+              {{ "name": "A", "prefix": true, "occurrence": "all" }},
+              {{ "name": "B", "prefix": true, "occurrence": "all" }}
+            ] }},
             "paths": {{ "none": true }},
             "facts": {{ "none": true }}, "nestedParts": {{ "none": true }}
           }},
