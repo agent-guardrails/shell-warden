@@ -1262,18 +1262,26 @@ fn reject_inline_flags(pattern: &str) -> Result<(), String> {
 /// ASCII-defined, while the pinned Rust engine matches them Unicode-aware —
 /// a `\w+` selector would whole-match `é` and silently widen allow
 /// coverage through the regex selector. These constructs are rejected
-/// (fail closed); spell the class explicitly — `[0-9]`, `[0-9A-Za-z_]`,
-/// POSIX `[:word:]` — or use the Unicode classes RE2 also defines
-/// (`\p{L}`), which carry the intended semantics in both engines.
+/// (fail closed) at the top level AND inside bracketed classes
+/// (`[\w]`, `[a-z\s]`, `[^\w]` — the divergence is identical there);
+/// spell the class explicitly — `[0-9]`, `[0-9A-Za-z_]`, POSIX `[:word:]`
+/// — or use the Unicode classes RE2 also defines (`\p{L}`), which carry
+/// the intended semantics in both engines.
 fn reject_re2_ascii_mismatches(ast: &regex_syntax::ast::Ast) -> Result<(), String> {
-    use regex_syntax::ast::{AssertionKind, Ast, ClassPerlKind};
+    use regex_syntax::ast::{AssertionKind, Ast, ClassPerlKind, ClassSet, ClassSetItem};
+    fn perl_label(kind: &ClassPerlKind, negated: bool) -> &'static str {
+        match (kind, negated) {
+            (ClassPerlKind::Digit, false) => r"\d",
+            (ClassPerlKind::Digit, true) => r"\D",
+            (ClassPerlKind::Space, false) => r"\s",
+            (ClassPerlKind::Space, true) => r"\S",
+            (ClassPerlKind::Word, false) => r"\w",
+            (ClassPerlKind::Word, true) => r"\W",
+        }
+    }
     fn reject(ast: &Ast) -> Option<&'static str> {
         match ast {
-            Ast::ClassPerl(p) => Some(match p.kind {
-                ClassPerlKind::Digit => r"\d",
-                ClassPerlKind::Space => r"\s",
-                ClassPerlKind::Word => r"\w",
-            }),
+            Ast::ClassPerl(p) => Some(perl_label(&p.kind, p.negated)),
             Ast::Assertion(a) => match a.kind {
                 AssertionKind::WordBoundary => Some(r"\b"),
                 AssertionKind::NotWordBoundary => Some(r"\B"),
@@ -1282,7 +1290,39 @@ fn reject_re2_ascii_mismatches(ast: &regex_syntax::ast::Ast) -> Result<(), Strin
             _ => None,
         }
     }
-    // negated shortcut shapes (\D, \W, \S) also surface as ClassPerl
+    // bracketed classes carry the same divergence: any Perl shortcut member
+    // (union items included, negated or plain) is RE2-mismatched
+    fn walk_set(set: &ClassSet, construct: &mut Option<&'static str>) {
+        if construct.is_some() {
+            return;
+        }
+        match set {
+            ClassSet::Item(item) => match item {
+                ClassSetItem::Perl(p) => *construct = Some(perl_label(&p.kind, p.negated)),
+                ClassSetItem::Union(u) => {
+                    u.items.iter().for_each(|it| {
+                        if construct.is_none()
+                            && let ClassSetItem::Perl(p) = it
+                        {
+                            *construct = Some(perl_label(&p.kind, p.negated));
+                        }
+                    });
+                }
+                ClassSetItem::Bracketed(nested) => walk_set(&nested.kind, construct),
+                ClassSetItem::Empty(_)
+                | ClassSetItem::Literal(_)
+                | ClassSetItem::Range(_)
+                | ClassSetItem::Ascii(_)
+                | ClassSetItem::Unicode(_) => {}
+            },
+            ClassSet::BinaryOp(op) => {
+                walk_set(&op.lhs, construct);
+                if construct.is_none() {
+                    walk_set(&op.rhs, construct);
+                }
+            }
+        }
+    }
     let mut construct: Option<&'static str> = None;
     fn walk(ast: &regex_syntax::ast::Ast, construct: &mut Option<&'static str>) {
         if construct.is_some() {
@@ -1294,6 +1334,7 @@ fn reject_re2_ascii_mismatches(ast: &regex_syntax::ast::Ast) -> Result<(), Strin
         }
         use regex_syntax::ast::Ast;
         match ast {
+            Ast::ClassBracketed(b) => walk_set(&b.kind, construct),
             Ast::Alternation(x) => x.asts.iter().for_each(|a| walk(a, construct)),
             Ast::Concat(x) => x.asts.iter().for_each(|a| walk(a, construct)),
             Ast::Repetition(x) => walk(&x.ast, construct),
@@ -1305,10 +1346,10 @@ fn reject_re2_ascii_mismatches(ast: &regex_syntax::ast::Ast) -> Result<(), Strin
     if let Some(c) = construct {
         return Err(format!(
             "re2-v1 pattern uses `{c}` in its engine's Unicode sense — RE2 defines \
-             Perl class shortcuts and word boundaries as ASCII, and a Unicode match \
-             would silently widen allow coverage; spell the class explicitly \
-             ([0-9], [0-9A-Za-z_], [:word:]) or use the Unicode class RE2 defines \
-             (e.g. \\p{{L}})"
+             Perl class shortcuts and word boundaries as ASCII (top level and inside \
+             bracketed classes), and a Unicode match would silently widen allow \
+             coverage; spell the class explicitly ([0-9], [0-9A-Za-z_], [:word:]) or \
+             use the Unicode class RE2 defines (e.g. \\p{{L}})"
         ));
     }
     Ok(())

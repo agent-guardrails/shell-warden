@@ -1675,22 +1675,36 @@ mod tests {
         );
     }
 
-    /// The fixed `re2-v1` dialect freezes RE2 semantics: Perl class shortcuts
-    /// and word boundaries are ASCII-defined in RE2 but match Unicode in the
-    /// pinned engine, so they fail config load (a `\w+` selector would
-    /// otherwise whole-match `é` and silently widen allow coverage).
+    /// The exact `re2-v1` semantics lock (review P1): the RE2 dialect defines
+    /// Perl class shortcuts and word boundaries as ASCII, but the pinned
+    /// engine matches them Unicode-aware — so those constructs fail config
+    /// load. Bracketed classes carry the same divergence (`[\w]`, `[a-z\s]`,
+    /// negated `[^\w]`), so the config-level rejection covers both contexts.
     #[test]
     fn re2_v1_perl_class_shortcuts_rejected() {
-        expect_invalid(
-            "perl word class",
-            &cargo_config(
-                r#""name": { "aliases": ["--name"], "arity": 1 }"#,
-                None,
-                r#"{ "allowed": [{ "option": "name", "required": false, "repeatable": false,
-                    "values": { "each": { "regex": "\\w+" } } }] }"#,
-            ),
-            "Perl class shortcuts",
-        );
+        for (name, pattern) in [
+            ("perl word class", r"\w+"),
+            ("bracketed word class", r"[\w]+"),
+            ("bracketed digit class", r"[\d]"),
+            ("bracketed space member", r"[a-z\s]"),
+            ("negated bracketed word class", r"[^\w]"),
+        ] {
+            expect_invalid(
+                name,
+                &cargo_config(
+                    r#""name": { "aliases": ["--name"], "arity": 1 }"#,
+                    None,
+                    &format!(
+                        r#"{{ "allowed": [{{ "option": "name", "required": false, "repeatable": false,
+                    "values": {{ "each": {{ "regex": {} }} }} }}] }}"#,
+                        serde_json::to_string(&pattern)
+                            .expect("re2 pattern json")
+                            .as_str()
+                    ),
+                ),
+                "Perl class shortcuts",
+            );
+        }
         // explicit spellings stay dialect-legal
         assert!(
             load_str(&cargo_config(
@@ -1707,6 +1721,15 @@ mod tests {
                 None,
                 r#"{ "allowed": [{ "option": "name", "required": false, "repeatable": false,
                     "values": { "each": { "regex": "\\p{L}" } } }] }"#,
+            ))
+            .is_ok()
+        );
+        assert!(
+            load_str(&cargo_config(
+                r#""name": { "aliases": ["--name"], "arity": 1 }"#,
+                None,
+                r#"{ "allowed": [{ "option": "name", "required": false, "repeatable": false,
+                    "values": { "each": { "regex": "[:word:]" } } }] }"#,
             ))
             .is_ok()
         );
@@ -1736,8 +1759,10 @@ mod tests {
                     None,
                     &format!(
                         r#"{{ "allowed": [{{ "option": "name", "required": false, "repeatable": false,
-                    "values": {{ "each": {{ "regex": "{}" }} }} }}] }}"#,
-                        pattern
+                    "values": {{ "each": {{ "regex": {} }} }} }}] }}"#,
+                        serde_json::to_string(&pattern)
+                            .expect("re2 pattern json")
+                            .as_str()
                     ),
                 ),
                 "flag",
@@ -1768,8 +1793,11 @@ mod tests {
         // genuinely RE2-compatible class-literal cases only
         for (name, pattern) in [
             ("posix class", r"[[:alpha:](?i)]"),
-            ("escaped member", r"[\\](?i)]"),
-            ("escaped char then members", r"[\\x41(?i)]"),
+            // a class whose first member is an escaped `]`, followed by
+            // literal `(?i)` members — the AST sees class members, not flags
+            ("escaped member", r"[\](?i)]"),
+            // an escaped hex char followed by literal `(?i)` members
+            ("escaped char then members", r"[\x41(?i)]"),
         ] {
             assert!(
                 load_str(&cargo_config(
@@ -1777,8 +1805,8 @@ mod tests {
                     None,
                     &format!(
                         r#"{{ "allowed": [{{ "option": "name", "required": false, "repeatable": false,
-                    "values": {{ "each": {{ "regex": "{}" }} }} }}] }}"#,
-                        pattern
+                    "values": {{ "each": {{ "regex": {} }} }} }}] }}"#,
+                        serde_json::to_string(&pattern).expect("re2 pattern json").as_str()
                     ),
                 ))
                 .is_ok(),
@@ -1798,8 +1826,10 @@ mod tests {
                     None,
                     &format!(
                         r#"{{ "allowed": [{{ "option": "name", "required": false, "repeatable": false,
-                    "values": {{ "each": {{ "regex": "{}" }} }} }}] }}"#,
-                        pattern
+                    "values": {{ "each": {{ "regex": {} }} }} }}] }}"#,
+                        serde_json::to_string(&pattern)
+                            .expect("re2 pattern json")
+                            .as_str()
                     ),
                 ),
                 "RE2",

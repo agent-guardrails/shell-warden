@@ -1192,6 +1192,13 @@ mod tests {
             ("negated space class", r"\S"),
             ("word boundary", r"\bfoo"),
             ("not-word boundary", r"\Bfoo"),
+            // the same divergence inside bracketed classes
+            ("bracketed word class", r"[\w]+"),
+            ("bracketed digit class", r"[\d]"),
+            ("bracketed space member", r"[a-z\s]"),
+            ("bracketed digit+space", r"[\d\s]"),
+            ("negated bracketed word class", r"[^\w]"),
+            ("negated bracketed digit class", r"[\D]"),
         ] {
             assert!(
                 RegexCache::compile(pattern).is_err(),
