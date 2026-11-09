@@ -2503,7 +2503,7 @@ mod tests {
         // ...in a redirect policy entry's occurrence (the untagged redirect
         // coverage arm reports a generic union failure, still fail-closed)
         let bad_redirect = r#"{ "version": 2,
-  "defaults": { "action": "ask" },
+  "defaults": { "action": "ask", "redirectPolicy": "no-redirects" },
   "redirectPolicies": { "p": { "redirects": { "all": [{ "sourceFd": "default", "operator": ">", "occurrence": 0, "target": { "kind": "literalPath" } }] },
     "paths": { "all": [{ "coordinate": { "redirect": { "operator": ">", "sourceFd": "default", "occurrence": "all" } }, "within": "/tmp" }] } } },
   "profiles": [] }"#;
@@ -2515,7 +2515,7 @@ mod tests {
         // ...in an ask/deny RedirectTest's occurrence (match.redirects arm,
         // the same fail-closed parse rejection as every other occurrence arm)
         let bad_test = r#"{ "version": 2,
-  "defaults": { "action": "ask" },
+  "defaults": { "action": "ask", "redirectPolicy": "no-redirects" },
   "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
   "profiles": [{ "id": "git", "executables": ["git"], "rules": [
     { "id": "r", "action": "ask", "message": "redirects",
@@ -2533,7 +2533,7 @@ mod tests {
             format!(
                 r#"{{
   "version": 2,
-  "defaults": {{ "action": "ask" }},
+  "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
   "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
   "profiles": [{{ "id": "git", "executables": ["git"], "rules": [
     {{ "id": "r", "action": "ask", "message": "redirects",
