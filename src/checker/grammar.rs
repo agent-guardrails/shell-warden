@@ -2886,8 +2886,11 @@ mod tests {
     /// or any other arm smuggles in here.
     #[test]
     fn fact_coordinate_unknown_key_rejected() {
+        // every required field is present, so the only rejection cause is the
+        // unknown `value` key (deny_unknown_fields), not a missing field
         assert!(
             serde_json::from_value::<FactCoordinate>(json!({
+                "analyzer": "sed-v1",
                 "version": "1",
                 "name": "executionPrimitive",
                 "value": { "exact": "inPlace" }
