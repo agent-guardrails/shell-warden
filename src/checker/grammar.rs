@@ -690,21 +690,41 @@ where
 pub struct NestedPartTest {
     /// Closed relation vocabulary (`chain`, `pipeline`, `wrapper`,
     /// `command-substitution`, `analyzer-command`).
-    #[serde(default, deserialize_with = "present_not_null")]
+    #[serde(
+        default,
+        deserialize_with = "present_not_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub relation: Option<Relation>,
     /// Selected profile for the nested part: a declared profile id, or the
     /// literal `none` selecting parts with no selected profile.
-    #[serde(default, deserialize_with = "present_not_null")]
+    #[serde(
+        default,
+        deserialize_with = "present_not_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub profile: Option<String>,
     /// Match only when the nested part itself is in this evidence state.
-    #[serde(default, deserialize_with = "present_not_null")]
+    #[serde(
+        default,
+        deserialize_with = "present_not_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub classification: Option<EvidenceClass>,
     /// A nested part must already reduce to this verdict for the parent's
     /// nesting-coverage policy to cover it.
-    #[serde(default, deserialize_with = "present_not_null")]
+    #[serde(
+        default,
+        deserialize_with = "present_not_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub verdict: Option<VerdictKind>,
     /// One-based relation-occurrence ordinal (`all` = every occurrence).
-    #[serde(default, deserialize_with = "present_not_null")]
+    #[serde(
+        default,
+        deserialize_with = "present_not_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub occurrence: Option<Occurrence>,
 }
 
@@ -2668,6 +2688,39 @@ mod tests {
         }
         // the absent form keeps parsing: absence is a closed selector
         assert!(serde_json::from_value::<NestedPartTest>(json!({ "relation": "chain" })).is_ok());
+    }
+
+    /// A partial selector round-trips its own wire form: absent fields are
+    /// skipped by the serializer (never emitted as `null`), so the
+    /// deserializer accepts the struct's own output (review P1 finding).
+    #[test]
+    fn nested_part_test_partial_selector_roundtrips() {
+        for (name, partial) in [
+            ("relation-only", json!({ "relation": "analyzer-command" })),
+            ("profile-only", json!({ "profile": "rm-safe" })),
+            ("classification-only", json!({ "classification": "opaque" })),
+            ("verdict-only", json!({ "verdict": "deny" })),
+            ("occurrence-only", json!({ "occurrence": 2 })),
+            (
+                "two-fields",
+                json!({ "relation": "chain", "occurrence": "all" }),
+            ),
+        ] {
+            let t: NestedPartTest = serde_json::from_value(partial.clone()).unwrap();
+            let wire = serde_json::to_value(&t).unwrap();
+            assert_eq!(
+                wire, partial,
+                "{name}: absent fields must not serialize as null"
+            );
+            // the struct must re-parse its own serialized output
+            let back: NestedPartTest = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(back, t, "{name}: own wire form must re-parse");
+            // no null anywhere in the emitted wire
+            assert!(
+                wire.as_object().unwrap().values().all(|v| !v.is_null()),
+                "{name}: the serializer must emit no null selectors"
+            );
+        }
     }
 
     /// Serialization emits the canonical hyphenated wire form.
