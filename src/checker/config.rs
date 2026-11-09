@@ -650,6 +650,8 @@ fn validate_path_coordinate_selector(
 /// The `analyzerFact` coordinate must name a fact in the closed catalog of the
 /// profile's *declared* analyzer: a mistyped fact name would silently produce
 /// no coordinate and let a path value pass a `{ "none": true }` paths policy.
+/// The schema-required `version` must equal that analyzer's closed catalog
+/// version — a stale version is invalid config, never a fallback match.
 fn validate_analyzer_fact_coordinate(profile: &Profile, fc: &FactCoordinate) -> Result<(), String> {
     let Some(analyzer) = profile.analyzer else {
         return Err(format!(
@@ -657,13 +659,11 @@ fn validate_analyzer_fact_coordinate(profile: &Profile, fc: &FactCoordinate) -> 
             fc.name
         ));
     };
-    if let Some(id) = &fc.analyzer
-        && id != analyzer.id()
-    {
+    if fc.analyzer != analyzer.id() {
         return Err(format!(
             "path coordinate analyzerFact \"{}\" references analyzer \"{}\" outside the profile analyzer {}",
             fc.name,
-            id,
+            fc.analyzer,
             analyzer.id()
         ));
     }
@@ -672,6 +672,15 @@ fn validate_analyzer_fact_coordinate(profile: &Profile, fc: &FactCoordinate) -> 
             "path coordinate analyzerFact \"{}\" is not in the {} fact catalog",
             fc.name,
             analyzer.id()
+        ));
+    }
+    if super::analyzers::analyzer_version(analyzer.id()) != Some(fc.version.as_str()) {
+        return Err(format!(
+            "path coordinate analyzerFact \"{}\" references version \"{}\", but the closed \"{}\" catalog is version \"{}\"",
+            fc.name,
+            fc.version,
+            analyzer.id(),
+            super::analyzers::ANALYZER_VERSION
         ));
     }
     Ok(())
@@ -2509,7 +2518,7 @@ mod tests {
       "id": "sed", "executables": ["sed"],
       "options": {{ "expression": {{ "aliases": ["-e"], "arity": 1 }} }},
       {analyzer_field}
-      "pathSources": [{{ "analyzerFact": {{ "name": "{fact}", "analyzer": "{fact_analyzer}" }} }}],
+      "pathSources": [{{ "analyzerFact": {{ "name": "{fact}", "version": "1", "analyzer": "{fact_analyzer}" }} }}],
       "rules": []
   }}]
 }}"#
@@ -2546,7 +2555,7 @@ mod tests {
     fn analyzer_fact_coordinates_validate_at_every_call_site() {
         let path_entries = |list_kind: &str, fact: &str| {
             format!(
-                r#""{list_kind}": [{{ "coordinate": {{ "analyzerFact": {{ "name": "{fact}", "analyzer": "sed-v1" }} }}, "within": "/work" }}]"#
+                r#""{list_kind}": [{{ "coordinate": {{ "analyzerFact": {{ "name": "{fact}", "version": "1", "analyzer": "sed-v1" }} }}, "within": "/work" }}]"#
             )
         };
         let site_config = |site: &str, fact: &str| {
@@ -3044,6 +3053,107 @@ mod tests {
         assert!(
             load_str(good).is_ok(),
             "sed-v1 read-only option table must load"
+        );
+    }
+
+    // ── Issue #43: versioned analyzer-fact path coordinates ─────────────────
+
+    /// Minimal sed-v1 profile carrying the given `pathSources` analyzerFact
+    /// coordinate payload text and allow-rule `paths` coverage; probe-only
+    /// (never a live configuration).
+    fn sed_fact_coordinate_config(coordinate: &str, paths: &str) -> String {
+        format!(
+            r#"{{
+  "version": 2,
+  "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
+  "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
+  "profiles": [{{
+    "id": "sed",
+    "executables": ["sed"],
+    "options": {{}},
+    "analyzer": "sed-v1",
+    "pathSources": [{{ "analyzerFact": {coordinate} }}],
+    "rules": [{{
+      "id": "sed/allow-probe", "action": "allow",
+      "match": {{
+        "classification": "complete", "arguments": {{ "exact": [] }},
+        "options": {{ "none": true }}, "environment": {{ "none": true }},
+        "paths": {paths},
+        "facts": {{ "all": [{{
+          "analyzer": "sed-v1", "version": "1", "name": "programForm",
+          "occurrence": "all", "value": {{ "exact": "positional" }}
+        }}, {{
+          "analyzer": "sed-v1", "version": "1", "name": "executionPrimitive",
+          "occurrence": "all", "value": {{ "exact": "readOnly" }}
+        }}] }},
+        "nestedParts": {{ "none": true }}
+      }}
+    }}]
+  }}]
+}}"#
+        )
+    }
+
+    /// The release-battery arm (docs fixture
+    /// `PathCoordinateSelector/all-arms.json`): the analyzerFact coordinate
+    /// carries `analyzer`, the schema-required `version` string, `name`, and
+    /// `occurrence`, and validates against the profile's declared `sed-v1`
+    /// catalog.
+    #[test]
+    fn analyzer_fact_coordinate_with_catalog_version_loads() {
+        let coordinate = r#"{ "analyzer": "sed-v1", "version": "1", "name": "executionPrimitive", "occurrence": "all" }"#;
+        load_str(&sed_fact_coordinate_config(
+            coordinate,
+            r#"{ "none": true }"#,
+        ))
+        .expect("versioned analyzerFact coordinate must load");
+    }
+
+    /// A version outside the closed catalog invalidates the config at load.
+    #[test]
+    fn analyzer_fact_coordinate_wrong_version_rejected() {
+        let coordinate = r#"{ "analyzer": "sed-v1", "version": "2", "name": "executionPrimitive", "occurrence": "all" }"#;
+        expect_invalid(
+            "analyzerFact wrong version",
+            &sed_fact_coordinate_config(coordinate, r#"{ "none": true }"#),
+            "references version \"2\"",
+        );
+    }
+
+    /// A coordinate naming another analyzer than the profile's declared one
+    /// is invalid config (never a cross-analyzer wildcard).
+    #[test]
+    fn analyzer_fact_coordinate_wrong_analyzer_rejected() {
+        let coordinate = r#"{ "analyzer": "generic-v1", "version": "1", "name": "executionPrimitive", "occurrence": "all" }"#;
+        expect_invalid(
+            "analyzerFact wrong analyzer",
+            &sed_fact_coordinate_config(coordinate, r#"{ "none": true }"#),
+            "outside the profile analyzer",
+        );
+    }
+
+    /// A coordinate naming a fact outside the declared analyzer's closed
+    /// catalog is invalid config.
+    #[test]
+    fn analyzer_fact_coordinate_unknown_fact_rejected() {
+        let coordinate =
+            r#"{ "analyzer": "sed-v1", "version": "1", "name": "notAFact", "occurrence": "all" }"#;
+        expect_invalid(
+            "analyzerFact unknown fact",
+            &sed_fact_coordinate_config(coordinate, r#"{ "none": true }"#),
+            "is not in the",
+        );
+    }
+
+    /// A zero occurrence ordinal is not a selector form: occurrences are
+    /// `"all"` or one-based ordinals, rejected at parse.
+    #[test]
+    fn analyzer_fact_coordinate_zero_occurrence_rejected() {
+        let coordinate = r#"{ "analyzer": "sed-v1", "version": "1", "name": "executionPrimitive", "occurrence": 0 }"#;
+        expect_invalid(
+            "analyzerFact zero occurrence",
+            &sed_fact_coordinate_config(coordinate, r#"{ "none": true }"#),
+            "1-based ordinal",
         );
     }
 

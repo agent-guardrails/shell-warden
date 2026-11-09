@@ -584,11 +584,7 @@ pub fn coordinate_matches(sel: &PathCoordinateSelector, tag: &PathSourceTag) -> 
                         .occurrence
                         .map(|o| o.selects(*occurrence))
                         .unwrap_or(true)
-                    && fc
-                        .analyzer
-                        .as_deref()
-                        .map(|a| a == *analyzer)
-                        .unwrap_or(true)
+                    && fc.analyzer.as_str() == *analyzer
             }
             None => false,
         },
