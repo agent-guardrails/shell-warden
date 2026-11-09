@@ -313,10 +313,11 @@ const MAX_PATH_SOURCES: usize = 64;
 
 /// Analyzer-compatible canonical option ids (closed compatibility table,
 /// design §Profiles, option grammars, and analyzers). `sed-v1` is the only
-/// analyzer with a modeled option grammar.
+/// analyzer with a modeled option grammar; `-n` and `-E` are its recognized
+/// read-only options.
 fn analyzer_compatible_options(analyzer: AnalyzerId) -> &'static [&'static str] {
     match analyzer {
-        AnalyzerId::SedV1 => &["inPlace", "expression", "file"],
+        AnalyzerId::SedV1 => &["inPlace", "noPrint", "extendedRegexp", "expression", "file"],
         AnalyzerId::GenericV1 | AnalyzerId::ExportV1 | AnalyzerId::XargsV1 => &[],
     }
 }
@@ -487,7 +488,25 @@ fn precompile_match_selectors(m: &Match, regexes: &mut RegexCache) -> Result<(),
             }
         }
     }
+    if let Some(facts) = &m.facts {
+        for e in facts.any.iter().chain(facts.all.iter()).flatten() {
+            precompile_fact_test_selectors(e, regexes)?;
+        }
+    }
     Ok(())
+}
+
+/// Precompile the `re2-v1` pattern of a fact's typed string-value selector and
+/// validate its path selector — the same closed dialect and lexical-path rules
+/// as token and option-value selectors (fail closed at config load).
+fn precompile_fact_test_selectors(e: &FactTest, regexes: &mut RegexCache) -> Result<(), String> {
+    match &e.value {
+        Some(TypedValueSelector::String {
+            string: StringValueSelector::Regex(pattern),
+        }) => regexes.add(pattern),
+        Some(TypedValueSelector::Path { path }) => validate_path_selector(path),
+        _ => Ok(()),
+    }
 }
 
 fn validate_option_value_coverage(
@@ -1306,7 +1325,7 @@ fn validate_allow_match(
         (Some(true), None, None) => {}
         (None | Some(false), None, Some(all)) if !all.is_empty() => {
             for e in all {
-                validate_fact_test(e, profile)?;
+                validate_fact_policy(e, profile)?;
             }
         }
         _ => return Err("allow facts is none or all".to_string()),
@@ -1334,31 +1353,146 @@ fn validate_fact_test(e: &FactTest, profile: &Profile) -> Result<(), String> {
     if e.name.is_empty() || e.name.len() > 64 {
         return Err("fact name out of bounds".to_string());
     }
-    match profile.analyzer {
-        None => {
-            return Err(format!(
-                "fact \"{}\" references an analyzer, but the profile declares none",
-                e.name
-            ));
+    let Some(analyzer) = profile.analyzer else {
+        return Err(format!(
+            "fact \"{}\" references an analyzer, but the profile declares none",
+            e.name
+        ));
+    };
+    if let Some(id) = &e.analyzer
+        && id != analyzer.id()
+    {
+        return Err(format!(
+            "fact \"{}\" references analyzer \"{id}\" outside the profile analyzer {}",
+            e.name,
+            analyzer.id()
+        ));
+    }
+    if !analyzers::knows_fact(analyzer, &e.name) {
+        return Err(format!(
+            "fact \"{}\" is not in the {} fact catalog",
+            e.name,
+            analyzer.id()
+        ));
+    }
+    // closed analyzer version: every catalogued analyzer is "v1"
+    if let Some(v) = &e.version
+        && analyzers::analyzer_version(analyzer.id()) != Some(v.as_str())
+    {
+        return Err(format!(
+            "fact \"{}\" references version \"{v}\", but the closed \"{}\" catalog is version \"{VER}\"",
+            e.name,
+            analyzer.id(),
+            VER = analyzers::ANALYZER_VERSION
+        ));
+    }
+    // the typed value selector must agree with the catalogued fact type
+    if let Some(sel) = &e.value {
+        let fact_type = analyzers::fact_catalog(analyzer)
+            .iter()
+            .find(|f| f.name == e.name)
+            .map(|f| f.value_type)
+            .expect("catalog membership checked above");
+        validate_typed_value_selector(sel, fact_type)?;
+    }
+    Ok(())
+}
+
+/// Allow fact entries (`FactPolicy` on the wire) carry every closed field:
+/// analyzer, version, occurrence, and typed value selector.
+fn validate_fact_policy(e: &FactTest, profile: &Profile) -> Result<(), String> {
+    if e.analyzer.is_none() || e.version.is_none() || e.occurrence.is_none() || e.value.is_none() {
+        return Err(
+            "allow fact entries require analyzer, version, occurrence, and a typed value selector"
+                .to_string(),
+        );
+    }
+    validate_fact_test(e, profile)
+}
+
+/// A typed value selector first agrees with the fact type from the analyzer
+/// catalog (`any` always agrees); a wrong-type arm is invalid config — no
+/// coercion, no string→path fallback.
+fn validate_typed_value_selector(
+    sel: &TypedValueSelector,
+    fact_type: analyzers::FactValueType,
+) -> Result<(), String> {
+    use analyzers::FactValueType as VT;
+    match sel {
+        TypedValueSelector::Any => Ok(()),
+        TypedValueSelector::Exact(scalar) => {
+            let compatible = match (fact_type, scalar) {
+                (VT::Str, ScalarValue::Str(_)) | (VT::Path, ScalarValue::Str(_)) => true,
+                (VT::Integer, ScalarValue::Num(n)) => n.is_i64(),
+                (VT::Number, ScalarValue::Num(_)) => true,
+                (VT::Boolean, ScalarValue::Bool(_)) => true,
+                _ => false,
+            };
+            if compatible {
+                Ok(())
+            } else {
+                Err(format!(
+                    "typed fact selector `exact` does not agree with the catalogued fact type {fact_type:?}"
+                ))
+            }
         }
-        Some(analyzer) => {
-            if let Some(id) = &e.analyzer
-                && id != analyzer.id()
-            {
+        TypedValueSelector::String { .. } => {
+            if fact_type != VT::Str {
                 return Err(format!(
-                    "fact \"{}\" references analyzer \"{id}\" outside the profile analyzer {}",
-                    e.name,
-                    analyzer.id()
+                    "typed fact selector `string` applies only to string facts (catalog type {fact_type:?})"
                 ));
             }
-            if !analyzers::knows_fact(analyzer, &e.name) {
+            // the `re2-v1` pattern compiles into the load-time cache in the
+            // precompile walk (dialect-checked there, whole-value matched from
+            // the cache at runtime)
+            Ok(())
+        }
+        TypedValueSelector::Integer { integer } => {
+            if fact_type != VT::Integer {
                 return Err(format!(
-                    "fact \"{}\" is not in the {} fact catalog",
-                    e.name,
-                    analyzer.id()
+                    "typed fact selector `integer` applies only to integer facts (catalog type {fact_type:?})"
                 ));
             }
+            validate_numeric_bounds(!(integer.min.is_some() || integer.max.is_some()), || {
+                integer.min.zip(integer.max).is_some_and(|(lo, hi)| lo > hi)
+            })
         }
+        TypedValueSelector::Number { number } => {
+            if fact_type != VT::Number {
+                return Err(format!(
+                    "typed fact selector `number` applies only to number facts (catalog type {fact_type:?})"
+                ));
+            }
+            validate_numeric_bounds(!(number.min.is_some() || number.max.is_some()), || {
+                number.min.zip(number.max).is_some_and(|(lo, hi)| lo > hi)
+            })
+        }
+        TypedValueSelector::Boolean { .. } => {
+            if fact_type != VT::Boolean {
+                return Err(format!(
+                    "typed fact selector `boolean` applies only to boolean facts (catalog type {fact_type:?})"
+                ));
+            }
+            Ok(())
+        }
+        TypedValueSelector::Path { path } => {
+            if fact_type != VT::Path {
+                return Err(format!(
+                    "typed fact selector `path` applies only to path facts (catalog type {fact_type:?})"
+                ));
+            }
+            validate_path_selector(path)
+        }
+    }
+}
+
+/// Closed numeric bounds: at least one bound, and `min` cannot exceed `max`.
+fn validate_numeric_bounds(no_bounds: bool, crossed: impl FnOnce() -> bool) -> Result<(), String> {
+    if no_bounds {
+        return Err("closed numeric bounds require min or max".to_string());
+    }
+    if crossed() {
+        return Err("bound min cannot exceed bound max".to_string());
     }
     Ok(())
 }
@@ -1630,6 +1764,50 @@ mod tests {
   "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
   "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
   "profiles": [{blob}]
+}}"#
+        )
+    }
+
+    // ── Issue #35: typed fact selectors — config-level validation ───────────
+
+    /// Minimal sed-v1 profile whose allow rule carries the given `facts`
+    /// coverage text; probe-only (never a live configuration). The entry
+    /// template carries every closed `FactPolicy` field.
+    fn sed_fact_entry(name: &str, value: &str) -> String {
+        format!(
+            r#"{{ "analyzer": "sed-v1", "version": "1", "name": "{name}", "occurrence": "all", "value": {value} }}"#
+        )
+    }
+
+    fn sed_fact_config(name: &str, value: &str) -> String {
+        sed_fact_config_facts(&format!(
+            r#"{{ "all": [{}] }}"#,
+            sed_fact_entry(name, value)
+        ))
+    }
+
+    fn sed_fact_config_facts(facts: &str) -> String {
+        format!(
+            r#"{{
+  "version": 2,
+  "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
+  "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
+  "profiles": [{{
+    "id": "sed",
+    "executables": ["sed"],
+    "options": {{}},
+    "analyzer": "sed-v1",
+    "rules": [{{
+      "id": "sed/allow-probe", "action": "allow",
+      "match": {{
+        "classification": "complete", "arguments": {{ "exact": [] }},
+        "options": {{ "none": true }}, "environment": {{ "none": true }},
+        "paths": {{ "none": true }},
+        "facts": {facts},
+        "nestedParts": {{ "none": true }}
+      }}
+    }}]
+  }}]
 }}"#
         )
     }
@@ -2460,6 +2638,177 @@ mod tests {
                 ] }"#,
             ),
             "duplicate canonical option",
+        );
+    }
+
+    /// A string-typed fact cannot be selected through path semantics: no
+    /// string→path coercion, no path selector on a string catalog type.
+    #[test]
+    fn string_selector_used_as_path_selector_rejected() {
+        expect_invalid(
+            "path selector on a string fact",
+            &sed_fact_config("executionPrimitive", r#"{ "path": { "within": "/work" } }"#),
+            "typed",
+        );
+    }
+
+    /// Numeric bounds must be closed: at least one of min/max is required,
+    /// and `min` cannot exceed `max`. No built-in analyzer emits
+    /// integer/number facts yet, so the closed-bounds checks are exercised
+    /// directly against the typed-selector validator.
+    #[test]
+    fn numeric_bounds_validator_rejects_open_and_crossed_bounds() {
+        use analyzers::FactValueType as VT;
+        let sel = |text: &str| serde_json::from_str::<TypedValueSelector>(text).unwrap();
+        let open_integer = sel(r#"{ "integer": {} }"#);
+        let open_number = sel(r#"{ "number": {} }"#);
+        let crossed_integer = sel(r#"{ "integer": { "min": 9, "max": 5 } }"#);
+        let crossed_number = sel(r#"{ "number": { "min": 9.5, "max": 5.5 } }"#);
+        for (name, s, t) in [
+            ("integer-open", &open_integer, VT::Integer),
+            ("number-open", &open_number, VT::Number),
+            ("integer-crossed", &crossed_integer, VT::Integer),
+            ("number-crossed", &crossed_number, VT::Number),
+        ] {
+            let err = validate_typed_value_selector(s, t)
+                .err()
+                .unwrap_or_else(|| panic!("{name} bounds must reject"));
+            assert!(
+                err.contains("bound"),
+                "{name} must name the open/crossed bound cause: {err}"
+            );
+        }
+        // closed inclusive bounds validate on the matching fact types
+        assert!(
+            validate_typed_value_selector(&sel(r#"{ "integer": { "min": 1 } }"#), VT::Integer)
+                .is_ok()
+        );
+        assert!(
+            validate_typed_value_selector(
+                &sel(r#"{ "number": { "min": 0.0, "max": 9.5 } }"#),
+                VT::Number
+            )
+            .is_ok()
+        );
+    }
+
+    /// The oneOf string selector is a non-empty, duplicate-free list.
+    #[test]
+    fn string_one_of_shape_rejected() {
+        for (name, sel) in [
+            ("one-of-empty", r#"{ "string": { "oneOf": [] } }"#),
+            (
+                "one-of-duplicate",
+                r#"{ "string": { "oneOf": ["readOnly", "readOnly"] } }"#,
+            ),
+        ] {
+            let Err(err) = load_str(&sed_fact_config("executionPrimitive", sel)) else {
+                panic!("{name} selector must reject the config");
+            };
+            assert!(err.contains("config invalid"), "{name}: {err}");
+            assert!(
+                err.contains("oneOf"),
+                "{name} must name the oneOf cause: {err}"
+            );
+        }
+    }
+
+    /// Regex selectors compile at load time (re2-v1 dialect): lookaround and
+    /// other unsupported syntax reject the config.
+    #[test]
+    fn regex_unsupported_syntax_rejected() {
+        expect_invalid(
+            "regex lookaround",
+            &sed_fact_config("programForm", r#"{ "string": { "regex": "(?=inPlace)" } }"#),
+            "regex",
+        );
+    }
+
+    /// Boolean selectors only apply to boolean-typed facts.
+    #[test]
+    fn boolean_selector_on_string_fact_rejected() {
+        expect_invalid(
+            "boolean selector on a string fact",
+            &sed_fact_config("executionPrimitive", r#"{ "boolean": true }"#),
+            "typed",
+        );
+    }
+
+    /// The closed analyzer version: fact selectors reference "1".
+    #[test]
+    fn fact_version_outside_catalog_rejected() {
+        expect_invalid(
+            "unknown fact version",
+            &sed_fact_config_facts(
+                r#"{ "all": [{ "analyzer": "sed-v1", "version": "2", "name": "executionPrimitive", "occurrence": "all", "value": { "any": true } }] }"#,
+            ),
+            "version",
+        );
+    }
+
+    /// Allow fact entries reference the profile analyzer explicitly and a
+    /// closed typed selector: omissions fail closed.
+    #[test]
+    fn allow_fact_entry_missing_fields_rejected() {
+        for (name, entry) in [
+            (
+                "missing-analyzer",
+                r#"{ "name": "executionPrimitive", "occurrence": "all", "value": { "any": true } }"#,
+            ),
+            (
+                "missing-version",
+                r#"{ "analyzer": "sed-v1", "name": "executionPrimitive", "occurrence": "all", "value": { "any": true } }"#,
+            ),
+            (
+                "missing-occurrence",
+                r#"{ "analyzer": "sed-v1", "version": "1", "name": "executionPrimitive", "value": { "any": true } }"#,
+            ),
+            (
+                "missing-value",
+                r#"{ "analyzer": "sed-v1", "version": "1", "name": "executionPrimitive", "occurrence": "all" }"#,
+            ),
+        ] {
+            let facts = format!(r#"{{ "all": [{entry}] }}"#);
+            expect_invalid(name, &sed_fact_config_facts(&facts), "allow fact");
+        }
+    }
+
+    /// Sed-v1's closed compatibility table: undeclared canonical ids are
+    /// invalid; the read-only table entries are recognized.
+    #[test]
+    fn sed_compatibility_table_rejects_unknown_option() {
+        let bad = r#"{
+  "version": 2,
+  "defaults": { "action": "ask", "redirectPolicy": "no-redirects" },
+  "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
+  "profiles": [{
+    "id": "sed",
+    "executables": ["sed"],
+    "options": { "printScript": { "aliases": ["-y"], "arity": 0 } },
+    "analyzer": "sed-v1",
+    "rules": []
+  }]
+}"#;
+        expect_invalid("non-modeled sed option", bad, "compatibility table");
+        // the read-only table entries themselves are recognized canonical ids
+        let good = r#"{
+  "version": 2,
+  "defaults": { "action": "ask", "redirectPolicy": "no-redirects" },
+  "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
+  "profiles": [{
+    "id": "sed",
+    "executables": ["sed"],
+    "options": {
+      "noPrint": { "aliases": ["-n"], "arity": 0 },
+      "extendedRegexp": { "aliases": ["-E"], "arity": 0 }
+    },
+    "analyzer": "sed-v1",
+    "rules": []
+  }]
+}"#;
+        assert!(
+            load_str(good).is_ok(),
+            "sed-v1 read-only option table must load"
         );
     }
 }
