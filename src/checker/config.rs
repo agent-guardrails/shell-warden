@@ -403,7 +403,7 @@ fn validate(raw: RawConfig) -> Result<Config, String> {
     }
 
     // closed references across profiles: nestedParts.profile must name a
-    // declared profile id
+    // declared profile id; the literal `none` selects unprofiled parts
     for profile in &raw.profiles {
         for rule in &profile.rules {
             if let Some(np) = &rule.r#match.nested_parts {
@@ -411,6 +411,7 @@ fn validate(raw: RawConfig) -> Result<Config, String> {
                 for list in lists.into_iter().flatten() {
                     for e in list {
                         if let Some(pid) = &e.profile
+                            && pid != NESTED_PROFILE_NONE
                             && !seen_id.contains(pid)
                         {
                             return Err(format!(
@@ -476,6 +477,15 @@ fn precompile_match_selectors(m: &Match, regexes: &mut RegexCache) -> Result<(),
     if let Some(facts) = &m.facts {
         for e in facts.any.iter().chain(facts.all.iter()).flatten() {
             precompile_fact_test_selectors(e, regexes)?;
+        }
+    }
+    if let Some(env) = &m.environment {
+        for e in env.any.iter().chain(env.all.iter()).flatten() {
+            // the `re2-v1` regex arm of an environment string-value selector
+            // is precompiled at config load — fail closed on a bad pattern
+            if let Some(StringValueSelector::Regex(pattern)) = &e.value {
+                regexes.add(pattern)?;
+            }
         }
     }
     Ok(())
@@ -625,6 +635,8 @@ fn validate_path_coordinate_selector(
 /// The `analyzerFact` coordinate must name a fact in the closed catalog of the
 /// profile's *declared* analyzer: a mistyped fact name would silently produce
 /// no coordinate and let a path value pass a `{ "none": true }` paths policy.
+/// The schema-required `version` must equal that analyzer's closed catalog
+/// version — a stale version is invalid config, never a fallback match.
 fn validate_analyzer_fact_coordinate(profile: &Profile, fc: &FactCoordinate) -> Result<(), String> {
     let Some(analyzer) = profile.analyzer else {
         return Err(format!(
@@ -632,13 +644,11 @@ fn validate_analyzer_fact_coordinate(profile: &Profile, fc: &FactCoordinate) -> 
             fc.name
         ));
     };
-    if let Some(id) = &fc.analyzer
-        && id != analyzer.id()
-    {
+    if fc.analyzer != analyzer.id() {
         return Err(format!(
             "path coordinate analyzerFact \"{}\" references analyzer \"{}\" outside the profile analyzer {}",
             fc.name,
-            id,
+            fc.analyzer,
             analyzer.id()
         ));
     }
@@ -647,6 +657,15 @@ fn validate_analyzer_fact_coordinate(profile: &Profile, fc: &FactCoordinate) -> 
             "path coordinate analyzerFact \"{}\" is not in the {} fact catalog",
             fc.name,
             analyzer.id()
+        ));
+    }
+    if super::analyzers::analyzer_version(analyzer.id()) != Some(fc.version.as_str()) {
+        return Err(format!(
+            "path coordinate analyzerFact \"{}\" references version \"{}\", but the closed \"{}\" catalog is version \"{}\"",
+            fc.name,
+            fc.version,
+            analyzer.id(),
+            super::analyzers::ANALYZER_VERSION
         ));
     }
     Ok(())
@@ -1280,6 +1299,15 @@ fn validate_allow_match(
                 if e.name.is_empty() || e.name.len() > 128 {
                     return Err("environment entry name out of bounds".to_string());
                 }
+                // the schema mandates `prefix` and `occurrence` on allow
+                // environment entries (`EnvironmentPolicy`): a missing
+                // dimension is invalid config — coverage is never synthesized
+                // from an omitted field
+                if e.prefix.is_none() || e.occurrence.is_none() {
+                    return Err(
+                        "allow environment entries require prefix and occurrence".to_string()
+                    );
+                }
             }
         }
         _ => return Err("allow environment is none or all".to_string()),
@@ -1315,13 +1343,17 @@ fn validate_allow_match(
         }
         _ => return Err("allow facts is none or all".to_string()),
     }
-    // nestedParts: none or all (closed relation/profile/state/verdict refs)
+    // nestedParts: none or all (closed relation/profile/classification/
+    // verdict selectors)
     let Some(np) = &m.nested_parts else {
         return Err("allow requires an explicit nestedParts policy".to_string());
     };
     match (np.none, &np.any, &np.all) {
         (Some(true), None, None) => {}
         (None | Some(false), None, Some(all)) if !all.is_empty() => {
+            for e in all {
+                validate_nested_part_policy(e)?;
+            }
             // profile references may resolve to any profile in the config:
             // checked later by the caller's set membership
         }
@@ -1393,6 +1425,39 @@ fn validate_fact_policy(e: &FactTest, profile: &Profile) -> Result<(), String> {
         );
     }
     validate_fact_test(e, profile)
+}
+
+/// A nested-part selector must name at least one closed dimension (public
+/// schema `NestedPartTest` `minProperties: 1`): an empty selector would
+/// match every nested part — a fail-open hole.
+fn validate_nested_part_test(e: &NestedPartTest) -> Result<(), String> {
+    if e.relation.is_none()
+        && e.profile.is_none()
+        && e.classification.is_none()
+        && e.verdict.is_none()
+        && e.occurrence.is_none()
+    {
+        return Err("nestedParts entries require at least one selector".to_string());
+    }
+    Ok(())
+}
+
+/// Allow coverage entries carry the public `NestedPartPolicy` shape: every
+/// field is required — relation, occurrence, profile, classification, and
+/// the required reduced verdict.
+fn validate_nested_part_policy(e: &NestedPartTest) -> Result<(), String> {
+    if e.relation.is_none()
+        || e.occurrence.is_none()
+        || e.profile.is_none()
+        || e.classification.is_none()
+        || e.verdict.is_none()
+    {
+        return Err(
+            "allow nestedParts entries require relation, occurrence, profile, classification, and verdict"
+                .to_string(),
+        );
+    }
+    validate_nested_part_test(e)
 }
 
 /// A typed value selector first agrees with the fact type from the analyzer
@@ -1516,9 +1581,16 @@ fn validate_ask_deny_match(rule: &Rule, profile: &Profile) -> Result<(), String>
         }
     }
     if let Some(np) = &m.nested_parts {
-        // relation/verdict closed enums validated by serde; profile refs are
-        // cross-checked against the whole profile set in validate()
-        let _ = (&np.any, &np.all);
+        // relation/classification/verdict closed enums validated by serde;
+        // every entry needs at least one selector (public schema
+        // `NestedPartTest` minProperties: 1); profile refs are cross-checked
+        // against the whole profile set in validate()
+        let lists = [&np.any, &np.all];
+        for list in lists.into_iter().flatten() {
+            for e in list {
+                validate_nested_part_test(e)?;
+            }
+        }
     }
     if let Some(o) = &m.options {
         if let Some(values) = &o.values {
@@ -1881,6 +1953,136 @@ mod tests {
             err.contains(needle),
             "{name} must name the violation `{needle}`: {err}"
         );
+    }
+
+    // ── Issue #41: nested-part selectors — config-level validation ──────────
+
+    /// An echo allow probe whose `nestedParts` coverage carries `nested`
+    /// verbatim, plus an `rm-safe` profile the selectors can reference.
+    fn nested_probe_config(nested: &str) -> String {
+        format!(
+            r#"{{
+  "version": 2,
+  "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
+  "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
+  "profiles": [{{
+    "id": "echo",
+    "executables": ["echo"],
+    "options": {{}},
+    "analyzer": "generic-v1",
+    "rules": [{{
+      "id": "echo/allow-probe", "action": "allow",
+      "match": {{
+        "classification": "complete", "arguments": {{ "exact": [] }},
+        "options": {{ "none": true }}, "environment": {{ "none": true }},
+        "paths": {{ "none": true }}, "facts": {{ "none": true }},
+        "nestedParts": {nested}
+      }}
+    }}]
+  }},
+  {{
+    "id": "rm-safe",
+    "executables": ["rm"],
+    "options": {{}},
+    "analyzer": "generic-v1",
+    "rules": []
+  }}]
+}}"#
+        )
+    }
+
+    /// The authoritative allow fixture (docs
+    /// `valid/NestedPartPolicy/complete.json`) loads as a coverage entry,
+    /// with a declared profile reference and with the literal `none`.
+    #[test]
+    fn allow_nested_part_policy_fixture_loads() {
+        let full = nested_probe_config(
+            r#"{ "all": [{ "relation": "analyzer-command", "occurrence": 1,
+                "profile": "rm-safe", "classification": "complete", "verdict": "ask" }] }"#,
+        );
+        assert!(
+            load_str(&full).is_ok(),
+            "authoritative NestedPartPolicy fixture body must load"
+        );
+        let none_profile = nested_probe_config(
+            r#"{ "all": [{ "relation": "analyzer-command", "occurrence": "all",
+                "profile": "none", "classification": "complete", "verdict": "deny" }] }"#,
+        );
+        assert!(
+            load_str(&none_profile).is_ok(),
+            "the literal none profile selector is public config"
+        );
+    }
+
+    /// Allow coverage entries carry the full public `NestedPartPolicy` shape:
+    /// dropping any closed field is invalid (schema `required`).
+    #[test]
+    fn allow_nested_part_policy_requires_every_field() {
+        let fields = [
+            (
+                "relation",
+                r#""occurrence": 1, "profile": "rm-safe", "classification": "complete", "verdict": "ask""#,
+            ),
+            (
+                "occurrence",
+                r#""relation": "analyzer-command", "profile": "rm-safe", "classification": "complete", "verdict": "ask""#,
+            ),
+            (
+                "profile",
+                r#""relation": "analyzer-command", "occurrence": 1, "classification": "complete", "verdict": "ask""#,
+            ),
+            (
+                "classification",
+                r#""relation": "analyzer-command", "occurrence": 1, "profile": "rm-safe", "verdict": "ask""#,
+            ),
+            (
+                "verdict",
+                r#""relation": "analyzer-command", "occurrence": 1, "profile": "rm-safe", "classification": "complete""#,
+            ),
+        ];
+        for (name, body) in fields {
+            expect_invalid(
+                name,
+                &nested_probe_config(&format!(r#"{{ "all": [{{ {body} }}] }}"#)),
+                "allow nestedParts entries require",
+            );
+        }
+    }
+
+    /// Nested-part profile references resolve against declared profile ids;
+    /// the literal `none` is the only non-reference spelling.
+    #[test]
+    fn nested_part_profile_references_resolve() {
+        expect_invalid(
+            "unknown-profile",
+            &nested_probe_config(
+                r#"{ "all": [{ "relation": "analyzer-command", "occurrence": 1,
+                    "profile": "rm-risky", "classification": "complete", "verdict": "ask" }] }"#,
+            ),
+            "references unknown profile",
+        );
+    }
+
+    /// An ask/deny selector naming no closed dimension is invalid (public
+    /// schema `NestedPartTest` `minProperties: 1`).
+    #[test]
+    fn nested_part_test_requires_at_least_one_selector() {
+        let ask_deny = r#"{
+  "version": 2,
+  "defaults": { "action": "ask", "redirectPolicy": "no-redirects" },
+  "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
+  "profiles": [{
+    "id": "echo",
+    "executables": ["echo"],
+    "options": {},
+    "analyzer": "generic-v1",
+    "rules": [{
+      "id": "echo/deny-probe", "action": "deny",
+      "match": { "nestedParts": { "any": [{}] } }
+    }]
+  }]
+        }"#;
+        expect_invalid("empty-selector", ask_deny, "at least one selector");
     }
 
     /// An invalid `re2-v1` pattern invalidates the config at load (docs
@@ -2310,6 +2512,48 @@ mod tests {
             bad_redirect,
             "config invalid",
         );
+        // ...in an ask/deny RedirectTest's occurrence (match.redirects arm,
+        // the same fail-closed parse rejection as every other occurrence arm)
+        let bad_test = r#"{ "version": 2,
+  "defaults": { "action": "ask" },
+  "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
+  "profiles": [{ "id": "git", "executables": ["git"], "rules": [
+    { "id": "r", "action": "ask", "message": "redirects",
+      "match": { "redirects": { "any": [{ "operator": ">", "sourceFd": "default", "targetKind": "literalPath", "occurrence": 0 }] } } }
+  ] }] }"#;
+        expect_invalid("redirect test occurrence 0", bad_test, "config invalid");
+    }
+
+    /// `RedirectTest.occurrence` — the schema-supported occurrence selector —
+    /// parses in both documented forms (docs fixtures RedirectMatcher/all.json
+    /// and RedirectMatcher/any.json) and applies to `any` and `all` alike.
+    #[test]
+    fn redirect_matcher_occurrence_selector_wire_shapes() {
+        let rule = |occurrence: &str| {
+            format!(
+                r#"{{
+  "version": 2,
+  "defaults": {{ "action": "ask" }},
+  "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
+  "profiles": [{{ "id": "git", "executables": ["git"], "rules": [
+    {{ "id": "r", "action": "ask", "message": "redirects",
+      "match": {{ "redirects": {{ "all": [{{ "operator": ">&", "sourceFd": 2, "targetKind": "fd", "occurrence": {occurrence} }}] }} }} }}
+  ] }}]
+}}"#
+            )
+        };
+        // battery-fixture forms: one-based ordinal and `"all"`
+        assert!(load_str(&rule("1")).is_ok(), "occurrence 1 must load");
+        assert!(
+            load_str(&rule(r#""all""#)).is_ok(),
+            "occurrence \"all\" must load"
+        );
+        // other invalid occurrence forms stay rejected
+        expect_invalid(
+            "redirect test occurrence word",
+            &rule(r#""every""#),
+            "config invalid",
+        );
     }
 
     /// A pathSources `analyzerFact` coordinate must name a fact in the closed
@@ -2331,7 +2575,7 @@ mod tests {
       "id": "sed", "executables": ["sed"],
       "options": {{ "expression": {{ "aliases": ["-e"], "arity": 1 }} }},
       {analyzer_field}
-      "pathSources": [{{ "analyzerFact": {{ "name": "{fact}", "analyzer": "{fact_analyzer}" }} }}],
+      "pathSources": [{{ "analyzerFact": {{ "name": "{fact}", "version": "1", "analyzer": "{fact_analyzer}" }} }}],
       "rules": []
   }}]
 }}"#
@@ -2368,7 +2612,7 @@ mod tests {
     fn analyzer_fact_coordinates_validate_at_every_call_site() {
         let path_entries = |list_kind: &str, fact: &str| {
             format!(
-                r#""{list_kind}": [{{ "coordinate": {{ "analyzerFact": {{ "name": "{fact}", "analyzer": "sed-v1" }} }}, "within": "/work" }}]"#
+                r#""{list_kind}": [{{ "coordinate": {{ "analyzerFact": {{ "name": "{fact}", "version": "1", "analyzer": "sed-v1" }} }}, "within": "/work" }}]"#
             )
         };
         let site_config = |site: &str, fact: &str| {
@@ -2867,5 +3111,223 @@ mod tests {
             load_str(good).is_ok(),
             "sed-v1 read-only option table must load"
         );
+    }
+
+    // ── Issue #43: versioned analyzer-fact path coordinates ─────────────────
+
+    /// Minimal sed-v1 profile carrying the given `pathSources` analyzerFact
+    /// coordinate payload text and allow-rule `paths` coverage; probe-only
+    /// (never a live configuration).
+    fn sed_fact_coordinate_config(coordinate: &str, paths: &str) -> String {
+        format!(
+            r#"{{
+  "version": 2,
+  "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
+  "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
+  "profiles": [{{
+    "id": "sed",
+    "executables": ["sed"],
+    "options": {{}},
+    "analyzer": "sed-v1",
+    "pathSources": [{{ "analyzerFact": {coordinate} }}],
+    "rules": [{{
+      "id": "sed/allow-probe", "action": "allow",
+      "match": {{
+        "classification": "complete", "arguments": {{ "exact": [] }},
+        "options": {{ "none": true }}, "environment": {{ "none": true }},
+        "paths": {paths},
+        "facts": {{ "all": [{{
+          "analyzer": "sed-v1", "version": "1", "name": "programForm",
+          "occurrence": "all", "value": {{ "exact": "positional" }}
+        }}, {{
+          "analyzer": "sed-v1", "version": "1", "name": "executionPrimitive",
+          "occurrence": "all", "value": {{ "exact": "readOnly" }}
+        }}] }},
+        "nestedParts": {{ "none": true }}
+      }}
+    }}]
+  }}]
+}}"#
+        )
+    }
+
+    /// The release-battery arm (docs fixture
+    /// `PathCoordinateSelector/all-arms.json`): the analyzerFact coordinate
+    /// carries `analyzer`, the schema-required `version` string, `name`, and
+    /// `occurrence`, and validates against the profile's declared `sed-v1`
+    /// catalog.
+    #[test]
+    fn analyzer_fact_coordinate_with_catalog_version_loads() {
+        let coordinate = r#"{ "analyzer": "sed-v1", "version": "1", "name": "executionPrimitive", "occurrence": "all" }"#;
+        load_str(&sed_fact_coordinate_config(
+            coordinate,
+            r#"{ "none": true }"#,
+        ))
+        .expect("versioned analyzerFact coordinate must load");
+    }
+
+    /// A version outside the closed catalog invalidates the config at load.
+    #[test]
+    fn analyzer_fact_coordinate_wrong_version_rejected() {
+        let coordinate = r#"{ "analyzer": "sed-v1", "version": "2", "name": "executionPrimitive", "occurrence": "all" }"#;
+        expect_invalid(
+            "analyzerFact wrong version",
+            &sed_fact_coordinate_config(coordinate, r#"{ "none": true }"#),
+            "references version \"2\"",
+        );
+    }
+
+    /// A coordinate naming another analyzer than the profile's declared one
+    /// is invalid config (never a cross-analyzer wildcard).
+    #[test]
+    fn analyzer_fact_coordinate_wrong_analyzer_rejected() {
+        let coordinate = r#"{ "analyzer": "generic-v1", "version": "1", "name": "executionPrimitive", "occurrence": "all" }"#;
+        expect_invalid(
+            "analyzerFact wrong analyzer",
+            &sed_fact_coordinate_config(coordinate, r#"{ "none": true }"#),
+            "outside the profile analyzer",
+        );
+    }
+
+    /// A coordinate naming a fact outside the declared analyzer's closed
+    /// catalog is invalid config.
+    #[test]
+    fn analyzer_fact_coordinate_unknown_fact_rejected() {
+        let coordinate =
+            r#"{ "analyzer": "sed-v1", "version": "1", "name": "notAFact", "occurrence": "all" }"#;
+        expect_invalid(
+            "analyzerFact unknown fact",
+            &sed_fact_coordinate_config(coordinate, r#"{ "none": true }"#),
+            "is not in the",
+        );
+    }
+
+    /// A zero occurrence ordinal is not a selector form: occurrences are
+    /// `"all"` or one-based ordinals, rejected at parse.
+    #[test]
+    fn analyzer_fact_coordinate_zero_occurrence_rejected() {
+        let coordinate = r#"{ "analyzer": "sed-v1", "version": "1", "name": "executionPrimitive", "occurrence": 0 }"#;
+        expect_invalid(
+            "analyzerFact zero occurrence",
+            &sed_fact_coordinate_config(coordinate, r#"{ "none": true }"#),
+            "1-based ordinal",
+        );
+    }
+
+    // ── Issue #40: environment selectors — config-level validation ──────────
+
+    /// Minimal sed-v1 profile whose allow rule carries the given `environment`
+    /// coverage text; probe-only (never a live configuration).
+    fn sed_fact_config_environment(env: &str) -> String {
+        format!(
+            r#"{{
+  "version": 2,
+  "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
+  "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
+  "profiles": [{{
+    "id": "sed",
+    "executables": ["sed"],
+    "options": {{}},
+    "analyzer": "sed-v1",
+    "rules": [{{
+      "id": "sed/allow-probe", "action": "allow",
+      "match": {{
+        "classification": "complete", "arguments": {{ "exact": [] }},
+        "options": {{ "none": true }}, "environment": {env},
+        "paths": {{ "none": true }}, "facts": {{ "none": true }},
+        "nestedParts": {{ "none": true }}
+      }}
+    }}]
+  }}]
+}}"#
+        )
+    }
+
+    /// The authoritative `EnvironmentPolicy/complete` fixture shape parses and
+    /// validates: required `prefix` + `occurrence`, optional string-value
+    /// selector (`AllowMatch/complete-coverage` carries the one-of form).
+    #[test]
+    fn allow_environment_complete_policy_accepted() {
+        assert!(
+            load_str(&sed_fact_config_environment(
+                r#"{ "all": [{ "name": "LANG", "prefix": true, "occurrence": "all" }] }"#,
+            ))
+            .is_ok(),
+            "name + prefix + occurrence (no value selector) is the complete EnvironmentPolicy form"
+        );
+        assert!(
+            load_str(&sed_fact_config_environment(
+                r#"{ "all": [{ "name": "LANG", "value": { "oneOf": ["C", "C.UTF-8"] }, "prefix": true, "occurrence": "all" }] }"#,
+            ))
+            .is_ok(),
+            "the one-of string-value selector parses on allow entries"
+        );
+    }
+
+    /// The authoritative `EnvironmentPolicy/missing-occurrence` fixture is
+    /// invalid: schema-mandated allow dimensions are never synthesized.
+    #[test]
+    fn allow_environment_missing_occurrence_rejected() {
+        expect_invalid(
+            "missing-occurrence",
+            &sed_fact_config_environment(r#"{ "all": [{ "name": "LANG", "prefix": true }] }"#),
+            "allow environment entries require prefix and occurrence",
+        );
+    }
+
+    /// `prefix` is the other schema-mandated allow dimension.
+    #[test]
+    fn allow_environment_missing_prefix_rejected() {
+        expect_invalid(
+            "missing-prefix",
+            &sed_fact_config_environment(r#"{ "all": [{ "name": "LANG", "occurrence": "all" }] }"#),
+            "allow environment entries require prefix and occurrence",
+        );
+    }
+
+    /// An invalid `re2-v1` arm in an environment value selector fails config
+    /// load — the pattern is precompiled at load (fail closed).
+    #[test]
+    fn allow_environment_invalid_value_regex_rejected() {
+        expect_invalid(
+            "invalid-env-value-regex",
+            &sed_fact_config_environment(
+                r#"{ "all": [{ "name": "LANG", "value": { "regex": "(?=safe)safe" }, "prefix": true, "occurrence": "all" }] }"#,
+            ),
+            "re2-v1",
+        );
+    }
+
+    /// Ordinary ask/deny environment tests accept the string-value selector
+    /// plus occurrence while `name` alone stays valid.
+    #[test]
+    fn ordinary_environment_selector_fields_validate() {
+        let deny_config = |env: &str| {
+            format!(
+                r#"{{
+  "version": 2,
+  "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
+  "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
+  "profiles": [{{
+    "id": "sed",
+    "executables": ["sed"],
+    "options": {{}},
+    "rules": [{{
+      "id": "sed/deny-env", "action": "deny", "message": "denied environment",
+      "match": {{ "classification": "complete", "environment": {env} }}
+    }}]
+  }}]
+}}"#
+            )
+        };
+        // `any` form with the full selector set (EnvironmentMatcher/any.json)
+        assert!(
+            load_str(&deny_config(
+                r#"{ "any": [{ "name": "LANG", "value": { "oneOf": ["C", "C.UTF-8"] }, "prefix": true, "occurrence": "all" }] }"#,
+            ))
+            .is_ok()
+        );
+        // name-only tests stay valid for ask/deny
+        assert!(load_str(&deny_config(r#"{ "all": [{ "name": "LANG" }] }"#)).is_ok());
     }
 }

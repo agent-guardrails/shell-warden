@@ -291,7 +291,7 @@ pub fn predicate_holds(m: &grammar::Match, f: &PartFacts) -> bool {
         return false;
     }
     if let Some(e) = environment
-        && !environment_holds(e, &f.part.assigns)
+        && !environment_holds(e, &f.part.assigns, f.regexes)
     {
         return false;
     }
@@ -407,12 +407,24 @@ fn env_value_text(a: &EnvAssign) -> &str {
     }
 }
 
-fn env_test_matches(test: &EnvironmentTest, a: &EnvAssign) -> bool {
+/// One environment test against one recorded assignment: name equality, an
+/// optional string-value selector (`any`/`oneOf`/`regex` — whole-value re2-v1
+/// from the load-time cache), an optional 1-based occurrence ordinal, and the
+/// prefix-position flag (every recorded assignment sits in the command
+/// prefix, 07 §7.5). Ask/deny predicates and allow coverage entries share
+/// this closed entry semantics; a dimension left out of the test stays
+/// unconstrained, never synthesized.
+fn env_test_matches(test: &EnvironmentTest, a: &EnvAssign, regexes: &grammar::RegexCache) -> bool {
     if test.name != a.name {
         return false;
     }
     if let Some(v) = &test.value
-        && !glob(env_value_text(a), v)
+        && !string_selector_matches(v, env_value_text(a), regexes)
+    {
+        return false;
+    }
+    if let Some(o) = test.occurrence
+        && !o.selects(a.ordinal)
     {
         return false;
     }
@@ -422,8 +434,14 @@ fn env_test_matches(test: &EnvironmentTest, a: &EnvAssign) -> bool {
     true
 }
 
-fn environment_holds(e: &grammar::EnvironmentMatcher, assigns: &[EnvAssign]) -> bool {
-    stress_none_env(e, assigns) && existentials(e, assigns) && universals(e, assigns)
+fn environment_holds(
+    e: &grammar::EnvironmentMatcher,
+    assigns: &[EnvAssign],
+    regexes: &grammar::RegexCache,
+) -> bool {
+    stress_none_env(e, assigns)
+        && existentials(e, assigns, regexes)
+        && universals(e, assigns, regexes)
 }
 
 fn stress_none_env(e: &grammar::EnvironmentMatcher, assigns: &[EnvAssign]) -> bool {
@@ -435,21 +453,36 @@ fn stress_none_env(e: &grammar::EnvironmentMatcher, assigns: &[EnvAssign]) -> bo
     true
 }
 
-fn existentials(e: &grammar::EnvironmentMatcher, assigns: &[EnvAssign]) -> bool {
+fn existentials(
+    e: &grammar::EnvironmentMatcher,
+    assigns: &[EnvAssign],
+    regexes: &grammar::RegexCache,
+) -> bool {
     let Some(any) = &e.any else { return true };
     if !any
         .iter()
-        .any(|test| assigns.iter().any(|a| env_test_matches(test, a)))
+        .any(|test| assigns.iter().any(|a| env_test_matches(test, a, regexes)))
     {
         return false;
     }
     true
 }
 
-fn universals(e: &grammar::EnvironmentMatcher, assigns: &[EnvAssign]) -> bool {
+fn universals(
+    e: &grammar::EnvironmentMatcher,
+    assigns: &[EnvAssign],
+    regexes: &grammar::RegexCache,
+) -> bool {
     let Some(all) = &e.all else { return true };
-    all.iter()
-        .all(|test| assigns.iter().any(|a| env_test_matches(test, a)))
+    if all.is_empty() {
+        return false;
+    }
+    // `all` = ∀ assignment ∃ test (spec §6.6): every recorded assignment must
+    // satisfy at least one entry — a partial or first-only match never
+    // qualifies the dimension (fail closed).
+    assigns
+        .iter()
+        .all(|a| all.iter().any(|test| env_test_matches(test, a, regexes)))
 }
 
 /// `any`/`all`/`none` semantics: none = zero items; any = ∃ item × ∃ entry;
@@ -497,7 +530,11 @@ fn redirect_test_holds(test: &RedirectTest, o: &RedirectObs) -> bool {
         Some(grammar::TargetKindKind::Fd) => o.is_fd_target,
         None => true,
     };
-    op_ok && fd_ok && kind_ok
+    let occurrence_ok = match test.occurrence {
+        Some(occ) => occ.selects(o.ordinal),
+        None => true,
+    };
+    op_ok && fd_ok && kind_ok && occurrence_ok
 }
 
 /// Coordinate selector (static, from config) vs one runtime coordinate tag.
@@ -547,11 +584,7 @@ pub fn coordinate_matches(sel: &PathCoordinateSelector, tag: &PathSourceTag) -> 
                         .occurrence
                         .map(|o| o.selects(*occurrence))
                         .unwrap_or(true)
-                    && fc
-                        .analyzer
-                        .as_deref()
-                        .map(|a| a == *analyzer)
-                        .unwrap_or(true)
+                    && fc.analyzer.as_str() == *analyzer
             }
             None => false,
         },
@@ -820,23 +853,21 @@ fn nested_test(e: &grammar::NestedPartTest, n: &NestedResult) -> bool {
     {
         return false;
     }
-    if let Some(exec) = &e.executable
-        && n.executable.as_deref() != Some(exec.as_str())
-    {
-        return false;
+    if let Some(profile) = &e.profile {
+        // the literal `none` selects parts with no selected profile, not a
+        // profile literally named "none" (public contract: profileId | "none")
+        let selected = n.profile_id.as_deref();
+        let covered = if profile == grammar::NESTED_PROFILE_NONE {
+            selected.is_none()
+        } else {
+            selected == Some(profile.as_str())
+        };
+        if !covered {
+            return false;
+        }
     }
-    if let Some(profile) = &e.profile
-        && n.profile_id.as_deref() != Some(profile.as_str())
-    {
-        return false;
-    }
-    if let Some(analyzer) = &e.analyzer
-        && n.analyzer.map(|a| a != analyzer.as_str()).unwrap_or(true)
-    {
-        return false;
-    }
-    if let Some(state) = e.state
-        && state_class(n.state) != state
+    if let Some(classification) = e.classification
+        && state_class(n.state) != classification
     {
         return false;
     }
@@ -1023,16 +1054,13 @@ pub fn allow_covers(
         Some(e) if e.all.is_some() => {
             let entries = e.all.as_ref().unwrap();
             for assign in &ctx.part.assigns {
+                // allow entries carry every closed dimension (validated at
+                // config load); coverage reuses the shared entry semantics —
+                // value selector + occurrence ordinal included
                 let covered = assign.resolvable
-                    && entries.iter().any(|test: &EnvironmentTest| {
-                        test.name == assign.name
-                            && test
-                                .value
-                                .as_ref()
-                                .map(|v| v.as_str() == env_value_text(assign))
-                                .unwrap_or(true)
-                            && test.prefix.unwrap_or(true)
-                    });
+                    && entries
+                        .iter()
+                        .any(|test: &EnvironmentTest| env_test_matches(test, assign, ctx.regexes));
                 if !covered {
                     failures.push(CoverageCode::AllowCoverageMissing);
                     break;
@@ -1329,6 +1357,7 @@ fn redirect_coordinate_matches(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn glob_basics() {
@@ -1867,5 +1896,290 @@ mod tests {
             !string_selector_matches(&bad, "a", &grammar::RegexCache::default()),
             "uncompilable patterns never match"
         );
+    }
+
+    /// Occurrence selection in redirect tests (issue #42): entries select
+    /// 1-based occurrence ordinals, `"all"` selects every occurrence, and an
+    /// omitted selector is unconstrained. One shared predicate serves both
+    /// matcher arms — `any` (∃ item × ∃ entry) and `all` (∀ item ∃ entry).
+    #[test]
+    fn redirect_occurrence_selects_one_based_ordinal_in_any_and_all() {
+        let obs = |ordinal: u32| RedirectObs {
+            op: Some(grammar::RedirectOp::Out),
+            source_fd: None,
+            target: "/tmp/out".into(),
+            target_resolvable: true,
+            is_fd_target: false,
+            span: (0, 1),
+            ordinal,
+        };
+        let occ = |wire: &str| -> RedirectTest {
+            serde_json::from_str(&format!(r#"{{ "occurrence": {wire} }}"#)).unwrap()
+        };
+        let unconstrained: RedirectTest = serde_json::from_str("{}").unwrap();
+        let occ_all = occ(r#""all""#);
+        let occ_1 = occ("1");
+        let occ_2 = occ("2");
+        let occ_3 = occ("3");
+
+        // helper level, one-based boundary: ordinal 1 selects the first
+        // occurrence only — never a zero-based or off-by-one position
+        assert!(redirect_test_holds(&occ_1, &obs(1)));
+        assert!(!redirect_test_holds(&occ_1, &obs(2)));
+        assert!(redirect_test_holds(&occ_2, &obs(2)));
+        assert!(!redirect_test_holds(&occ_2, &obs(1)));
+        // `"all"` and the omitted selector are unconstrained
+        assert!(redirect_test_holds(&occ_all, &obs(1)));
+        assert!(redirect_test_holds(&occ_all, &obs(2)));
+        assert!(redirect_test_holds(&unconstrained, &obs(1)));
+        // an ordinal beyond the observed count matches nothing
+        assert!(!redirect_test_holds(&occ_3, &obs(2)));
+
+        // matcher level, same predicate through both arms
+        let any = |tests: Vec<RedirectTest>| grammar::RedirectMatcher {
+            none: None,
+            any: Some(tests),
+            all: None,
+        };
+        let all = |tests: Vec<RedirectTest>| grammar::RedirectMatcher {
+            none: None,
+            any: None,
+            all: Some(tests),
+        };
+        let both = [obs(1), obs(2)];
+
+        // `any`: one observed occurrence satisfying the entry suffices
+        assert!(redirects_holds(&any(vec![occ_1.clone()]), &both));
+        assert!(redirects_holds(&any(vec![occ_all.clone()]), &both));
+        // `all` with an ordinal entry: the second occurrence has no
+        // satisfying entry, so the arm fails even though `any` holds
+        assert!(!redirects_holds(&all(vec![occ_1.clone()]), &both));
+        assert!(redirects_holds(
+            &all(vec![occ_1.clone(), occ_2.clone()]),
+            &both
+        ));
+        // a selected entry covers every occurrence in both arms
+        assert!(redirects_holds(&all(vec![occ_all]), &both));
+    }
+
+    // ── Issue #40: environment selectors — value + occurrence semantics ─────
+
+    fn env(name: &str, value_text: &str, ordinal: u32) -> EnvAssign {
+        EnvAssign {
+            name: name.into(),
+            text: format!("{name}={value_text}"),
+            resolvable: true,
+            span: (0, 0),
+            ordinal,
+        }
+    }
+
+    fn env_test(v: serde_json::Value) -> EnvironmentTest {
+        serde_json::from_value(v).expect("environment test fixture must parse")
+    }
+
+    /// The `EnvironmentMatcher/any` docs fixture entry: the one-of string
+    /// selector selects whole values and the name must match exactly.
+    #[test]
+    fn env_test_one_of_value_selects_whole_values() {
+        let cache = grammar::RegexCache::default();
+        let test = env_test(json!({
+            "name": "LANG", "value": { "oneOf": ["C", "C.UTF-8"] },
+            "prefix": true, "occurrence": "all"
+        }));
+        assert!(env_test_matches(&test, &env("LANG", "C.UTF-8", 1), &cache));
+        assert!(!env_test_matches(
+            &test,
+            &env("LANG", "en_US.UTF-8", 1),
+            &cache
+        ));
+        // substring values never satisfy a one-of arm
+        assert!(!env_test_matches(
+            &test,
+            &env("LANG", "xC.UTF-8x", 1),
+            &cache
+        ));
+        assert!(!env_test_matches(&test, &env("LC_ALL", "C", 1), &cache));
+    }
+
+    /// A numbered occurrence selector selects exactly that 1-based ordinal;
+    /// `"all"` selects every one; an omitted occurrence is unconstrained.
+    #[test]
+    fn env_test_occurrence_ordinal_semantics() {
+        let cache = grammar::RegexCache::default();
+        let first = env_test(json!({ "name": "LANG", "occurrence": 1 }));
+        let second = env_test(json!({ "name": "LANG", "occurrence": 2 }));
+        let every = env_test(json!({ "name": "LANG", "occurrence": "all" }));
+        let loose = env_test(json!({ "name": "LANG" }));
+        assert!(env_test_matches(&first, &env("LANG", "C", 1), &cache));
+        assert!(!env_test_matches(&first, &env("LANG", "C", 2), &cache));
+        assert!(env_test_matches(&second, &env("LANG", "C", 2), &cache));
+        assert!(env_test_matches(&every, &env("LANG", "C", 3), &cache));
+        assert!(env_test_matches(&loose, &env("LANG", "C", 7), &cache));
+    }
+
+    /// `environment.all` = ∀ assignment ∃ test (spec §6.6): every recorded
+    /// assignment must satisfy at least one entry — a stray uncovered
+    /// assignment fails the dimension (fail closed).
+    #[test]
+    fn env_all_requires_every_assignment_covered() {
+        let cache = grammar::RegexCache::default();
+        let matcher: grammar::EnvironmentMatcher = serde_json::from_value(json!({
+            "all": [{
+                "name": "LANG", "value": { "oneOf": ["C"] },
+                "prefix": true, "occurrence": "all"
+            }]
+        }))
+        .unwrap();
+        let covered = [env("LANG", "C", 1)];
+        assert!(environment_holds(&matcher, &covered, &cache));
+        let stray = [env("LANG", "C", 1), env("LD_PRELOAD", "evil.so", 2)];
+        assert!(!environment_holds(&matcher, &stray, &cache));
+    }
+
+    /// Regex arms are whole-value re2-v1 matches from the load-time cache; an
+    /// uncompiled pattern matches nothing (fail closed).
+    #[test]
+    fn env_test_regex_value_uses_compiled_cache() {
+        let cache = grammar::RegexCache::compile("^C(\\.UTF-8)?$").unwrap();
+        let test = env_test(json!({ "name": "LANG", "value": { "regex": "^C(\\.UTF-8)?$" } }));
+        assert!(env_test_matches(&test, &env("LANG", "C.UTF-8", 1), &cache));
+        assert!(!env_test_matches(&test, &env("LANG", "x", 1), &cache));
+        let cold = grammar::RegexCache::default();
+        assert!(
+            !env_test_matches(&test, &env("LANG", "C.UTF-8", 1), &cold),
+            "an uncompiled pattern cannot match"
+        );
+    }
+
+    /// Allow coverage reuses the closed entry semantics: value selector and
+    /// occurrence participate — an entry pinned to a different ordinal or
+    /// value never covers the assignment (AllowCoverageMissing).
+    #[test]
+    fn env_test_drives_allow_coverage() {
+        let cache = grammar::RegexCache::default();
+        let entries = serde_json::from_value::<Vec<EnvironmentTest>>(json!([
+            { "name": "LANG", "value": { "oneOf": ["C"] }, "prefix": true, "occurrence": "all" }
+        ]))
+        .unwrap();
+        let assign = env("LANG", "C.UTF-8", 1);
+        assert!(
+            !entries.iter().any(|t| env_test_matches(t, &assign, &cache)),
+            "a C-only one-of never covers the C.UTF-8 value"
+        );
+        let ordinal = serde_json::from_value::<Vec<EnvironmentTest>>(json!([
+            { "name": "LANG", "occurrence": 2 }
+        ]))
+        .unwrap();
+        assert!(
+            !ordinal.iter().any(|t| env_test_matches(t, &assign, &cache)),
+            "an ordinal-2 entry never covers the first assignment"
+        );
+    }
+
+    // ── Nested-part selectors (issue #41) ────────────────────────────────────
+
+    use crate::checker::grammar::{NESTED_PROFILE_NONE, NestedPartTest, Relation};
+
+    fn nested_part_result() -> NestedResult {
+        NestedResult {
+            part_id: 1,
+            relation: Relation::AnalyzerCommand,
+            relation_ordinal: 2,
+            // execution metadata: observable in evidence, not selectable
+            executable: Some("rm".into()),
+            profile_id: Some("rm-safe".into()),
+            analyzer: Some("xargs-v1"),
+            state: EvidenceState::Complete,
+            verdict: VerdictKind::Ask,
+        }
+    }
+
+    fn selector(fields: serde_json::Value) -> NestedPartTest {
+        serde_json::from_value(fields).unwrap()
+    }
+
+    /// Every closed selector dimension agrees with the nested evidence, and
+    /// each mismatch arm blocks the entry (fail-closed per dimension).
+    #[test]
+    fn nested_test_matches_every_closed_selector() {
+        let n = nested_part_result();
+        // the full public selector matches (docs NestedPartPolicy/complete
+        // shape, values fitted to this evidence)
+        assert!(nested_test(
+            &selector(json!({
+                "relation": "analyzer-command", "occurrence": 2,
+                "profile": "rm-safe", "classification": "complete", "verdict": "ask"
+            })),
+            &n
+        ));
+        // each selector agrees alone
+        assert!(nested_test(
+            &selector(json!({ "relation": "analyzer-command" })),
+            &n
+        ));
+        assert!(nested_test(&selector(json!({ "occurrence": "all" })), &n));
+        assert!(nested_test(&selector(json!({ "profile": "rm-safe" })), &n));
+        assert!(nested_test(
+            &selector(json!({ "classification": "complete" })),
+            &n
+        ));
+        assert!(nested_test(&selector(json!({ "verdict": "ask" })), &n));
+        // mismatch arms block
+        assert!(!nested_test(&selector(json!({ "relation": "chain" })), &n));
+        assert!(!nested_test(&selector(json!({ "occurrence": 1 })), &n));
+        assert!(!nested_test(
+            &selector(json!({ "profile": "rm-risky" })),
+            &n
+        ));
+        assert!(!nested_test(
+            &selector(json!({ "classification": "opaque" })),
+            &n
+        ));
+        assert!(!nested_test(&selector(json!({ "verdict": "deny" })), &n));
+    }
+
+    /// The literal `none` profile selects parts with no selected profile and
+    /// never a profile literally named `none`.
+    #[test]
+    fn nested_test_profile_none_selects_unprofiled_parts() {
+        let profiled = nested_part_result();
+        let mut unprofiled = nested_part_result();
+        unprofiled.profile_id = None;
+        let none = selector(json!({ "profile": NESTED_PROFILE_NONE }));
+        assert!(nested_test(&none, &unprofiled));
+        assert!(!nested_test(&none, &profiled));
+        // a part selected into a profile id literally spelled `none` is
+        // covered by no profile selector at all: the wire value `none`
+        // always reads as the none-selector (reserved reading)
+        let mut literal_named = nested_part_result();
+        literal_named.profile_id = Some(NESTED_PROFILE_NONE.into());
+        assert!(!nested_test(&none, &literal_named));
+    }
+
+    /// Matcher arm semantics: `none` requires an empty nested list, and
+    /// `any` fires when at least one entry matches the evidence.
+    #[test]
+    fn nested_matcher_holds_none_and_any() {
+        let n = nested_part_result();
+
+        let none_matcher: grammar::NestedPartsMatcher =
+            serde_json::from_value(json!({ "none": true })).unwrap();
+        assert!(nested_matcher_holds(&none_matcher, &[]));
+        assert!(!nested_matcher_holds(
+            &none_matcher,
+            std::slice::from_ref(&n)
+        ));
+
+        let any_matcher: grammar::NestedPartsMatcher = serde_json::from_value(json!({ "any": [
+                { "relation": "pipeline" }, { "relation": "analyzer-command" }
+            ] }))
+        .unwrap();
+        assert!(nested_matcher_holds(&any_matcher, std::slice::from_ref(&n)));
+        let any_other: grammar::NestedPartsMatcher = serde_json::from_value(json!({ "any": [
+                { "relation": "pipeline" }, { "relation": "wrapper" }
+            ] }))
+        .unwrap();
+        assert!(!nested_matcher_holds(&any_other, &[n]));
     }
 }

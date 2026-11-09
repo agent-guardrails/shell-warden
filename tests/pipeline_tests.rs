@@ -283,6 +283,141 @@ fn environment_assignment_prevents_allow() {
     assert_eq!(v.verdict, VerdictKind::Ask);
 }
 
+// ── Issue #40: environment selector conformance (docs fixtures) ─────────────
+
+/// `EnvironmentMatcher/any.json`: a deny test carries the one-of string-value
+/// selector, the prefix flag, and the occurrence; any matching assignment
+/// denies, non-matching values fall through to the default.
+#[test]
+fn environment_any_value_selector_denies_matching_assignment() {
+    const CFG: &str = r#"{  "version": 2,
+  "defaults": { "action": "ask", "redirectPolicy": "no-redirects" },
+  "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
+  "profiles": [
+    {
+      "id": "git", "executables": ["git"],
+      "options": {},
+      "rules": [
+        {
+          "id": "git/deny-env", "action": "deny", "message": "no pinned env overrides",
+          "match": {
+            "classification": "complete",
+            "environment": { "any": [
+              { "name": "GIT_DIR", "value": { "oneOf": ["/tmp/repo"] }, "prefix": true, "occurrence": "all" }
+            ] }
+          }
+        }
+      ]
+    }
+  ]
+}"#;
+    assert_eq!(
+        run(CFG, "GIT_DIR=/tmp/repo git status").verdict,
+        VerdictKind::Deny
+    );
+    assert_eq!(
+        run(CFG, "GIT_DIR=/elsewhere git status").verdict,
+        VerdictKind::Ask,
+        "a non-listed value never satisfies the one-of selector"
+    );
+    assert_eq!(
+        run(CFG, "GIT_DIR=/tmp/repoX git status").verdict,
+        VerdictKind::Ask,
+        "one-of matches whole values only"
+    );
+}
+
+/// `EnvironmentPolicy/complete.json` through an allow rule: `occurrence`-with
+/// `prefix` and the one-of value selector cover the assignment, so the allow
+/// votes; an uncovered value blocks the vote (fail closed, no synthesized
+/// coverage).
+#[test]
+fn allow_environment_coverage_by_selector_and_occurrence() {
+    const CFG: &str = r#"{  "version": 2,
+  "defaults": { "action": "ask", "redirectPolicy": "no-redirects" },
+  "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
+  "profiles": [
+    {
+      "id": "sed",
+      "executables": ["sed"],
+      "options": {
+        "noPrint": { "aliases": ["-n"], "arity": 0 },
+        "extendedRegexp": { "aliases": ["-E"], "arity": 0 }
+      },
+      "analyzer": "sed-v1",
+      "rules": [
+        {
+          "id": "sed/allow-read",
+          "action": "allow",
+          "match": {
+            "classification": "complete",
+            "arguments": { "exact": ["s/a/b/", "file"] },
+            "options": { "allowed": [{ "option": "extendedRegexp", "required": true, "repeatable": false }] },
+            "environment": { "all": [
+              { "name": "LANG", "value": { "oneOf": ["C", "C.UTF-8"] }, "prefix": true, "occurrence": "all" }
+            ] },
+            "paths": { "none": true },
+            "facts": { "all": [
+              { "analyzer": "sed-v1", "version": "1", "name": "executionPrimitive", "occurrence": "all", "value": { "exact": "readOnly" } },
+              { "analyzer": "sed-v1", "version": "1", "name": "programForm", "occurrence": "all", "value": { "exact": "positional" } }
+            ] },
+            "nestedParts": { "none": true }
+          }
+        }
+      ]
+    }
+  ]
+}"#;
+    assert_eq!(
+        run(CFG, "LANG=C.UTF-8 sed -E s/a/b/ file").verdict,
+        VerdictKind::Allow,
+        "the LANG=C.UTF-8 assignment is covered by the complete policy"
+    );
+    assert_eq!(
+        run(CFG, "LANG=en_US.UTF-8 sed -E s/a/b/ file").verdict,
+        VerdictKind::Ask,
+        "an uncovered assignment blocks the allow vote"
+    );
+    assert_eq!(
+        run(CFG, "sed -E s/a/b/ file").verdict,
+        VerdictKind::Allow,
+        "no assignment: the all-form coverage is vacuously satisfied"
+    );
+}
+
+/// The authoritative `EnvironmentPolicy/missing-occurrence.json` fixture is
+/// rejected at config load — no coverage is synthesized from omitted
+/// schema-mandated dimensions.
+#[test]
+fn allow_environment_missing_occurrence_fails_config_load() {
+    const CFG: &str = r#"{  "version": 2,
+  "defaults": { "action": "ask", "redirectPolicy": "no-redirects" },
+  "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
+  "profiles": [
+    {
+      "id": "sed", "executables": ["sed"], "options": {}, "analyzer": "sed-v1",
+      "rules": [
+        {
+          "id": "sed/allow-read", "action": "allow",
+          "match": {
+            "classification": "complete",
+            "arguments": { "exact": ["s/a/b/", "file"] },
+            "options": { "none": true },
+            "environment": { "all": [{ "name": "LANG", "prefix": true }] },
+            "paths": { "none": true }, "facts": { "none": true }, "nestedParts": { "none": true }
+          }
+        }
+      ]
+    }
+  ]
+}"#;
+    let err = load_str(CFG).expect_err("missing-occurrence allow env must fail config load");
+    assert!(
+        err.contains("require prefix and occurrence"),
+        "the error must name the missing dimensions: {err}"
+    );
+}
+
 #[test]
 fn chain_reduces_both_parts() {
     let v = run(SKETCH, "git status; git push --force");
@@ -321,6 +456,92 @@ fn sed_program_form_fact_emitted() {
     // expression-form scripts carry the same allow without stdin writes
     let with_e = run(SED_XARGS, "sed -e s/a/b/ f.txt");
     assert_eq!(with_e.verdict, VerdictKind::Ask); // exact positional list differs
+}
+
+// ── Issue #43: versioned analyzerFact path coordinates ──────────────────────
+
+/// sed profile declaring the versioned `analyzerFact` path coordinate in
+/// `pathSources`; the allow rule's `paths` policy and coordinate version are
+/// parameters.
+fn sed_fact_path_config(paths: &str, coordinate_version: &str) -> String {
+    format!(
+        r#"{{
+  "version": 2,
+  "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
+  "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
+  "profiles": [{{
+    "id": "sed",
+    "executables": ["sed"],
+    "options": {{
+      "inPlace": {{ "aliases": ["-i"], "arity": 0 }},
+      "expression": {{ "aliases": ["-e"], "arity": 1 }}
+    }},
+    "analyzer": "sed-v1",
+    "pathSources": [
+      {{ "analyzerFact": {{ "analyzer": "sed-v1", "version": "{coordinate_version}", "name": "programForm", "occurrence": "all" }} }}
+    ],
+    "rules": [
+      {{
+        "id": "sed/allow-read",
+        "action": "allow",
+        "match": {{
+          "classification": "complete",
+          "arguments": {{ "exact": ["s/a/b/", "f.txt"] }},
+          "options": {{ "none": true }},
+          "environment": {{ "none": true }},
+          "paths": {paths},
+          "facts": {{ "all": [
+            {{ "analyzer": "sed-v1", "version": "1", "name": "executionPrimitive", "occurrence": "all", "value": {{ "exact": "readOnly" }} }},
+            {{ "analyzer": "sed-v1", "version": "1", "name": "programForm", "occurrence": "all", "value": {{ "exact": "positional" }} }}
+          ] }},
+          "nestedParts": {{ "none": true }}
+        }}
+      }}
+    ]
+  }}]
+}}"#
+    )
+}
+
+/// The allow rule covers the emitted analyzerFact coordinate: same closed
+/// arm, catalog version, fact name, and occurrence. The fact value
+/// `positional` resolves lexically against the command cwd (`/repo` in the
+/// test letters), so the exact policy names `/repo/positional`.
+fn covered_fact_path() -> String {
+    r#"{ "all": [
+        { "coordinate": { "analyzerFact": { "analyzer": "sed-v1", "version": "1", "name": "programForm", "occurrence": "all" } }, "exact": "/repo/positional" }
+    ] }"#
+    .to_string()
+}
+
+#[test]
+fn analyzer_fact_path_coordinate_covers_emitted_fact() {
+    // the versioned coordinate selects the emitted programForm fact and its
+    // exact lexical policy matches the fact value, so the allow stands
+    let cfg = sed_fact_path_config(&covered_fact_path(), "1");
+    let v = run(&cfg, "sed s/a/b/ f.txt");
+    assert_eq!(v.verdict, VerdictKind::Allow);
+}
+
+#[test]
+fn analyzer_fact_path_coordinate_uncovered_fails_closed() {
+    // the declared coordinate still emits, but the allow rule covers no
+    // paths: missing coverage must downgrade to ask, never allow
+    let cfg = sed_fact_path_config(r#"{ "none": true }"#, "1");
+    let v = run(&cfg, "sed s/a/b/ f.txt");
+    assert_eq!(v.verdict, VerdictKind::Ask);
+}
+
+#[test]
+fn analyzer_fact_path_coordinate_wrong_version_config_rejected() {
+    let cfg = sed_fact_path_config(&covered_fact_path(), "2");
+    let Err(err) = load_str(&cfg) else {
+        panic!("stale coordinate version must reject at config load");
+    };
+    assert!(
+        err.contains("config invalid"),
+        "stale coordinate version must fail during config parsing: {err}"
+    );
 }
 
 #[test]
@@ -1679,7 +1900,10 @@ fn environment_coordinate_produces_selected_occurrences() {
           "match": {{
             "classification": "complete", "arguments": {{ "exact": [] }},
             "options": {{ "none": true }},
-            "environment": {{ "all": [{{ "name": "A" }}, {{ "name": "B" }}] }},
+            "environment": {{ "all": [
+              {{ "name": "A", "prefix": true, "occurrence": "all" }},
+              {{ "name": "B", "prefix": true, "occurrence": "all" }}
+            ] }},
             "paths": {{ "none": true }},
             "facts": {{ "none": true }}, "nestedParts": {{ "none": true }}
           }},
@@ -1795,4 +2019,226 @@ fn binary_option_probes_exit_with_verdicts() {
         );
     }
     let _ = std::fs::remove_file(&config_path);
+}
+
+// ── Issue #41: nested-part selectors on the public wire ─────────────────────
+//
+// The only parent shape carrying nested evidence is `xargs`: the xargs-v1
+// analyzer relabels its operand child as `analyzer-command` with a
+// per-child reduced verdict. Substitution and wrapper children join the
+// aggregate as siblings, so xargs probes are the honest end-to-end
+// exercise of the nested-part selectors.
+
+/// The authoritative wrapper control: the docs `Config/minimal.json` valid
+/// fixture loads and its echo allow fires on the real pipeline.
+#[test]
+fn config_v2_minimal_fixture_control() {
+    const MINIMAL: &str = r#"{
+  "version": 2,
+  "defaults": {
+    "action": "ask",
+    "redirectPolicy": "no-redirects"
+  },
+  "redirectPolicies": {
+    "no-redirects": {
+      "redirects": { "none": true },
+      "paths": { "none": true }
+    }
+  },
+  "profiles": [
+    {
+      "id": "echo",
+      "executables": ["echo"],
+      "options": {},
+      "analyzer": "generic-v1",
+      "rules": [
+        {
+          "id": "echo/allow-empty",
+          "action": "allow",
+          "match": {
+            "classification": "complete",
+            "arguments": { "exact": [] },
+            "options": { "none": true },
+            "environment": { "none": true },
+            "paths": { "none": true },
+            "facts": { "none": true },
+            "nestedParts": { "none": true }
+          }
+        }
+      ]
+    }
+  ]
+}"#;
+    assert_eq!(run(MINIMAL, "echo").verdict, VerdictKind::Allow);
+}
+
+/// Probe config: the xargs profile carries one allow rule whose
+/// `nestedParts.all` coverage holds the authoritative
+/// `NestedPartPolicy/complete.json` body verbatim, and one ask rule whose
+/// `nestedParts.any` holds `probe_entry` verbatim with message
+/// `PROBE:<name>`. The `rm-safe` profile is declared for the closed
+/// reference cross-check; its rules stay empty so child verdicts reduce to
+/// the default ask and every probe verdict is attributable to the parent's
+/// nested matcher alone.
+fn nested_probe_config(probe_name: &str, probe_entry: &str) -> String {
+    format!(
+        r#"{{
+  "version": 2,
+  "defaults": {{ "action": "ask", "message": "No approved command profile matched.", "redirectPolicy": "no-redirects" }},
+  "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
+  "profiles": [
+    {{
+      "id": "xargs",
+      "executables": ["xargs"],
+      "options": {{}},
+      "analyzer": "xargs-v1",
+      "rules": [
+        {{
+          "id": "xargs/allow-probe", "action": "allow",
+          "match": {{
+            "classification": "complete",
+            "arguments": {{ "exact": [] }},
+            "options": {{ "none": true }}, "environment": {{ "none": true }},
+            "paths": {{ "none": true }}, "facts": {{ "none": true }},
+            "nestedParts": {{ "all": [
+              {{ "relation": "analyzer-command", "occurrence": 1, "profile": "rm-safe",
+                 "classification": "complete", "verdict": "ask" }}
+            ] }}
+          }}
+        }},
+        {{
+          "id": "probe/{probe_name}", "action": "ask",
+          "message": "PROBE:{probe_name}",
+          "match": {{ "nestedParts": {{ "any": [{probe_entry}] }} }}
+        }}
+      ]
+    }},
+    {{
+      "id": "rm-safe",
+      "executables": ["rm"],
+      "options": {{}},
+      "analyzer": "generic-v1",
+      "rules": []
+    }}
+  ]
+}}"#
+    )
+}
+
+/// The authoritative rm-safe arm fitted to the engine's xargs child:
+/// analyzer-command relation, ordinal 1, selected profile, opaque evidence,
+/// reduced ask verdict (the rm-safe profile declares no rules).
+const RM_SAFE_ENTRY: &str = r#"{ "relation": "analyzer-command", "occurrence": 1,
+    "profile": "rm-safe", "classification": "opaque", "verdict": "ask" }"#;
+
+/// The literal-none arm for unprofiled xargs children.
+const UNPROFILED_ENTRY: &str = r#"{ "relation": "analyzer-command", "occurrence": 1,
+    "profile": "none", "classification": "opaque", "verdict": "ask" }"#;
+
+fn probe(raw: &str, name: &str, entry: &str) -> Verdict {
+    run(&nested_probe_config(name, entry), raw)
+}
+
+fn probe_message_contains(v: &Verdict, needle: &str) -> bool {
+    v.message.as_deref().unwrap_or_default().contains(needle)
+}
+
+/// The authoritative fixtures pass through the real loader and evaluate on
+/// the real pipeline: the `NestedPartPolicy/complete.json` body sits
+/// verbatim in the allow rule's coverage (parse acceptance, closed
+/// references resolve), and the `NestedPartsMatcher/any` shape fires on
+/// the matching parent part.
+#[test]
+fn nested_part_fixtures_load_and_evaluate() {
+    let v = probe("xargs rm -rf /", "rm-safe-child", RM_SAFE_ENTRY);
+    assert_eq!(v.verdict, VerdictKind::Ask);
+    assert!(
+        probe_message_contains(&v, "PROBE:rm-safe-child"),
+        "the full rm-safe selector must fire on the matching child: {:?}",
+        v.message
+    );
+}
+
+/// Fail-closed by dimension: every mismatching selector keeps the probe
+/// rule silent, so only the bare default ask survives.
+#[test]
+fn nested_part_mismatched_selectors_stay_silent() {
+    // verdict mismatch: the child reduces to ask, the selector demands deny
+    let deny_verdict = RM_SAFE_ENTRY.replace(r#""verdict": "ask""#, r#""verdict": "deny""#);
+    let v = probe("xargs rm -rf /", "deny-verdict", &deny_verdict);
+    assert_eq!(v.verdict, VerdictKind::Ask);
+    assert!(!probe_message_contains(&v, "PROBE:"));
+
+    // profile mismatch: the rm child is selected into rm-safe, not none
+    let v = probe("xargs rm -rf /", "none-on-profiled", UNPROFILED_ENTRY);
+    assert_eq!(v.verdict, VerdictKind::Ask);
+    assert!(!probe_message_contains(&v, "PROBE:"));
+
+    // relation mismatch: the xargs child is analyzer-command, not chain
+    let chain = RM_SAFE_ENTRY.replace(
+        r#""relation": "analyzer-command""#,
+        r#""relation": "chain""#,
+    );
+    let v = probe("xargs rm -rf /", "chain-relation", &chain);
+    assert_eq!(v.verdict, VerdictKind::Ask);
+    assert!(!probe_message_contains(&v, "PROBE:"));
+
+    // classification mismatch: the xargs child is opaque, never complete
+    let complete = RM_SAFE_ENTRY.replace(
+        r#""classification": "opaque""#,
+        r#""classification": "complete""#,
+    );
+    let v = probe("xargs rm -rf /", "complete-classification", &complete);
+    assert_eq!(v.verdict, VerdictKind::Ask);
+    assert!(!probe_message_contains(&v, "PROBE:"));
+}
+
+/// The literal `none` profile covers unprofiled xargs children, and the
+/// occurrence ordinal is exact: a selector for ordinal 2 stays silent when
+/// the child carries ordinal 1.
+#[test]
+fn nested_part_none_profile_and_ordinal() {
+    let v = probe("xargs cat notes", "none-child", UNPROFILED_ENTRY);
+    assert_eq!(v.verdict, VerdictKind::Ask);
+    assert!(
+        probe_message_contains(&v, "PROBE:none-child"),
+        "the none profile must cover the unprofiled child: {:?}",
+        v.message
+    );
+
+    let second = UNPROFILED_ENTRY.replace(r#""occurrence": 1"#, r#""occurrence": 2"#);
+    let v = probe("xargs cat notes", "second-ordinal", &second);
+    assert_eq!(v.verdict, VerdictKind::Ask);
+    assert!(
+        !probe_message_contains(&v, "PROBE:"),
+        "ordinal 2 must not match the first child: {:?}",
+        v.message
+    );
+}
+
+/// The authoritative invalid fixture (docs
+/// `invalid/NestedPartPolicy/nested-serde-form.json`) — a nested
+/// externally tagged relation — fails during config parsing, before any
+/// evaluation.
+#[test]
+fn nested_serde_fixture_rejected_before_evaluation() {
+    let invalid = nested_probe_config(
+        "nested-serde",
+        r#"{ "relation": { "analyzer-command": true }, "occurrence": 1,
+             "profile": "rm-safe", "classification": "complete", "verdict": "ask" }"#,
+    );
+    let mut path = std::env::temp_dir();
+    path.push(format!(
+        "shell-warden-41-nested-serde-{}.jsonc",
+        std::process::id()
+    ));
+    std::fs::write(&path, &invalid).expect("probe fixture must be writable");
+    let err = load_path(&path)
+        .err()
+        .unwrap_or_else(|| panic!("nested-serde-form probe must not parse"));
+    assert!(
+        err.contains("config invalid"),
+        "must fail during config parsing, before evaluation: {err}"
+    );
+    let _ = std::fs::remove_file(&path);
 }

@@ -117,6 +117,7 @@ fn extract_raw(
                     text: tok.text.clone(),
                     resolvable: tok.resolvable,
                     span: tok.span,
+                    ordinal: (assigns.len() + 1) as u32,
                 });
                 continue;
             }
@@ -196,6 +197,7 @@ fn split_heredoc_like(
                 text: tok.text.clone(),
                 resolvable: tok.resolvable,
                 span: tok.span,
+                ordinal: (assigns.len() + 1) as u32,
             });
             continue;
         }
@@ -257,12 +259,16 @@ fn push_part(
     (id, truncated)
 }
 
+/// One-based per-relation occurrence ordinal (design §Selector semantics:
+/// occurrence ordinals are one-based): the first part emitted with this
+/// (relation, parent) pair carries ordinal 1.
 fn next_ordinal(graph: &CommandEvidence, relation: Relation, parent: Option<usize>) -> u32 {
     graph
         .parts
         .iter()
         .filter(|p| p.relation == relation && p.parent == parent)
         .count() as u32
+        + 1
 }
 
 fn is_assignment(w: &str) -> bool {
@@ -398,6 +404,7 @@ fn emit_sh_children(
                     text: tok.text.clone(),
                     resolvable: tok.resolvable,
                     span: tok.span,
+                    ordinal: (assigns.len() + 1) as u32,
                 });
                 continue;
             }
