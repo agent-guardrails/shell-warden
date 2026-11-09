@@ -458,6 +458,92 @@ fn sed_program_form_fact_emitted() {
     assert_eq!(with_e.verdict, VerdictKind::Ask); // exact positional list differs
 }
 
+// ── Issue #43: versioned analyzerFact path coordinates ──────────────────────
+
+/// sed profile declaring the versioned `analyzerFact` path coordinate in
+/// `pathSources`; the allow rule's `paths` policy and coordinate version are
+/// parameters.
+fn sed_fact_path_config(paths: &str, coordinate_version: &str) -> String {
+    format!(
+        r#"{{
+  "version": 2,
+  "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
+  "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
+  "profiles": [{{
+    "id": "sed",
+    "executables": ["sed"],
+    "options": {{
+      "inPlace": {{ "aliases": ["-i"], "arity": 0 }},
+      "expression": {{ "aliases": ["-e"], "arity": 1 }}
+    }},
+    "analyzer": "sed-v1",
+    "pathSources": [
+      {{ "analyzerFact": {{ "analyzer": "sed-v1", "version": "{coordinate_version}", "name": "programForm", "occurrence": "all" }} }}
+    ],
+    "rules": [
+      {{
+        "id": "sed/allow-read",
+        "action": "allow",
+        "match": {{
+          "classification": "complete",
+          "arguments": {{ "exact": ["s/a/b/", "f.txt"] }},
+          "options": {{ "none": true }},
+          "environment": {{ "none": true }},
+          "paths": {paths},
+          "facts": {{ "all": [
+            {{ "analyzer": "sed-v1", "version": "1", "name": "executionPrimitive", "occurrence": "all", "value": {{ "exact": "readOnly" }} }},
+            {{ "analyzer": "sed-v1", "version": "1", "name": "programForm", "occurrence": "all", "value": {{ "exact": "positional" }} }}
+          ] }},
+          "nestedParts": {{ "none": true }}
+        }}
+      }}
+    ]
+  }}]
+}}"#
+    )
+}
+
+/// The allow rule covers the emitted analyzerFact coordinate: same closed
+/// arm, catalog version, fact name, and occurrence. The fact value
+/// `positional` resolves lexically against the command cwd (`/repo` in the
+/// test letters), so the exact policy names `/repo/positional`.
+fn covered_fact_path() -> String {
+    r#"{ "all": [
+        { "coordinate": { "analyzerFact": { "analyzer": "sed-v1", "version": "1", "name": "programForm", "occurrence": "all" } }, "exact": "/repo/positional" }
+    ] }"#
+    .to_string()
+}
+
+#[test]
+fn analyzer_fact_path_coordinate_covers_emitted_fact() {
+    // the versioned coordinate selects the emitted programForm fact and its
+    // exact lexical policy matches the fact value, so the allow stands
+    let cfg = sed_fact_path_config(&covered_fact_path(), "1");
+    let v = run(&cfg, "sed s/a/b/ f.txt");
+    assert_eq!(v.verdict, VerdictKind::Allow);
+}
+
+#[test]
+fn analyzer_fact_path_coordinate_uncovered_fails_closed() {
+    // the declared coordinate still emits, but the allow rule covers no
+    // paths: missing coverage must downgrade to ask, never allow
+    let cfg = sed_fact_path_config(r#"{ "none": true }"#, "1");
+    let v = run(&cfg, "sed s/a/b/ f.txt");
+    assert_eq!(v.verdict, VerdictKind::Ask);
+}
+
+#[test]
+fn analyzer_fact_path_coordinate_wrong_version_config_rejected() {
+    let cfg = sed_fact_path_config(&covered_fact_path(), "2");
+    let Err(err) = load_str(&cfg) else {
+        panic!("stale coordinate version must reject at config load");
+    };
+    assert!(
+        err.contains("config invalid"),
+        "stale coordinate version must fail during config parsing: {err}"
+    );
+}
+
 #[test]
 fn xargs_nested_rm_denied() {
     // xargs-v1 emits the nested rm analyzerCommand part; the rm profile deny

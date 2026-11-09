@@ -355,12 +355,15 @@ pub struct EnvironmentCoordinate {
     pub occurrence: Option<Occurrence>,
 }
 
-/// Analyzer-fact coordinate selector (closed).
+/// Analyzer-fact coordinate selector (closed). `version` is schema-required
+/// (docs `AnalyzerFactCoordinate`) and pins the closed catalog version of the
+/// selected analyzer; validation rejects any other version at config load.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct FactCoordinate {
     #[serde(default)]
     pub analyzer: Option<String>,
+    pub version: String,
     pub name: String,
     #[serde(default)]
     pub occurrence: Option<Occurrence>,
@@ -2512,6 +2515,78 @@ mod tests {
         assert!(
             serde_json::from_value::<EnvironmentTest>(json!({ "name": "LANG", "match": "prefix" }))
                 .is_err()
+        );
+    }
+
+    // ── FactCoordinate (analyzerFact path coordinate) ────────────────────────
+
+    /// The canonical analyzer-fact coordinate (docs fixture
+    /// `PathCoordinateSelector/all-arms.json`) parses with the
+    /// schema-required `version` string.
+    #[test]
+    fn fact_coordinate_parses_with_version() {
+        let fc: FactCoordinate = serde_json::from_value(json!({
+            "analyzer": "sed-v1",
+            "version": "1",
+            "name": "executionPrimitive",
+            "occurrence": "all"
+        }))
+        .unwrap();
+        assert_eq!(fc.analyzer.as_deref(), Some("sed-v1"));
+        assert_eq!(fc.version, "1");
+        assert_eq!(fc.name, "executionPrimitive");
+        assert!(fc.occurrence.is_some());
+
+        // `analyzer` stays optional at the wire level and occurrence may be a
+        // one-based ordinal; `version` never is
+        let fc: FactCoordinate = serde_json::from_value(
+            json!({ "version": "1", "name": "programForm", "occurrence": 2 }),
+        )
+        .unwrap();
+        assert!(fc.analyzer.is_none() && fc.occurrence.is_some());
+    }
+
+    /// `version` is required on the wire: a coordinate without it fails at
+    /// parse, not at some later validation stage.
+    #[test]
+    fn fact_coordinate_missing_version_rejected() {
+        assert!(
+            serde_json::from_value::<FactCoordinate>(json!({
+                "analyzer": "sed-v1",
+                "name": "executionPrimitive"
+            }))
+            .is_err(),
+            "analyzerFact coordinate without version must not parse"
+        );
+    }
+
+    /// `version` is a string — a numeric version must not coerce (docs
+    /// FactPolicy type-coercion stance applies to the coordinate alike).
+    #[test]
+    fn fact_coordinate_numeric_version_rejected() {
+        assert!(
+            serde_json::from_value::<FactCoordinate>(json!({
+                "analyzer": "sed-v1",
+                "version": 1,
+                "name": "executionPrimitive"
+            }))
+            .is_err(),
+            "numeric analyzerFact version must not parse"
+        );
+    }
+
+    /// Unknown keys fail closed on the coordinate payload: no value selector
+    /// or any other arm smuggles in here.
+    #[test]
+    fn fact_coordinate_unknown_key_rejected() {
+        assert!(
+            serde_json::from_value::<FactCoordinate>(json!({
+                "version": "1",
+                "name": "executionPrimitive",
+                "value": { "exact": "inPlace" }
+            }))
+            .is_err(),
+            "analyzerFact coordinate must not carry extra keys"
         );
     }
 }
