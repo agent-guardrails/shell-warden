@@ -12,6 +12,16 @@ members = ["sw-attrs"]
 sw-attrs = { path = "sw-attrs" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# `re2-v1` dialect for the closed `regex` string-value selectors (ADR/design
+# §Action-sensitive matching): the `regex` crate is an RE2-compatible engine —
+# UTF-8 semantics, case-sensitive by default, no backreferences or look-around,
+# linear time. Patterns are compiled once at config load
+# (shell-warden pin: 1.13.x / lockfile) and match whole values only.
+regex = "1.13"
+# AST-level `re2-v1` dialect validation: the flags rejection walks the parsed
+# AST (`regex-syntax` already backs `regex`), so hand-scanner ambiguity around
+# character classes, POSIX classes and escapes is impossible.
+regex-syntax = "0.8"
 
 # The release artifact: the one-shot letter checker (02-letter-verdict, ADR-0016).
 # Spawned per check by the hook; no server, no long-lived process.

@@ -19,7 +19,7 @@
 
 use super::config::Config;
 use super::evidence::{ArgToken, EvidenceState, Part, reason};
-use super::grammar;
+
 use super::grammar::{
     AnalyzerId, OverrideMode, PathCoverage, Profile, RedirectCoverage, RedirectEntry,
     RedirectPolicy, RedirectPolicyOverride, Relation, Rule, VerdictKind,
@@ -313,6 +313,8 @@ fn evaluate_part_rules(
         canonical,
         path_coords: &path_coords,
         nested: &nested,
+        cwd,
+        regexes: &config.regexes,
     };
 
     // every matching rule is evaluated and emits its vote (monotonicity)
@@ -444,34 +446,29 @@ fn path_coordinates(
         };
     for sel in &prof.path_sources {
         if let Some(pc) = &sel.argument {
-            match pc {
-                grammar::PositionalCoordinate::All { all: false } => {}
-                grammar::PositionalCoordinate::N {
-                    index,
-                    remainder: false,
-                } if idx_ok(*index as usize, parsed.positionals.len()) => {
-                    let tok = &parsed.positionals[*index as usize];
-                    push(
-                        PathSourceTag::Argument { index: *index },
-                        tok.text.clone(),
-                        tok.resolvable,
-                        &mut out,
-                    );
-                }
-                grammar::PositionalCoordinate::N {
-                    remainder: true, ..
-                }
-                | grammar::PositionalCoordinate::All { all: true } => {
-                    for (k, tok) in parsed.positionals.iter().enumerate() {
-                        push(
-                            PathSourceTag::Argument { index: k as u32 },
-                            tok.text.clone(),
-                            tok.resolvable,
-                            &mut out,
-                        );
-                    }
-                }
-                _ => {}
+            // `{index}` selects that one positional; `{index, remainder: true}`
+            // selects the positionals from the index onwards (inclusive).
+            let (start, remainder) = (pc.index, pc.remainder);
+            let positionals: Vec<(u32, &ArgToken)> = if remainder {
+                parsed
+                    .positionals
+                    .iter()
+                    .enumerate()
+                    .filter(|(k, _)| *k as u32 >= start)
+                    .map(|(k, t)| (k as u32, t))
+                    .collect()
+            } else if (start as usize) < parsed.positionals.len() {
+                vec![(start, &parsed.positionals[start as usize])]
+            } else {
+                Vec::new()
+            };
+            for (k, tok) in positionals {
+                push(
+                    PathSourceTag::Argument { index: k },
+                    tok.text.clone(),
+                    tok.resolvable,
+                    &mut out,
+                );
             }
         }
         if let Some(ov) = &sel.option_value {
@@ -484,10 +481,9 @@ fn path_coordinates(
                 {
                     continue;
                 }
+                // `valueOrdinal` selects exactly that 1-based value ordinal
                 for (k, v) in occ.values.iter().enumerate() {
-                    if let Some(vs) = &ov.value_ordinal
-                        && !vs.selects(k as u32 + 1)
-                    {
+                    if ov.value_ordinal != k as u32 + 1 {
                         continue;
                     }
                     push(
@@ -503,8 +499,15 @@ fn path_coordinates(
                 }
             }
         }
-        if sel.environment.is_some() {
+        // the environment coordinate selects only the occurrences it names
+        // (1-based assignment ordinals), not every assignment
+        if let Some(env) = &sel.environment {
             for (k, a) in part.assigns.iter().enumerate() {
+                if let Some(osel) = &env.occurrence
+                    && !osel.selects(k as u32 + 1)
+                {
+                    continue;
+                }
                 let value = match a.text.split_once('=') {
                     Some((_, v)) => v.to_string(),
                     None => String::new(),
@@ -543,10 +546,6 @@ fn path_coordinates(
         }
     }
     out
-}
-
-fn idx_ok(i: usize, len: usize) -> bool {
-    i < len
 }
 
 fn occurred_canonicals(parsed: &ParsedOptions) -> Vec<String> {
