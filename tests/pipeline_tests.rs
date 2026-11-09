@@ -1100,7 +1100,7 @@ fn run_checker(config_path: &std::path::Path, letter: &str) -> (i32, String, Str
 #[test]
 fn binary_rejects_trailing_config_input_with_exit_2() {
     const VALID_LETTER: &str = r#"{"version":1,"invocation":{"id":"p","sessionID":"p"},"action":"shell","commands":[{"index":0,"cwd":"/repo","raw":"git push"}]}"#;
-    const VALID_CONFIG: &str = r#"{ "version": 2, "defaults": { "action": "ask" } }"#;
+    const VALID_CONFIG: &str = r#"{ "version": 2, "defaults": { "action": "ask", "redirectPolicy": "no-redirects" }, "redirectPolicies": {}, "profiles": [] }"#;
     for (name, suffix) in [
         ("trailing second object", r#" {"x":1}"#),
         ("trailing scalar", " 42"),
@@ -1132,6 +1132,119 @@ fn binary_rejects_trailing_config_input_with_exit_2() {
     );
     assert_eq!(stderr, "");
     let _ = std::fs::remove_file(&clean);
+}
+
+// ── Required config-v2 root fields (issue 44) ───────────────────────────────
+//
+// The authoritative docs contract makes the root fields `defaults`,
+// `redirectPolicies`, and `profiles` required (Config.required) along with
+// the `defaults` members `action` and `redirectPolicy` (Defaults.required);
+// only `limits` defaulting is allowed. Omission must fail at the parse
+// boundary, before any command is evaluated. The fixtures below are the
+// docs fixtures (docs/schemas/fixtures/shell-warden.config.v2/invalid/
+// Config/fail-open-omitted-defaults.json and valid/Config/minimal.json)
+// embedded verbatim.
+
+/// The authoritative invalid fixture: every required root field except
+/// `defaults` is present, so the only fault is the fail-open omission.
+const DOCS_FAIL_OPEN_OMITTED_DEFAULTS: &str = r#"{
+  "version": 2,
+  "redirectPolicies": {
+    "no-redirects": {
+      "redirects": { "none": true },
+      "paths": { "none": true }
+    }
+  },
+  "profiles": []
+}"#;
+
+/// The authoritative minimal valid fixture: every required root field and
+/// `defaults` member present, one echo allow rule.
+const DOCS_MINIMAL_CONFIG: &str = r#"{
+  "version": 2,
+  "defaults": {
+    "action": "ask",
+    "redirectPolicy": "no-redirects"
+  },
+  "redirectPolicies": {
+    "no-redirects": {
+      "redirects": { "none": true },
+      "paths": { "none": true }
+    }
+  },
+  "profiles": [
+    {
+      "id": "echo",
+      "executables": ["echo"],
+      "options": {},
+      "analyzer": "generic-v1",
+      "rules": [
+        {
+          "id": "echo/allow-empty",
+          "action": "allow",
+          "match": {
+            "classification": "complete",
+            "arguments": { "exact": [] },
+            "options": { "none": true },
+            "environment": { "none": true },
+            "paths": { "none": true },
+            "facts": { "none": true },
+            "nestedParts": { "none": true }
+          }
+        }
+      ]
+    }
+  ]
+}"#;
+
+const ECHO_LETTER: &str = r#"{"version":1,"invocation":{"id":"p","sessionID":"p"},"action":"shell","commands":[{"index":0,"cwd":"/repo","raw":"echo"}]}"#;
+
+const PUSH_LETTER: &str = r#"{"version":1,"invocation":{"id":"p","sessionID":"p"},"action":"shell","commands":[{"index":0,"cwd":"/repo","raw":"git push"}]}"#;
+
+/// The docs `Config/fail-open-omitted-defaults` fixture must exit 2 with
+/// empty stdout through the real binary. The letter carries a real command:
+/// had the config deserialized through synthesized fail-open defaults, the
+/// command would evaluate and print a verdict on stdout — an empty stdout
+/// plus the missing-field diagnosis proves the rejection happened at the
+/// parse boundary, before command evaluation.
+#[test]
+fn binary_rejects_fail_open_omitted_defaults_before_evaluation() {
+    let path = probe_path(
+        "fail-open-omitted-defaults",
+        DOCS_FAIL_OPEN_OMITTED_DEFAULTS,
+    );
+    let (code, stdout, stderr) = run_checker(&path, PUSH_LETTER);
+    assert_eq!(code, 2, "omitted defaults must exit 2 (stderr: {stderr})");
+    assert!(
+        stdout.is_empty(),
+        "omitted defaults must never print a verdict: {stdout:?}"
+    );
+    assert!(
+        stderr.contains("config invalid: schema: missing field `defaults`"),
+        "omitted defaults must be diagnosed at the schema parse boundary: {stderr}"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// The docs minimal valid Config fixture continues to load and, through the
+/// real binary, evaluates its echo allow rule to an Allow verdict.
+#[test]
+fn minimal_docs_config_still_loads_and_evaluates() {
+    let path = probe_path("minimal-docs-config", DOCS_MINIMAL_CONFIG);
+    let cfg = load_path(&path).unwrap_or_else(|e| panic!("docs minimal config must load: {e}"));
+    assert_eq!(
+        evaluate(&cfg, &letter("echo")).verdict,
+        VerdictKind::Allow,
+        "the echo allow rule must hold"
+    );
+    let (code, stdout, stderr) = run_checker(&path, ECHO_LETTER);
+    assert_eq!(code, 0, "binary must succeed (stderr: {stderr})");
+    assert!(
+        stdout.contains("\"verdict\"") && stdout.contains("allow"),
+        "binary must produce the allow verdict on stdout: {stdout:?}"
+    );
+    assert_eq!(stderr, "");
+    let _ = std::fs::remove_file(&path);
 }
 
 #[test]

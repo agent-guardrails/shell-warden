@@ -45,13 +45,14 @@ impl VerdictKind {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct RawConfig {
     pub version: u32,
-    #[serde(default)]
+    /// Schema-required root field: omitted `defaults` is a config error, not a
+    /// fail-open default (schema `Config.required = [version, defaults,
+    /// redirectPolicies, profiles]`).
     pub defaults: Defaults,
+    /// Genuinely optional root field: absent `limits` loads engine caps.
     #[serde(default)]
     pub limits: Limits,
-    #[serde(default)]
     pub redirect_policies: std::collections::BTreeMap<String, RedirectPolicy>,
-    #[serde(default)]
     pub profiles: Vec<Profile>,
 }
 
@@ -59,28 +60,13 @@ pub struct RawConfig {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Defaults {
     /// Fixed at `ask` (never fail-open; validated in config loader).
-    #[serde(default = "default_ask")]
     pub action: VerdictKind,
+    /// Genuinely optional: absent `message` keeps the built-in text.
     #[serde(default)]
     pub message: Option<String>,
     /// Named redirect policy effective by default for every profile and allow
-    /// rule (mandatory when any allow rule exists).
-    #[serde(default)]
-    pub redirect_policy: Option<String>,
-}
-
-fn default_ask() -> VerdictKind {
-    VerdictKind::Ask
-}
-
-impl Default for Defaults {
-    fn default() -> Self {
-        Defaults {
-            action: VerdictKind::Ask,
-            message: None,
-            redirect_policy: None,
-        }
-    }
+    /// rule (schema-required member; validated in config loader).
+    pub redirect_policy: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]

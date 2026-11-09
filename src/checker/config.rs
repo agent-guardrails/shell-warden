@@ -368,30 +368,15 @@ fn validate(raw: RawConfig) -> Result<Config, String> {
     }
 
     // ── defaults.redirectPolicy ──
-    let any_allow = raw
-        .profiles
-        .iter()
-        .any(|p| p.rules.iter().any(|r| r.action == VerdictKind::Allow));
-    let defaults_redirect = raw
-        .defaults
-        .redirect_policy
-        .clone()
-        .unwrap_or_else(|| "no-redirects".to_string());
+    // Schema-required member: present in every parsed config ("no-redirects"
+    // stays built-in — it may be referenced without a declaration).
+    let defaults_redirect = raw.defaults.redirect_policy.clone();
     if defaults_redirect != "no-redirects"
         && !raw.redirect_policies.contains_key(&defaults_redirect)
     {
         return Err(format!(
             "defaults.redirectPolicy references unknown policy \"{defaults_redirect}\""
         ));
-    }
-    if any_allow {
-        // an allow rule eventually resolves the config default: the reference
-        // must exist even when omitted ("no-redirects" is built-in)
-        if raw.defaults.redirect_policy.is_none() {
-            return Err(
-                "defaults.redirectPolicy is required when an allow rule exists".to_string(),
-            );
-        }
     }
 
     // ── profiles ──
@@ -1761,7 +1746,7 @@ mod tests {
     /// tests/pipeline_tests.rs).
     #[test]
     fn trailing_json_after_first_value_rejected() {
-        const VALID: &str = r#"{ "version": 2, "defaults": { "action": "ask" } }"#;
+        const VALID: &str = r#"{ "version": 2, "defaults": { "action": "ask", "redirectPolicy": "no-redirects" }, "redirectPolicies": {}, "profiles": [] }"#;
         for (name, suffix) in [
             ("trailing second object", r#" {"x":1}"#),
             ("trailing scalar", " 42"),
@@ -1779,13 +1764,85 @@ mod tests {
         assert!(load_str(VALID).is_ok());
     }
 
+    /// Schema-required config-v2 root fields and `defaults` members must
+    /// deserialize through the parse boundary (issue 44): omission is a
+    /// schema error — "config invalid" — never a synthesized fail-open
+    /// default. Only the genuinely optional `limits` root field and the
+    /// optional `defaults.message` member keep defaulting.
+    #[test]
+    fn required_config_fields_reject_omission_at_the_parse_boundary() {
+        assert!(
+            load_str(
+                r#"{ "version": 2, "defaults": { "action": "ask", "redirectPolicy": "no-redirects" }, "redirectPolicies": {}, "profiles": [] }"#,
+            )
+            .is_ok(),
+            "the control with every required field present must load"
+        );
+        for (name, config, missing) in [
+            (
+                "omitted defaults",
+                r#"{ "version": 2, "redirectPolicies": {}, "profiles": [] }"#,
+                "defaults",
+            ),
+            (
+                "omitted redirectPolicies",
+                r#"{ "version": 2, "defaults": { "action": "ask", "redirectPolicy": "no-redirects" }, "profiles": [] }"#,
+                "redirectPolicies",
+            ),
+            (
+                "omitted profiles",
+                r#"{ "version": 2, "defaults": { "action": "ask", "redirectPolicy": "no-redirects" }, "redirectPolicies": {} }"#,
+                "profiles",
+            ),
+            (
+                "omitted defaults.action",
+                r#"{ "version": 2, "defaults": { "redirectPolicy": "no-redirects" }, "redirectPolicies": {}, "profiles": [] }"#,
+                "action",
+            ),
+            (
+                "omitted defaults.redirectPolicy",
+                r#"{ "version": 2, "defaults": { "action": "ask" }, "redirectPolicies": {}, "profiles": [] }"#,
+                "redirectPolicy",
+            ),
+            ("empty config", "{}", "version"),
+        ] {
+            let Err(err) = load_str(config) else {
+                panic!("{name} must fail at the parse boundary");
+            };
+            assert!(
+                err.contains(&format!(
+                    "config invalid: schema: missing field `{missing}`"
+                )),
+                "{name} must fail with the schema missing-field error for `{missing}`: {err}"
+            );
+        }
+        // the only allowed defaulting: absent `limits` and absent
+        // `defaults.message`
+        assert!(
+            load_str(
+                r#"{ "version": 2, "defaults": { "action": "ask", "redirectPolicy": "no-redirects" }, "redirectPolicies": {}, "profiles": [] }"#,
+            )
+            .is_ok(),
+            "absent limits keeps the engine-cap defaults"
+        );
+        assert!(
+            load_str(
+                r#"{ "version": 2, "defaults": { "action": "ask", "redirectPolicy": "no-redirects", "message": "m" }, "redirectPolicies": {}, "profiles": [] }"#,
+            )
+            .is_ok(),
+            "defaults.message stays optional"
+        );
+    }
+
     #[test]
     fn parse_error_messages_stay_prefixed() {
         let Err(e) = load_str("{ bad") else {
             panic!("malformed JSON must reject");
         };
         assert!(e.contains("config invalid"), "{e}");
-        let Err(e) = load_str(r#"{ "version": 3, "defaults": { "action": "ask" } }"#) else {
+        let Err(e) = load_str(
+            r#"{ "version": 3, "defaults": { "action": "ask", "redirectPolicy": "no-redirects" }, "redirectPolicies": {}, "profiles": [] }"#,
+        ) else {
             panic!("wrong version must reject");
         };
         assert!(e.contains("version must be 2"), "{e}");
@@ -2285,7 +2342,7 @@ mod tests {
         // the same rule guards redirect-policy path roots
         let Err(err) = load_str(
             r#"{ "version": 2,
-  "defaults": { "action": "ask" },
+  "defaults": { "action": "ask", "redirectPolicy": "no-redirects" },
   "redirectPolicies": { "p": { "redirects": { "all": [{ "sourceFd": "default", "operator": ">", "occurrence": "all", "target": { "kind": "literalPath" } }] },
     "paths": { "all": [{ "coordinate": { "redirect": { "operator": ">", "sourceFd": "default", "occurrence": "all" } }, "within": "/tmp//x" }] } } },
   "profiles": [] }"#,
@@ -2446,7 +2503,7 @@ mod tests {
         // ...in a redirect policy entry's occurrence (the untagged redirect
         // coverage arm reports a generic union failure, still fail-closed)
         let bad_redirect = r#"{ "version": 2,
-  "defaults": { "action": "ask" },
+  "defaults": { "action": "ask", "redirectPolicy": "no-redirects" },
   "redirectPolicies": { "p": { "redirects": { "all": [{ "sourceFd": "default", "operator": ">", "occurrence": 0, "target": { "kind": "literalPath" } }] },
     "paths": { "all": [{ "coordinate": { "redirect": { "operator": ">", "sourceFd": "default", "occurrence": "all" } }, "within": "/tmp" }] } } },
   "profiles": [] }"#;
@@ -2458,7 +2515,7 @@ mod tests {
         // ...in an ask/deny RedirectTest's occurrence (match.redirects arm,
         // the same fail-closed parse rejection as every other occurrence arm)
         let bad_test = r#"{ "version": 2,
-  "defaults": { "action": "ask" },
+  "defaults": { "action": "ask", "redirectPolicy": "no-redirects" },
   "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
   "profiles": [{ "id": "git", "executables": ["git"], "rules": [
     { "id": "r", "action": "ask", "message": "redirects",
@@ -2476,7 +2533,7 @@ mod tests {
             format!(
                 r#"{{
   "version": 2,
-  "defaults": {{ "action": "ask" }},
+  "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
   "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
   "profiles": [{{ "id": "git", "executables": ["git"], "rules": [
     {{ "id": "r", "action": "ask", "message": "redirects",
