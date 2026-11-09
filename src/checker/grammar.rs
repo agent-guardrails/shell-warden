@@ -669,24 +669,69 @@ pub struct FactTest {
     pub value: Option<TypedValueSelector>,
 }
 
+/// Deserializes a present optional value and rejects JSON `null`: the
+/// public schema has no nullable selectors — an explicit `null` is not
+/// "absent", it is a wire typo that must fail config parsing, never pass.
+fn present_not_null<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    Ok(Some(T::deserialize(deserializer)?))
+}
+
+/// One nested-part selector (`NestedPartTest` in the public config-v2
+/// schema): every field is optional, but at least one selector must be
+/// present (schema `minProperties: 1`, enforced at config validation).
+/// Execution metadata — the executable head and the analyzer origin — stays
+/// internal to the evidence and is not public config.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct NestedPartTest {
+    /// Closed relation vocabulary (`chain`, `pipeline`, `wrapper`,
+    /// `command-substitution`, `analyzer-command`).
+    #[serde(
+        default,
+        deserialize_with = "present_not_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub relation: Option<Relation>,
-    /// Executable head of the nested part (lexical), e.g. `rm`.
-    pub executable: Option<String>,
-    ///// Selected profile for the nested part (config reference).
+    /// Selected profile for the nested part: a declared profile id, or the
+    /// literal `none` selecting parts with no selected profile.
+    #[serde(
+        default,
+        deserialize_with = "present_not_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub profile: Option<String>,
-    /// `(analyzerCommand)` parts originate from that analyzer's ID.
-    pub analyzer: Option<String>,
     /// Match only when the nested part itself is in this evidence state.
-    pub state: Option<EvidenceClass>,
+    #[serde(
+        default,
+        deserialize_with = "present_not_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub classification: Option<EvidenceClass>,
     /// A nested part must already reduce to this verdict for the parent's
     /// nesting-coverage policy to cover it.
+    #[serde(
+        default,
+        deserialize_with = "present_not_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub verdict: Option<VerdictKind>,
-    #[serde(default)]
+    /// One-based relation-occurrence ordinal (`all` = every occurrence).
+    #[serde(
+        default,
+        deserialize_with = "present_not_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub occurrence: Option<Occurrence>,
 }
+
+/// The literal `none` profile selector for nested parts: selects parts with
+/// no selected profile (public schema `NestedPartTest.profile` is
+/// `profileId | "none"`).
+pub const NESTED_PROFILE_NONE: &str = "none";
 
 // shell-warden-config-v2-grammar: end
 
@@ -1870,7 +1915,8 @@ pub struct NestedPartsMatcher {
 
 /// Closed relation enum (design §Parsing, parts, and evidence states): the
 /// ordinary parser emits the first four; an analyzer may emit only
-/// `analyzerCommand`.
+/// `analyzer-command`. The wire vocabulary is the schema's hyphenated form —
+/// the interim camelCase spellings are not accepted aliases.
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 pub enum Relation {
     #[serde(rename = "chain")]
@@ -1879,9 +1925,9 @@ pub enum Relation {
     Pipeline,
     #[serde(rename = "wrapper")]
     Wrapper,
-    #[serde(rename = "commandSubstitution")]
+    #[serde(rename = "command-substitution")]
     CommandSubstitution,
-    #[serde(rename = "analyzerCommand")]
+    #[serde(rename = "analyzer-command")]
     AnalyzerCommand,
 }
 
@@ -2512,6 +2558,192 @@ mod tests {
         assert!(
             serde_json::from_value::<EnvironmentTest>(json!({ "name": "LANG", "match": "prefix" }))
                 .is_err()
+        );
+    }
+
+    // ── NestedPartTest + closed relation vocabulary (issue #41) ─────────────
+
+    /// The authoritative fixture body (docs
+    /// `valid/NestedPartPolicy/complete.json`) parses with the public
+    /// five-field wire shape.
+    #[test]
+    fn nested_part_policy_complete_fixture_parses() {
+        let t: NestedPartTest = serde_json::from_value(json!({
+            "relation": "analyzer-command",
+            "occurrence": 1,
+            "profile": "rm-safe",
+            "classification": "complete",
+            "verdict": "ask"
+        }))
+        .unwrap();
+        assert_eq!(t.relation, Some(Relation::AnalyzerCommand));
+        assert_eq!(t.occurrence, Some(Occurrence::N(1)));
+        assert_eq!(t.profile.as_deref(), Some("rm-safe"));
+        assert_eq!(t.classification, Some(EvidenceClass::Complete));
+        assert_eq!(t.verdict, Some(VerdictKind::Ask));
+        // single-field selectors stay valid (schema minProperties: 1)
+        let one: NestedPartTest = serde_json::from_value(json!({ "relation": "chain" })).unwrap();
+        assert_eq!(one.relation, Some(Relation::Chain));
+        assert!(one.profile.is_none() && one.occurrence.is_none());
+    }
+
+    /// The relation wire vocabulary is the schema's hyphenated closed set;
+    /// the interim camelCase spellings are not accepted aliases.
+    #[test]
+    fn nested_part_relation_vocabulary_is_hyphenated() {
+        for (wire, expected) in [
+            ("chain", Relation::Chain),
+            ("pipeline", Relation::Pipeline),
+            ("wrapper", Relation::Wrapper),
+            ("command-substitution", Relation::CommandSubstitution),
+            ("analyzer-command", Relation::AnalyzerCommand),
+        ] {
+            let t: NestedPartTest = serde_json::from_value(json!({ "relation": wire })).unwrap();
+            assert_eq!(t.relation, Some(expected));
+        }
+        for alias in ["commandSubstitution", "analyzerCommand"] {
+            assert!(
+                serde_json::from_value::<NestedPartTest>(json!({ "relation": alias })).is_err(),
+                "camelCase relation alias \"{alias}\" must not parse"
+            );
+        }
+    }
+
+    /// The authoritative matcher fixture (docs
+    /// `valid/NestedPartsMatcher/any.json`) parses as a one-level matcher.
+    #[test]
+    fn nested_parts_matcher_any_fixture_parses() {
+        let m: NestedPartsMatcher = serde_json::from_value(json!({
+            "any": [
+                {
+                    "relation": "analyzer-command",
+                    "occurrence": 1,
+                    "profile": "rm-safe",
+                    "classification": "complete",
+                    "verdict": "deny"
+                }
+            ]
+        }))
+        .unwrap();
+        let any = m.any.unwrap();
+        assert_eq!(any.len(), 1);
+        assert_eq!(any[0].relation, Some(Relation::AnalyzerCommand));
+        assert_eq!(any[0].verdict, Some(VerdictKind::Deny));
+    }
+
+    /// The authoritative invalid fixture (docs
+    /// `invalid/NestedPartPolicy/nested-serde-form.json`) — a nested
+    /// externally tagged relation — does not parse.
+    #[test]
+    fn nested_part_nested_serde_form_rejected() {
+        assert!(
+            serde_json::from_value::<NestedPartTest>(json!({
+                "relation": { "analyzer-command": true },
+                "occurrence": 1,
+                "profile": "rm-safe",
+                "classification": "complete",
+                "verdict": "ask"
+            }))
+            .is_err()
+        );
+    }
+
+    /// Execution metadata — the executable head and the analyzer origin —
+    /// is internal evidence, never public config.
+    #[test]
+    fn nested_part_test_rejects_execution_metadata_fields() {
+        assert!(
+            serde_json::from_value::<NestedPartTest>(json!({ "executable": "rm" })).is_err(),
+            "executable head is not public config"
+        );
+        assert!(
+            serde_json::from_value::<NestedPartTest>(json!({ "analyzer": "xargs-v1" })).is_err(),
+            "analyzer origin is not public config"
+        );
+        // the interim `state` spelling is not an alias for `classification`
+        assert!(
+            serde_json::from_value::<NestedPartTest>(json!({ "state": "complete" })).is_err(),
+            "interim state field must not parse"
+        );
+    }
+
+    /// An explicit `null` is never an absent selector: the public schema has
+    /// no nullable fields, and a null must fail config parsing instead of
+    /// widening the selector (review P1 finding).
+    #[test]
+    fn nested_part_test_rejects_explicit_null_selectors() {
+        for field in [
+            "relation",
+            "occurrence",
+            "profile",
+            "classification",
+            "verdict",
+        ] {
+            let mut raw = json!({ "relation": "chain" });
+            raw[field] = serde_json::Value::Null;
+            assert!(
+                serde_json::from_value::<NestedPartTest>(raw).is_err(),
+                "explicit null `{field}` must not parse"
+            );
+        }
+        // the absent form keeps parsing: absence is a closed selector
+        assert!(serde_json::from_value::<NestedPartTest>(json!({ "relation": "chain" })).is_ok());
+    }
+
+    /// A partial selector round-trips its own wire form: absent fields are
+    /// skipped by the serializer (never emitted as `null`), so the
+    /// deserializer accepts the struct's own output (review P1 finding).
+    #[test]
+    fn nested_part_test_partial_selector_roundtrips() {
+        for (name, partial) in [
+            ("relation-only", json!({ "relation": "analyzer-command" })),
+            ("profile-only", json!({ "profile": "rm-safe" })),
+            ("classification-only", json!({ "classification": "opaque" })),
+            ("verdict-only", json!({ "verdict": "deny" })),
+            ("occurrence-only", json!({ "occurrence": 2 })),
+            (
+                "two-fields",
+                json!({ "relation": "chain", "occurrence": "all" }),
+            ),
+        ] {
+            let t: NestedPartTest = serde_json::from_value(partial.clone()).unwrap();
+            let wire = serde_json::to_value(&t).unwrap();
+            assert_eq!(
+                wire, partial,
+                "{name}: absent fields must not serialize as null"
+            );
+            // the struct must re-parse its own serialized output
+            let back: NestedPartTest = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(back, t, "{name}: own wire form must re-parse");
+            // no null anywhere in the emitted wire
+            assert!(
+                wire.as_object().unwrap().values().all(|v| !v.is_null()),
+                "{name}: the serializer must emit no null selectors"
+            );
+        }
+    }
+
+    /// Serialization emits the canonical hyphenated wire form.
+    #[test]
+    fn nested_part_test_serializes_canonical_wire() {
+        let t: NestedPartTest = serde_json::from_value(json!({
+            "relation": "command-substitution",
+            "occurrence": 2,
+            "profile": "rm-safe",
+            "classification": "opaque",
+            "verdict": "allow"
+        }))
+        .unwrap();
+        let wire = serde_json::to_value(&t).unwrap();
+        assert_eq!(
+            wire,
+            json!({
+                "relation": "command-substitution",
+                "occurrence": 2,
+                "profile": "rm-safe",
+                "classification": "opaque",
+                "verdict": "allow"
+            })
         );
     }
 }
