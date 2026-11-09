@@ -530,7 +530,11 @@ fn redirect_test_holds(test: &RedirectTest, o: &RedirectObs) -> bool {
         Some(grammar::TargetKindKind::Fd) => o.is_fd_target,
         None => true,
     };
-    op_ok && fd_ok && kind_ok
+    let occurrence_ok = match test.occurrence {
+        Some(occ) => occ.selects(o.ordinal),
+        None => true,
+    };
+    op_ok && fd_ok && kind_ok && occurrence_ok
 }
 
 /// Coordinate selector (static, from config) vs one runtime coordinate tag.
@@ -853,23 +857,21 @@ fn nested_test(e: &grammar::NestedPartTest, n: &NestedResult) -> bool {
     {
         return false;
     }
-    if let Some(exec) = &e.executable
-        && n.executable.as_deref() != Some(exec.as_str())
-    {
-        return false;
+    if let Some(profile) = &e.profile {
+        // the literal `none` selects parts with no selected profile, not a
+        // profile literally named "none" (public contract: profileId | "none")
+        let selected = n.profile_id.as_deref();
+        let covered = if profile == grammar::NESTED_PROFILE_NONE {
+            selected.is_none()
+        } else {
+            selected == Some(profile.as_str())
+        };
+        if !covered {
+            return false;
+        }
     }
-    if let Some(profile) = &e.profile
-        && n.profile_id.as_deref() != Some(profile.as_str())
-    {
-        return false;
-    }
-    if let Some(analyzer) = &e.analyzer
-        && n.analyzer.map(|a| a != analyzer.as_str()).unwrap_or(true)
-    {
-        return false;
-    }
-    if let Some(state) = e.state
-        && state_class(n.state) != state
+    if let Some(classification) = e.classification
+        && state_class(n.state) != classification
     {
         return false;
     }
@@ -1900,6 +1902,70 @@ mod tests {
         );
     }
 
+    /// Occurrence selection in redirect tests (issue #42): entries select
+    /// 1-based occurrence ordinals, `"all"` selects every occurrence, and an
+    /// omitted selector is unconstrained. One shared predicate serves both
+    /// matcher arms — `any` (∃ item × ∃ entry) and `all` (∀ item ∃ entry).
+    #[test]
+    fn redirect_occurrence_selects_one_based_ordinal_in_any_and_all() {
+        let obs = |ordinal: u32| RedirectObs {
+            op: Some(grammar::RedirectOp::Out),
+            source_fd: None,
+            target: "/tmp/out".into(),
+            target_resolvable: true,
+            is_fd_target: false,
+            span: (0, 1),
+            ordinal,
+        };
+        let occ = |wire: &str| -> RedirectTest {
+            serde_json::from_str(&format!(r#"{{ "occurrence": {wire} }}"#)).unwrap()
+        };
+        let unconstrained: RedirectTest = serde_json::from_str("{}").unwrap();
+        let occ_all = occ(r#""all""#);
+        let occ_1 = occ("1");
+        let occ_2 = occ("2");
+        let occ_3 = occ("3");
+
+        // helper level, one-based boundary: ordinal 1 selects the first
+        // occurrence only — never a zero-based or off-by-one position
+        assert!(redirect_test_holds(&occ_1, &obs(1)));
+        assert!(!redirect_test_holds(&occ_1, &obs(2)));
+        assert!(redirect_test_holds(&occ_2, &obs(2)));
+        assert!(!redirect_test_holds(&occ_2, &obs(1)));
+        // `"all"` and the omitted selector are unconstrained
+        assert!(redirect_test_holds(&occ_all, &obs(1)));
+        assert!(redirect_test_holds(&occ_all, &obs(2)));
+        assert!(redirect_test_holds(&unconstrained, &obs(1)));
+        // an ordinal beyond the observed count matches nothing
+        assert!(!redirect_test_holds(&occ_3, &obs(2)));
+
+        // matcher level, same predicate through both arms
+        let any = |tests: Vec<RedirectTest>| grammar::RedirectMatcher {
+            none: None,
+            any: Some(tests),
+            all: None,
+        };
+        let all = |tests: Vec<RedirectTest>| grammar::RedirectMatcher {
+            none: None,
+            any: None,
+            all: Some(tests),
+        };
+        let both = [obs(1), obs(2)];
+
+        // `any`: one observed occurrence satisfying the entry suffices
+        assert!(redirects_holds(&any(vec![occ_1.clone()]), &both));
+        assert!(redirects_holds(&any(vec![occ_all.clone()]), &both));
+        // `all` with an ordinal entry: the second occurrence has no
+        // satisfying entry, so the arm fails even though `any` holds
+        assert!(!redirects_holds(&all(vec![occ_1.clone()]), &both));
+        assert!(redirects_holds(
+            &all(vec![occ_1.clone(), occ_2.clone()]),
+            &both
+        ));
+        // a selected entry covers every occurrence in both arms
+        assert!(redirects_holds(&all(vec![occ_all]), &both));
+    }
+
     // ── Issue #40: environment selectors — value + occurrence semantics ─────
 
     fn env(name: &str, value_text: &str, ordinal: u32) -> EnvAssign {
@@ -2013,5 +2079,111 @@ mod tests {
             !ordinal.iter().any(|t| env_test_matches(t, &assign, &cache)),
             "an ordinal-2 entry never covers the first assignment"
         );
+    }
+
+    // ── Nested-part selectors (issue #41) ────────────────────────────────────
+
+    use crate::checker::grammar::{NESTED_PROFILE_NONE, NestedPartTest, Relation};
+
+    fn nested_part_result() -> NestedResult {
+        NestedResult {
+            part_id: 1,
+            relation: Relation::AnalyzerCommand,
+            relation_ordinal: 2,
+            // execution metadata: observable in evidence, not selectable
+            executable: Some("rm".into()),
+            profile_id: Some("rm-safe".into()),
+            analyzer: Some("xargs-v1"),
+            state: EvidenceState::Complete,
+            verdict: VerdictKind::Ask,
+        }
+    }
+
+    fn selector(fields: serde_json::Value) -> NestedPartTest {
+        serde_json::from_value(fields).unwrap()
+    }
+
+    /// Every closed selector dimension agrees with the nested evidence, and
+    /// each mismatch arm blocks the entry (fail-closed per dimension).
+    #[test]
+    fn nested_test_matches_every_closed_selector() {
+        let n = nested_part_result();
+        // the full public selector matches (docs NestedPartPolicy/complete
+        // shape, values fitted to this evidence)
+        assert!(nested_test(
+            &selector(json!({
+                "relation": "analyzer-command", "occurrence": 2,
+                "profile": "rm-safe", "classification": "complete", "verdict": "ask"
+            })),
+            &n
+        ));
+        // each selector agrees alone
+        assert!(nested_test(
+            &selector(json!({ "relation": "analyzer-command" })),
+            &n
+        ));
+        assert!(nested_test(&selector(json!({ "occurrence": "all" })), &n));
+        assert!(nested_test(&selector(json!({ "profile": "rm-safe" })), &n));
+        assert!(nested_test(
+            &selector(json!({ "classification": "complete" })),
+            &n
+        ));
+        assert!(nested_test(&selector(json!({ "verdict": "ask" })), &n));
+        // mismatch arms block
+        assert!(!nested_test(&selector(json!({ "relation": "chain" })), &n));
+        assert!(!nested_test(&selector(json!({ "occurrence": 1 })), &n));
+        assert!(!nested_test(
+            &selector(json!({ "profile": "rm-risky" })),
+            &n
+        ));
+        assert!(!nested_test(
+            &selector(json!({ "classification": "opaque" })),
+            &n
+        ));
+        assert!(!nested_test(&selector(json!({ "verdict": "deny" })), &n));
+    }
+
+    /// The literal `none` profile selects parts with no selected profile and
+    /// never a profile literally named `none`.
+    #[test]
+    fn nested_test_profile_none_selects_unprofiled_parts() {
+        let profiled = nested_part_result();
+        let mut unprofiled = nested_part_result();
+        unprofiled.profile_id = None;
+        let none = selector(json!({ "profile": NESTED_PROFILE_NONE }));
+        assert!(nested_test(&none, &unprofiled));
+        assert!(!nested_test(&none, &profiled));
+        // a part selected into a profile id literally spelled `none` is
+        // covered by no profile selector at all: the wire value `none`
+        // always reads as the none-selector (reserved reading)
+        let mut literal_named = nested_part_result();
+        literal_named.profile_id = Some(NESTED_PROFILE_NONE.into());
+        assert!(!nested_test(&none, &literal_named));
+    }
+
+    /// Matcher arm semantics: `none` requires an empty nested list, and
+    /// `any` fires when at least one entry matches the evidence.
+    #[test]
+    fn nested_matcher_holds_none_and_any() {
+        let n = nested_part_result();
+
+        let none_matcher: grammar::NestedPartsMatcher =
+            serde_json::from_value(json!({ "none": true })).unwrap();
+        assert!(nested_matcher_holds(&none_matcher, &[]));
+        assert!(!nested_matcher_holds(
+            &none_matcher,
+            std::slice::from_ref(&n)
+        ));
+
+        let any_matcher: grammar::NestedPartsMatcher = serde_json::from_value(json!({ "any": [
+                { "relation": "pipeline" }, { "relation": "analyzer-command" }
+            ] }))
+        .unwrap();
+        assert!(nested_matcher_holds(&any_matcher, std::slice::from_ref(&n)));
+        let any_other: grammar::NestedPartsMatcher = serde_json::from_value(json!({ "any": [
+                { "relation": "pipeline" }, { "relation": "wrapper" }
+            ] }))
+        .unwrap();
+        assert!(!nested_matcher_holds(&any_other, &[n]));
     }
 }
