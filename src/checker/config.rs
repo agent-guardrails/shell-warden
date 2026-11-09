@@ -659,13 +659,11 @@ fn validate_analyzer_fact_coordinate(profile: &Profile, fc: &FactCoordinate) -> 
             fc.name
         ));
     };
-    if let Some(id) = &fc.analyzer
-        && id != analyzer.id()
-    {
+    if fc.analyzer != analyzer.id() {
         return Err(format!(
             "path coordinate analyzerFact \"{}\" references analyzer \"{}\" outside the profile analyzer {}",
             fc.name,
-            id,
+            fc.analyzer,
             analyzer.id()
         ));
     }

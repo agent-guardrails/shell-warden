@@ -355,14 +355,14 @@ pub struct EnvironmentCoordinate {
     pub occurrence: Option<Occurrence>,
 }
 
-/// Analyzer-fact coordinate selector (closed). `version` is schema-required
-/// (docs `AnalyzerFactCoordinate`) and pins the closed catalog version of the
-/// selected analyzer; validation rejects any other version at config load.
+/// Analyzer-fact coordinate selector (closed). `analyzer` and `version` are
+/// schema-required (docs `AnalyzerFactCoordinate`) and pin the coordinate to
+/// the closed, versioned catalog of one declared analyzer; validation
+/// rejects any other analyzer or version at config load.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct FactCoordinate {
-    #[serde(default)]
-    pub analyzer: Option<String>,
+    pub analyzer: String,
     pub version: String,
     pub name: String,
     #[serde(default)]
@@ -2822,18 +2822,35 @@ mod tests {
             "occurrence": "all"
         }))
         .unwrap();
-        assert_eq!(fc.analyzer.as_deref(), Some("sed-v1"));
+        assert_eq!(fc.analyzer, "sed-v1");
         assert_eq!(fc.version, "1");
         assert_eq!(fc.name, "executionPrimitive");
         assert!(fc.occurrence.is_some());
 
-        // `analyzer` stays optional at the wire level and occurrence may be a
-        // one-based ordinal; `version` never is
+        // `analyzer` is required and round-trips; `occurrence` may be a
+        // one-based ordinal; `version` is a string, never a number
         let fc: FactCoordinate = serde_json::from_value(
-            json!({ "version": "1", "name": "programForm", "occurrence": 2 }),
+            json!({ "analyzer": "export-v1", "version": "1", "name": "assignment", "occurrence": 2 }),
         )
         .unwrap();
-        assert!(fc.analyzer.is_none() && fc.occurrence.is_some());
+        assert_eq!(fc.analyzer, "export-v1");
+        assert_eq!(fc.version, "1");
+        assert!(fc.occurrence.is_some());
+    }
+
+    /// `analyzer` is required on the wire (docs `AnalyzerFactCoordinate`
+    /// `required` list): a coordinate without it fails at parse — the
+    /// runtime never accepts a schema-invalid shape.
+    #[test]
+    fn fact_coordinate_missing_analyzer_rejected() {
+        assert!(
+            serde_json::from_value::<FactCoordinate>(json!({
+                "version": "1",
+                "name": "executionPrimitive"
+            }))
+            .is_err(),
+            "analyzerFact coordinate without analyzer must not parse"
+        );
     }
 
     /// `version` is required on the wire: a coordinate without it fails at
