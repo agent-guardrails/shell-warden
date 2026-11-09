@@ -257,12 +257,16 @@ fn push_part(
     (id, truncated)
 }
 
+/// One-based per-relation occurrence ordinal (design §Selector semantics:
+/// occurrence ordinals are one-based): the first part emitted with this
+/// (relation, parent) pair carries ordinal 1.
 fn next_ordinal(graph: &CommandEvidence, relation: Relation, parent: Option<usize>) -> u32 {
     graph
         .parts
         .iter()
         .filter(|p| p.relation == relation && p.parent == parent)
         .count() as u32
+        + 1
 }
 
 fn is_assignment(w: &str) -> bool {

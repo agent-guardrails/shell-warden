@@ -1683,3 +1683,225 @@ fn binary_option_probes_exit_with_verdicts() {
     }
     let _ = std::fs::remove_file(&config_path);
 }
+
+// ── Issue #41: nested-part selectors on the public wire ─────────────────────
+//
+// The only parent shape carrying nested evidence is `xargs`: the xargs-v1
+// analyzer relabels its operand child as `analyzer-command` with a
+// per-child reduced verdict. Substitution and wrapper children join the
+// aggregate as siblings, so xargs probes are the honest end-to-end
+// exercise of the nested-part selectors.
+
+/// The authoritative wrapper control: the docs `Config/minimal.json` valid
+/// fixture loads and its echo allow fires on the real pipeline.
+#[test]
+fn config_v2_minimal_fixture_control() {
+    const MINIMAL: &str = r#"{
+  "version": 2,
+  "defaults": {
+    "action": "ask",
+    "redirectPolicy": "no-redirects"
+  },
+  "redirectPolicies": {
+    "no-redirects": {
+      "redirects": { "none": true },
+      "paths": { "none": true }
+    }
+  },
+  "profiles": [
+    {
+      "id": "echo",
+      "executables": ["echo"],
+      "options": {},
+      "analyzer": "generic-v1",
+      "rules": [
+        {
+          "id": "echo/allow-empty",
+          "action": "allow",
+          "match": {
+            "classification": "complete",
+            "arguments": { "exact": [] },
+            "options": { "none": true },
+            "environment": { "none": true },
+            "paths": { "none": true },
+            "facts": { "none": true },
+            "nestedParts": { "none": true }
+          }
+        }
+      ]
+    }
+  ]
+}"#;
+    assert_eq!(run(MINIMAL, "echo").verdict, VerdictKind::Allow);
+}
+
+/// Probe config: the xargs profile carries one allow rule whose
+/// `nestedParts.all` coverage holds the authoritative
+/// `NestedPartPolicy/complete.json` body verbatim, and one ask rule whose
+/// `nestedParts.any` holds `probe_entry` verbatim with message
+/// `PROBE:<name>`. The `rm-safe` profile is declared for the closed
+/// reference cross-check; its rules stay empty so child verdicts reduce to
+/// the default ask and every probe verdict is attributable to the parent's
+/// nested matcher alone.
+fn nested_probe_config(probe_name: &str, probe_entry: &str) -> String {
+    format!(
+        r#"{{
+  "version": 2,
+  "defaults": {{ "action": "ask", "message": "No approved command profile matched.", "redirectPolicy": "no-redirects" }},
+  "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
+  "profiles": [
+    {{
+      "id": "xargs",
+      "executables": ["xargs"],
+      "options": {{}},
+      "analyzer": "xargs-v1",
+      "rules": [
+        {{
+          "id": "xargs/allow-probe", "action": "allow",
+          "match": {{
+            "classification": "complete",
+            "arguments": {{ "exact": [] }},
+            "options": {{ "none": true }}, "environment": {{ "none": true }},
+            "paths": {{ "none": true }}, "facts": {{ "none": true }},
+            "nestedParts": {{ "all": [
+              {{ "relation": "analyzer-command", "occurrence": 1, "profile": "rm-safe",
+                 "classification": "complete", "verdict": "ask" }}
+            ] }}
+          }}
+        }},
+        {{
+          "id": "probe/{probe_name}", "action": "ask",
+          "message": "PROBE:{probe_name}",
+          "match": {{ "nestedParts": {{ "any": [{probe_entry}] }} }}
+        }}
+      ]
+    }},
+    {{
+      "id": "rm-safe",
+      "executables": ["rm"],
+      "options": {{}},
+      "analyzer": "generic-v1",
+      "rules": []
+    }}
+  ]
+}}"#
+    )
+}
+
+/// The authoritative rm-safe arm fitted to the engine's xargs child:
+/// analyzer-command relation, ordinal 1, selected profile, opaque evidence,
+/// reduced ask verdict (the rm-safe profile declares no rules).
+const RM_SAFE_ENTRY: &str = r#"{ "relation": "analyzer-command", "occurrence": 1,
+    "profile": "rm-safe", "classification": "opaque", "verdict": "ask" }"#;
+
+/// The literal-none arm for unprofiled xargs children.
+const UNPROFILED_ENTRY: &str = r#"{ "relation": "analyzer-command", "occurrence": 1,
+    "profile": "none", "classification": "opaque", "verdict": "ask" }"#;
+
+fn probe(raw: &str, name: &str, entry: &str) -> Verdict {
+    run(&nested_probe_config(name, entry), raw)
+}
+
+fn probe_message_contains(v: &Verdict, needle: &str) -> bool {
+    v.message.as_deref().unwrap_or_default().contains(needle)
+}
+
+/// The authoritative fixtures pass through the real loader and evaluate on
+/// the real pipeline: the `NestedPartPolicy/complete.json` body sits
+/// verbatim in the allow rule's coverage (parse acceptance, closed
+/// references resolve), and the `NestedPartsMatcher/any` shape fires on
+/// the matching parent part.
+#[test]
+fn nested_part_fixtures_load_and_evaluate() {
+    let v = probe("xargs rm -rf /", "rm-safe-child", RM_SAFE_ENTRY);
+    assert_eq!(v.verdict, VerdictKind::Ask);
+    assert!(
+        probe_message_contains(&v, "PROBE:rm-safe-child"),
+        "the full rm-safe selector must fire on the matching child: {:?}",
+        v.message
+    );
+}
+
+/// Fail-closed by dimension: every mismatching selector keeps the probe
+/// rule silent, so only the bare default ask survives.
+#[test]
+fn nested_part_mismatched_selectors_stay_silent() {
+    // verdict mismatch: the child reduces to ask, the selector demands deny
+    let deny_verdict = RM_SAFE_ENTRY.replace(r#""verdict": "ask""#, r#""verdict": "deny""#);
+    let v = probe("xargs rm -rf /", "deny-verdict", &deny_verdict);
+    assert_eq!(v.verdict, VerdictKind::Ask);
+    assert!(!probe_message_contains(&v, "PROBE:"));
+
+    // profile mismatch: the rm child is selected into rm-safe, not none
+    let v = probe("xargs rm -rf /", "none-on-profiled", UNPROFILED_ENTRY);
+    assert_eq!(v.verdict, VerdictKind::Ask);
+    assert!(!probe_message_contains(&v, "PROBE:"));
+
+    // relation mismatch: the xargs child is analyzer-command, not chain
+    let chain = RM_SAFE_ENTRY.replace(
+        r#""relation": "analyzer-command""#,
+        r#""relation": "chain""#,
+    );
+    let v = probe("xargs rm -rf /", "chain-relation", &chain);
+    assert_eq!(v.verdict, VerdictKind::Ask);
+    assert!(!probe_message_contains(&v, "PROBE:"));
+
+    // classification mismatch: the xargs child is opaque, never complete
+    let complete = RM_SAFE_ENTRY.replace(
+        r#""classification": "opaque""#,
+        r#""classification": "complete""#,
+    );
+    let v = probe("xargs rm -rf /", "complete-classification", &complete);
+    assert_eq!(v.verdict, VerdictKind::Ask);
+    assert!(!probe_message_contains(&v, "PROBE:"));
+}
+
+/// The literal `none` profile covers unprofiled xargs children, and the
+/// occurrence ordinal is exact: a selector for ordinal 2 stays silent when
+/// the child carries ordinal 1.
+#[test]
+fn nested_part_none_profile_and_ordinal() {
+    let v = probe("xargs cat notes", "none-child", UNPROFILED_ENTRY);
+    assert_eq!(v.verdict, VerdictKind::Ask);
+    assert!(
+        probe_message_contains(&v, "PROBE:none-child"),
+        "the none profile must cover the unprofiled child: {:?}",
+        v.message
+    );
+
+    let second = UNPROFILED_ENTRY.replace(r#""occurrence": 1"#, r#""occurrence": 2"#);
+    let v = probe("xargs cat notes", "second-ordinal", &second);
+    assert_eq!(v.verdict, VerdictKind::Ask);
+    assert!(
+        !probe_message_contains(&v, "PROBE:"),
+        "ordinal 2 must not match the first child: {:?}",
+        v.message
+    );
+}
+
+/// The authoritative invalid fixture (docs
+/// `invalid/NestedPartPolicy/nested-serde-form.json`) — a nested
+/// externally tagged relation — fails during config parsing, before any
+/// evaluation.
+#[test]
+fn nested_serde_fixture_rejected_before_evaluation() {
+    let invalid = nested_probe_config(
+        "nested-serde",
+        r#"{ "relation": { "analyzer-command": true }, "occurrence": 1,
+             "profile": "rm-safe", "classification": "complete", "verdict": "ask" }"#,
+    );
+    let mut path = std::env::temp_dir();
+    path.push(format!(
+        "shell-warden-41-nested-serde-{}.jsonc",
+        std::process::id()
+    ));
+    std::fs::write(&path, &invalid).expect("probe fixture must be writable");
+    let err = load_path(&path)
+        .err()
+        .unwrap_or_else(|| panic!("nested-serde-form probe must not parse"));
+    assert!(
+        err.contains("config invalid"),
+        "must fail during config parsing, before evaluation: {err}"
+    );
+    let _ = std::fs::remove_file(&path);
+}

@@ -418,7 +418,7 @@ fn validate(raw: RawConfig) -> Result<Config, String> {
     }
 
     // closed references across profiles: nestedParts.profile must name a
-    // declared profile id
+    // declared profile id; the literal `none` selects unprofiled parts
     for profile in &raw.profiles {
         for rule in &profile.rules {
             if let Some(np) = &rule.r#match.nested_parts {
@@ -426,6 +426,7 @@ fn validate(raw: RawConfig) -> Result<Config, String> {
                 for list in lists.into_iter().flatten() {
                     for e in list {
                         if let Some(pid) = &e.profile
+                            && pid != NESTED_PROFILE_NONE
                             && !seen_id.contains(pid)
                         {
                             return Err(format!(
@@ -1330,13 +1331,17 @@ fn validate_allow_match(
         }
         _ => return Err("allow facts is none or all".to_string()),
     }
-    // nestedParts: none or all (closed relation/profile/state/verdict refs)
+    // nestedParts: none or all (closed relation/profile/classification/
+    // verdict selectors)
     let Some(np) = &m.nested_parts else {
         return Err("allow requires an explicit nestedParts policy".to_string());
     };
     match (np.none, &np.any, &np.all) {
         (Some(true), None, None) => {}
         (None | Some(false), None, Some(all)) if !all.is_empty() => {
+            for e in all {
+                validate_nested_part_policy(e)?;
+            }
             // profile references may resolve to any profile in the config:
             // checked later by the caller's set membership
         }
@@ -1408,6 +1413,39 @@ fn validate_fact_policy(e: &FactTest, profile: &Profile) -> Result<(), String> {
         );
     }
     validate_fact_test(e, profile)
+}
+
+/// A nested-part selector must name at least one closed dimension (public
+/// schema `NestedPartTest` `minProperties: 1`): an empty selector would
+/// match every nested part — a fail-open hole.
+fn validate_nested_part_test(e: &NestedPartTest) -> Result<(), String> {
+    if e.relation.is_none()
+        && e.profile.is_none()
+        && e.classification.is_none()
+        && e.verdict.is_none()
+        && e.occurrence.is_none()
+    {
+        return Err("nestedParts entries require at least one selector".to_string());
+    }
+    Ok(())
+}
+
+/// Allow coverage entries carry the public `NestedPartPolicy` shape: every
+/// field is required — relation, occurrence, profile, classification, and
+/// the required reduced verdict.
+fn validate_nested_part_policy(e: &NestedPartTest) -> Result<(), String> {
+    if e.relation.is_none()
+        || e.occurrence.is_none()
+        || e.profile.is_none()
+        || e.classification.is_none()
+        || e.verdict.is_none()
+    {
+        return Err(
+            "allow nestedParts entries require relation, occurrence, profile, classification, and verdict"
+                .to_string(),
+        );
+    }
+    validate_nested_part_test(e)
 }
 
 /// A typed value selector first agrees with the fact type from the analyzer
@@ -1531,9 +1569,16 @@ fn validate_ask_deny_match(rule: &Rule, profile: &Profile) -> Result<(), String>
         }
     }
     if let Some(np) = &m.nested_parts {
-        // relation/verdict closed enums validated by serde; profile refs are
-        // cross-checked against the whole profile set in validate()
-        let _ = (&np.any, &np.all);
+        // relation/classification/verdict closed enums validated by serde;
+        // every entry needs at least one selector (public schema
+        // `NestedPartTest` minProperties: 1); profile refs are cross-checked
+        // against the whole profile set in validate()
+        let lists = [&np.any, &np.all];
+        for list in lists.into_iter().flatten() {
+            for e in list {
+                validate_nested_part_test(e)?;
+            }
+        }
     }
     if let Some(o) = &m.options {
         if let Some(values) = &o.values {
@@ -1824,6 +1869,136 @@ mod tests {
             err.contains(needle),
             "{name} must name the violation `{needle}`: {err}"
         );
+    }
+
+    // ── Issue #41: nested-part selectors — config-level validation ──────────
+
+    /// An echo allow probe whose `nestedParts` coverage carries `nested`
+    /// verbatim, plus an `rm-safe` profile the selectors can reference.
+    fn nested_probe_config(nested: &str) -> String {
+        format!(
+            r#"{{
+  "version": 2,
+  "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
+  "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
+  "profiles": [{{
+    "id": "echo",
+    "executables": ["echo"],
+    "options": {{}},
+    "analyzer": "generic-v1",
+    "rules": [{{
+      "id": "echo/allow-probe", "action": "allow",
+      "match": {{
+        "classification": "complete", "arguments": {{ "exact": [] }},
+        "options": {{ "none": true }}, "environment": {{ "none": true }},
+        "paths": {{ "none": true }}, "facts": {{ "none": true }},
+        "nestedParts": {nested}
+      }}
+    }}]
+  }},
+  {{
+    "id": "rm-safe",
+    "executables": ["rm"],
+    "options": {{}},
+    "analyzer": "generic-v1",
+    "rules": []
+  }}]
+}}"#
+        )
+    }
+
+    /// The authoritative allow fixture (docs
+    /// `valid/NestedPartPolicy/complete.json`) loads as a coverage entry,
+    /// with a declared profile reference and with the literal `none`.
+    #[test]
+    fn allow_nested_part_policy_fixture_loads() {
+        let full = nested_probe_config(
+            r#"{ "all": [{ "relation": "analyzer-command", "occurrence": 1,
+                "profile": "rm-safe", "classification": "complete", "verdict": "ask" }] }"#,
+        );
+        assert!(
+            load_str(&full).is_ok(),
+            "authoritative NestedPartPolicy fixture body must load"
+        );
+        let none_profile = nested_probe_config(
+            r#"{ "all": [{ "relation": "analyzer-command", "occurrence": "all",
+                "profile": "none", "classification": "complete", "verdict": "deny" }] }"#,
+        );
+        assert!(
+            load_str(&none_profile).is_ok(),
+            "the literal none profile selector is public config"
+        );
+    }
+
+    /// Allow coverage entries carry the full public `NestedPartPolicy` shape:
+    /// dropping any closed field is invalid (schema `required`).
+    #[test]
+    fn allow_nested_part_policy_requires_every_field() {
+        let fields = [
+            (
+                "relation",
+                r#""occurrence": 1, "profile": "rm-safe", "classification": "complete", "verdict": "ask""#,
+            ),
+            (
+                "occurrence",
+                r#""relation": "analyzer-command", "profile": "rm-safe", "classification": "complete", "verdict": "ask""#,
+            ),
+            (
+                "profile",
+                r#""relation": "analyzer-command", "occurrence": 1, "classification": "complete", "verdict": "ask""#,
+            ),
+            (
+                "classification",
+                r#""relation": "analyzer-command", "occurrence": 1, "profile": "rm-safe", "verdict": "ask""#,
+            ),
+            (
+                "verdict",
+                r#""relation": "analyzer-command", "occurrence": 1, "profile": "rm-safe", "classification": "complete""#,
+            ),
+        ];
+        for (name, body) in fields {
+            expect_invalid(
+                name,
+                &nested_probe_config(&format!(r#"{{ "all": [{{ {body} }}] }}"#)),
+                "allow nestedParts entries require",
+            );
+        }
+    }
+
+    /// Nested-part profile references resolve against declared profile ids;
+    /// the literal `none` is the only non-reference spelling.
+    #[test]
+    fn nested_part_profile_references_resolve() {
+        expect_invalid(
+            "unknown-profile",
+            &nested_probe_config(
+                r#"{ "all": [{ "relation": "analyzer-command", "occurrence": 1,
+                    "profile": "rm-risky", "classification": "complete", "verdict": "ask" }] }"#,
+            ),
+            "references unknown profile",
+        );
+    }
+
+    /// An ask/deny selector naming no closed dimension is invalid (public
+    /// schema `NestedPartTest` `minProperties: 1`).
+    #[test]
+    fn nested_part_test_requires_at_least_one_selector() {
+        let ask_deny = r#"{
+  "version": 2,
+  "defaults": { "action": "ask", "redirectPolicy": "no-redirects" },
+  "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
+  "profiles": [{
+    "id": "echo",
+    "executables": ["echo"],
+    "options": {},
+    "analyzer": "generic-v1",
+    "rules": [{
+      "id": "echo/deny-probe", "action": "deny",
+      "match": { "nestedParts": { "any": [{}] } }
+    }]
+  }]
+        }"#;
+        expect_invalid("empty-selector", ask_deny, "at least one selector");
     }
 
     /// An invalid `re2-v1` pattern invalidates the config at load (docs
