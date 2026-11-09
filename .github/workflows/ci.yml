@@ -79,6 +79,13 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Checkout config v2 contract fixtures
+        uses: actions/checkout@v4
+        with:
+          repository: agent-guardrails/docs
+          ref: 9d8641b1711b733190def5d71dce3ea0e4589bba
+          path: contract-docs
+          persist-credentials: false
       - name: Install Rust toolchain (stable)
         run: |
           rustup toolchain install stable --profile minimal
@@ -89,3 +96,7 @@ jobs:
         env:
           SHELL_WARDEN_BIN: ${{ github.workspace }}/target/release/shell-warden
         run: node examples/configs/verdict-battery.cjs --config examples/configs/shell-warden.example.jsonc --battery examples/configs/example-battery.json
+      - name: Run config v2 release conformance battery
+        env:
+          SHELL_WARDEN_BIN: ${{ github.workspace }}/target/release/shell-warden
+        run: node tests/config-v2/run.cjs --fixtures contract-docs/schemas/fixtures/shell-warden.config.v2
