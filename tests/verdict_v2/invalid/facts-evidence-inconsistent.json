@@ -1,0 +1,20 @@
+{
+  "protocol": "shell-warden.verdict.v2",
+  "result": {
+    "invocationId": "fixture:bad-evidence",
+    "verdict": "ask",
+    "commands": [
+      {
+        "index": 0,
+        "verdict": "ask",
+        "classification": "invalid",
+        "match": "raw",
+        "facts": {
+          "evidence": "opaque",
+          "reasons": ["opaque-expansion"],
+          "diagnostics": "truncated-after-decision"
+        }
+      }
+    ]
+  }
+}

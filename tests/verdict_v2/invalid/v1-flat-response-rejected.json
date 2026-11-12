@@ -1,0 +1,22 @@
+{
+  "invocationId": "fixture:v1-flat-response-rejected",
+  "verdict": "allow",
+  "commands": [
+    {
+      "index": 0,
+      "verdict": "allow",
+      "ruleId": "hook/allow",
+      "classification": "static",
+      "match": "argv",
+      "facts": {
+        "evidence": "complete",
+        "reasons": ["complete"],
+        "selectedProfiles": ["base"],
+        "matched": ["hook/allow"],
+        "qualified": ["hook/allow"],
+        "rejected": [],
+        "votes": ["allow:hook/allow"]
+      }
+    }
+  ]
+}

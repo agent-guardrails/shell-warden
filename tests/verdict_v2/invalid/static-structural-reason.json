@@ -1,0 +1,24 @@
+{
+  "protocol": "shell-warden.verdict.v2",
+  "result": {
+    "invocationId": "fixture:static-structural-reason",
+    "verdict": "ask",
+    "commands": [
+      {
+        "index": 0,
+        "verdict": "ask",
+        "classification": "static",
+        "match": "argv",
+        "facts": {
+          "evidence": "complete",
+          "reasons": ["unknown-option"],
+          "selectedProfiles": ["base"],
+          "matched": [],
+          "qualified": [],
+          "rejected": [],
+          "votes": []
+        }
+      }
+    ]
+  }
+}

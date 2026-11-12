@@ -72,9 +72,17 @@ fn run() -> i32 {
         }
     };
 
-    // verdict out, exactly one JSON value then EOF (02 §2.3)
+    // verdict out, exactly one JSON value then EOF (02 §2.7): the closed v2
+    // envelope, self-validated per 08 §8.9 before any byte reaches stdout.
+    // A serialization or validation failure is a checker anomaly — exit 1,
+    // stdout stays empty (fail closed; the hook degrades via onCheckerError).
     let verdict = checker::pipeline::evaluate(&config, &letter);
-    let out = match verdict.to_wire() {
+    let envelope = checker::verdict::VerdictEnvelope::new(verdict);
+    if let Err(e) = envelope.validate_against(&letter.invocation.id, letter.commands.len()) {
+        eprintln!("verdict v2 self-validation failed: {e}");
+        return 1;
+    }
+    let out = match envelope.to_wire() {
         Ok(o) => o,
         Err(e) => {
             eprintln!("{e}");

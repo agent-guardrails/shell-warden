@@ -1,0 +1,26 @@
+{
+  "protocol": "shell-warden.verdict.v2",
+  "result": {
+    "invocationId": "fixture:rule-id-not-winning-vote",
+    "verdict": "deny",
+    "message": "Denied by policy.",
+    "commands": [
+      {
+        "index": 0,
+        "verdict": "deny",
+        "ruleId": "policy/z",
+        "classification": "static",
+        "match": "argv",
+        "facts": {
+          "evidence": "complete",
+          "reasons": ["complete"],
+          "selectedProfiles": ["base"],
+          "matched": ["policy/a", "policy/z"],
+          "qualified": [],
+          "rejected": [],
+          "votes": ["deny:policy/z", "deny:policy/a"]
+        }
+      }
+    ]
+  }
+}

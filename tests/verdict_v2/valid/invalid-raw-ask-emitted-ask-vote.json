@@ -1,0 +1,25 @@
+{
+  "protocol": "shell-warden.verdict.v2",
+  "result": {
+    "invocationId": "fixture:invalid-raw-ask-emitted-ask-vote",
+    "verdict": "ask",
+    "commands": [
+      {
+        "index": 0,
+        "verdict": "ask",
+        "ruleId": "policy/invalid-ask",
+        "classification": "invalid",
+        "match": "raw",
+        "facts": {
+          "evidence": "invalid",
+          "reasons": ["unknown-option"],
+          "selectedProfiles": ["base"],
+          "matched": ["policy/invalid-ask"],
+          "qualified": [],
+          "rejected": [],
+          "votes": ["ask:policy/invalid-ask"]
+        }
+      }
+    ]
+  }
+}

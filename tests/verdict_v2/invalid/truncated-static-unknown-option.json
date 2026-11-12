@@ -1,0 +1,20 @@
+{
+  "protocol": "shell-warden.verdict.v2",
+  "result": {
+    "invocationId": "fixture:truncated-static-unknown-option",
+    "verdict": "ask",
+    "commands": [
+      {
+        "index": 0,
+        "verdict": "ask",
+        "classification": "static",
+        "match": "argv",
+        "facts": {
+          "evidence": "complete",
+          "reasons": ["unknown-option"],
+          "diagnostics": "truncated-after-decision"
+        }
+      }
+    ]
+  }
+}

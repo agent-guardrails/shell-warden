@@ -1,0 +1,15 @@
+{
+  "protocol": "shell-warden.verdict.v2",
+  "result": {
+    "invocationId": "fixture:malformed-classification",
+    "verdict": "ask",
+    "commands": [
+      {
+        "index": 0,
+        "verdict": "ask",
+        "classification": 2,
+        "match": "raw"
+      }
+    ]
+  }
+}

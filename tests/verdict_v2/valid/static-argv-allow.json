@@ -1,0 +1,26 @@
+{
+  "protocol": "shell-warden.verdict.v2",
+  "result": {
+    "invocationId": "fixture:static-allow",
+    "verdict": "allow",
+    "message": "Allowed by the selected profile.",
+    "commands": [
+      {
+        "index": 0,
+        "verdict": "allow",
+        "ruleId": "Base_Profile:echo#1",
+        "classification": "static",
+        "match": "argv",
+        "facts": {
+          "evidence": "complete",
+          "reasons": ["complete"],
+          "selectedProfiles": ["echo"],
+          "matched": ["Base_Profile:echo#1"],
+          "qualified": ["Base_Profile:echo#1"],
+          "rejected": [],
+          "votes": ["allow:Base_Profile:echo#1"]
+        }
+      }
+    ]
+  }
+}

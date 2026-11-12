@@ -1,0 +1,25 @@
+{
+  "protocol": "shell-warden.verdict.v2",
+  "result": {
+    "invocationId": "fixture:opaque-ask",
+    "verdict": "ask",
+    "message": "Confirmation is required for opaque input.",
+    "commands": [
+      {
+        "index": 0,
+        "verdict": "ask",
+        "classification": "opaque",
+        "match": "raw",
+        "facts": {
+          "evidence": "opaque",
+          "reasons": ["opaque-expansion"],
+          "selectedProfiles": ["echo"],
+          "matched": [],
+          "qualified": [],
+          "rejected": [],
+          "votes": []
+        }
+      }
+    ]
+  }
+}

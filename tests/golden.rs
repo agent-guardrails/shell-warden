@@ -1,8 +1,9 @@
-// Golden suite: letter checker CLI — legacy letter JSON in, verdict JSON out.
-// Repointed to the shell-warden-letter bin (see #16); migrating the golden
-// table to the orchestrator `check --file` single-shot mode per 10-testing
-// §10.2 is tracked separately.
-// JSON out, subset diffed against the case's `expect`. Every case lives in
+// Golden suite: letter checker CLI — letter JSON in, verdict v2 envelope out
+// (02-letter-verdict §2.7; ADR-0023 verdict v2 only). Repointed to the
+// shell-warden-letter bin (see #16); migrating the golden table to the
+// orchestrator `check --file` single-shot mode per 10-testing §10.2 is tracked
+// separately. JSON out, subset diffed against the case's `expect` (nesting
+// mirrors the envelope: result fields live under `result`). Every case lives in
 // tests/golden/cases/*.json referencing examples/configs. Spawn latency is
 // recorded per case (10 §10.6); the 10 ms p95 gate is checked on the runner
 // host before the M1 merge — this suite only guards gross drift in CI.
@@ -51,7 +52,9 @@ fn run_case(name: &str, case: &Value) -> Value {
 
 /// Subset semantics (10 §10.2): every field present in `expect` must match the
 /// actual; extra fields on the actual are ignored. Array expectations declare
-/// their element by its `index` field.
+/// their element by its `index` field. A `contains:` string prefix (documented
+/// in tests/golden/_schema.txt) switches that field to a substring comparison
+/// at any nesting depth (verdict v2 nests result fields under `result`).
 fn subset_matches(actual: &Value, expect: &Value) -> bool {
     match (actual, expect) {
         (Value::Object(a), Value::Object(e)) => e
@@ -69,25 +72,12 @@ fn subset_matches(actual: &Value, expect: &Value) -> bool {
                     None => a.iter().any(|item| subset_matches(item, ev)),
                 })
         }
+        (Value::String(a), Value::String(e)) => match e.strip_prefix("contains:") {
+            Some(needle) => a.contains(needle),
+            None => a == e,
+        },
         (a, e) => a == e,
     }
-}
-
-/// expect.message supports a `contains:` prefix (substring comparison, 10 §10.2
-/// runner behavior documented in tests/golden/_schema.txt).
-fn case_matches(actual: &Value, expect: &Value) -> bool {
-    if let Some(msg) = expect.get("message").and_then(Value::as_str)
-        && let Some(needle) = msg.strip_prefix("contains:")
-    {
-        let ok = actual["message"]
-            .as_str()
-            .map(|m| m.contains(needle))
-            .unwrap_or(false);
-        let mut e2 = expect.clone();
-        e2.as_object_mut().unwrap().remove("message");
-        return ok && subset_matches(actual, &e2);
-    }
-    subset_matches(actual, expect)
 }
 
 #[test]
@@ -123,7 +113,7 @@ fn golden_cases() {
             .unwrap_or_else(|e| panic!("case {name} is not one JSON value: {e}"));
         let actual = run_case(&name, &case);
         let expect = &case["expect"];
-        if !case_matches(&actual, expect) {
+        if !subset_matches(&actual, expect) {
             panic!(
                 "case {name}\nactual: {}\nexpected subset: {}",
                 serde_json::to_string_pretty(&actual).unwrap(),

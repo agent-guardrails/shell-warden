@@ -33,17 +33,6 @@ impl EvidenceState {
     pub fn can_allow(self) -> bool {
         matches!(self, EvidenceState::Complete)
     }
-
-    /// Wire mapping: the published hook validates `classification` against
-    /// `static|opaque` only. `invalid` is at-least-ask just like `opaque`
-    /// (it only blocks allow, and deny still matches), so it maps to
-    /// `opaque` on the wire with structured reasons in `facts`.
-    pub fn wire(self) -> &'static str {
-        match self {
-            EvidenceState::Complete => "static",
-            EvidenceState::Opaque(_) | EvidenceState::Invalid(_) => "opaque",
-        }
-    }
 }
 
 /// Stable reason codes (design §Diagnostics and verdict wire).
@@ -60,7 +49,7 @@ pub mod reason {
     pub const REQUIRED_OPTION_MISSING: &str = "required-option-missing";
     pub const OPTION_NOT_REPEATABLE: &str = "option-not-repeatable";
     pub const OPTION_NOT_ALLOWED: &str = "option-not-allowed";
-    pub const OPTION_VALUES_UNCOVERED: &str = "option-values-uncovered";
+    pub const OPTION_VALUE_UNCOVERED: &str = "option-value-uncovered";
     pub const REMAINDER_UNCOVERED: &str = "remainder-uncovered";
     pub const REDIRECT_POLICY_UNCOVERED: &str = "redirect-policy-uncovered";
 }

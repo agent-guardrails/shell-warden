@@ -16,6 +16,8 @@
     ]
   },
   "expect": {
-    "verdict": "ask"
+    "result": {
+      "verdict": "ask"
+    }
   }
 }

@@ -1,0 +1,27 @@
+{
+  "protocol": "shell-warden.verdict.v2",
+  "result": {
+    "invocationId": "fixture:non-contiguous-command-index",
+    "verdict": "ask",
+    "commands": [
+      {
+        "index": 0,
+        "verdict": "ask",
+        "classification": "opaque",
+        "match": "raw"
+      },
+      {
+        "index": 2,
+        "verdict": "allow",
+        "classification": "static",
+        "match": "argv"
+      },
+      {
+        "index": 3,
+        "verdict": "allow",
+        "classification": "static",
+        "match": "argv"
+      }
+    ]
+  }
+}

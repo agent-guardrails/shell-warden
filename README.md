@@ -30,7 +30,8 @@ no long-lived process.
 ```
 shell-warden [--config FILE]
 # letter JSON (schemas/shell-warden.letter.v1.schema.json) on stdin,
-# verdict JSON (schemas/shell-warden.verdict.v1.schema.json) on stdout
+# verdict v2 envelope (schemas/shell-warden.verdict.v2.schema.json) on stdout:
+# {"protocol":"shell-warden.verdict.v2","result":{...}} — ADR-0023, v2 only
 # exit: 0 verdict written; 1 usage failure; 2 config invalid
 ```
 

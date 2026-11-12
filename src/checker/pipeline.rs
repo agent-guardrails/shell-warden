@@ -30,7 +30,10 @@ use super::matcher::{
     predicate_holds,
 };
 use super::options::{ParsedOptions, parse_options};
-use super::verdict::{CommandVerdict, MatchKind, Verdict};
+use super::verdict::{
+    CommandVerdict, Diagnostics, EvidenceClass, FullDiagnostics, RejectedAllow,
+    TruncatedDiagnostics, Verdict, is_invalid_cause, select_truncated_reasons, sorted_unique,
+};
 
 const DENY_FALLBACK_MESSAGE: &str = "denied by shell-warden policy";
 
@@ -91,7 +94,6 @@ struct PartOutcome {
 
 #[derive(Debug, Default)]
 struct CmdDiag {
-    evidence: String,
     reasons: Vec<String>,
     selected_profiles: Vec<String>,
     matched: Vec<String>,
@@ -248,42 +250,82 @@ pub(super) fn command_verdict(config: &Config, cmd: &Command) -> (CommandVerdict
         message_out = winner.message.clone();
     }
 
-    // evidence + wire classification
+    // evidence + wire classification (02 §2.7): complete → static/argv,
+    // opaque → opaque/raw, invalid → invalid/raw. Invalid dominates opaque,
+    // which dominates complete (08 §8.6). A graph with no participating part
+    // but recorded graph reasons (e.g. the empty-command cause) is invalid.
+    let participating = |i: usize| !graph.collapsed.contains(&i) && !dead_part(&graph.parts[i]);
     let has_invalid = graph.overflow
-        || graph.parts.iter().enumerate().any(|(i, p)| {
-            !graph.collapsed.contains(&i)
-                && !dead_part(p)
-                && matches!(p.state, EvidenceState::Invalid(_))
-        });
-    let has_opaque = graph.parts.iter().enumerate().any(|(i, p)| {
-        !graph.collapsed.contains(&i)
-            && !dead_part(p)
-            && matches!(p.state, EvidenceState::Opaque(_))
-    });
+        || graph
+            .parts
+            .iter()
+            .enumerate()
+            .any(|(i, p)| participating(i) && matches!(p.state, EvidenceState::Invalid(_)))
+        || (graph
+            .reasons
+            .iter()
+            .any(|r| super::verdict::is_invalid_cause(r))
+            && !graph
+                .parts
+                .iter()
+                .enumerate()
+                .any(|(i, _)| participating(i)));
+    let has_opaque = graph
+        .parts
+        .iter()
+        .enumerate()
+        .any(|(i, p)| participating(i) && matches!(p.state, EvidenceState::Opaque(_)));
     let evidence = if has_invalid {
-        "invalid"
+        EvidenceClass::Invalid
     } else if has_opaque {
-        "opaque"
+        EvidenceClass::Opaque
     } else {
-        "complete"
-    };
-    diag.evidence = evidence.to_string();
-    let static_command = evidence == "complete";
-
-    let match_kind = if static_command {
-        MatchKind::Argv
-    } else {
-        MatchKind::Raw
+        EvidenceClass::Complete
     };
 
-    let facts = build_facts(config, &diag);
+    // reasons are the stable codes seen in the graph (08 §8.7), aligned with
+    // each participating part's evidence STATE: complete parts anchor
+    // `complete`, opaque parts anchor `opaque-expansion` (their own reason
+    // word, e.g. the depth-limit marker, is informational and never an
+    // invalid-cause entry — 02 §2.8 forbids invalid causes under opaque
+    // evidence), invalid parts contribute their invalid-cause code. Graph-level
+    // causes (e.g. the empty-command marker) are merged verbatim; option parse
+    // failures were already collected above.
+    // Graph-level causes merge only when they can stay coherent with the
+    // command evidence (02 §2.8): invalid-cause codes are meaningful only
+    // under invalid evidence — markers attached to non-participating parts
+    // (e.g. the split depth limit on a dead substitution part) must not turn
+    // an opaque command's reasons incoherent.
+    for reason in graph.reasons.iter() {
+        if is_invalid_cause(reason) && evidence != EvidenceClass::Invalid {
+            continue;
+        }
+        if !diag.reasons.iter().any(|x| x == reason) {
+            diag.reasons.push((*reason).to_string());
+        }
+    }
+    for (i, part) in graph.parts.iter().enumerate() {
+        if !participating(i) {
+            continue;
+        }
+        let code = match part.state {
+            EvidenceState::Complete => "complete",
+            EvidenceState::Opaque(_) => "opaque-expansion",
+            EvidenceState::Invalid(code) => code,
+        };
+        if !diag.reasons.iter().any(|x| x == code) {
+            diag.reasons.push(code.to_string());
+        }
+    }
+
+    let facts = build_facts(config, &diag, evidence);
     (
         CommandVerdict {
             index: cmd.index,
             verdict,
             rule_id: rule_id_out,
-            classification: super::verdict::ClassificationWire::from_static(static_command),
-            r#match: match_kind,
+            classification: evidence.classification(),
+            r#match: evidence.r#match(),
             facts: Some(facts),
         },
         message_out,
@@ -770,60 +812,59 @@ fn to_path_coverage(entries: &[super::grammar::PathEntry]) -> PathCoverage {
 
 // ── Diagnostics (bounded only after the decision is computed) ────────────────
 
-fn build_facts(config: &Config, diag: &CmdDiag) -> serde_json::Value {
-    let _full = serde_json::json!({
-        "evidence": diag.evidence,
-        "reasons": sorted_reasons(diag),
-        "selectedProfiles": diag.selected_profiles,
-        "matched": diag.matched,
-        "qualified": diag.qualified,
-        "rejected": diag
-            .rejected
-            .iter()
-            .map(|(id, codes)| serde_json::json!({ "ruleId": id, "reasons": codes }))
-            .collect::<Vec<_>>(),
-        "votes": diag.votes,
-    });
+/// Canonical diagnostics per 08 §8.7: reasons sorted and deduplicated with the
+/// required evidence anchor, matched/qualified sorted and deduplicated,
+/// rejected grouped into one entry per rule ID with sorted coverage reasons,
+/// votes in evaluation order. Truncation only after the full shape misses the
+/// `diagnosticsBytes` cap, keeping the deterministic evidence anchor.
+fn build_facts(config: &Config, diag: &CmdDiag, evidence: EvidenceClass) -> Diagnostics {
+    let mut reasons = diag.reasons.clone();
+    let anchor = evidence.reason_anchor();
+    if !anchor.is_empty() && !reasons.iter().any(|r| r == anchor) {
+        reasons.push(anchor.to_string());
+    }
+    let reasons = sorted_unique(&reasons);
+    let full = FullDiagnostics {
+        evidence: evidence.as_str(),
+        reasons: reasons.clone(),
+        selected_profiles: diag.selected_profiles.clone(),
+        matched: sorted_unique(&diag.matched),
+        qualified: sorted_unique(&diag.qualified),
+        rejected: canonical_rejected(&diag.rejected),
+        votes: diag.votes.clone(),
+    };
     let cap = config.limits().diagnostics_bytes as usize;
-    let risksorted = sorted_reasons(diag); // force sorted ordering before bounds
-    let _ = risksorted;
-    let full = serde_json::json!({
-        "evidence": diag.evidence,
-        "reasons": sorted_reasons(diag),
-        "selectedProfiles": diag.selected_profiles,
-        "matched": diag.matched,
-        "qualified": diag.qualified,
-        "rejected": diag
-            .rejected
-            .iter()
-            .map(|(id, codes)| serde_json::json!({ "ruleId": id, "reasons": codes }))
-            .collect::<Vec<_>>(),
-        "votes": diag.votes,
-    });
-    let _ = &full;
     if serde_json::to_vec(&full)
         .map(|b| b.len())
         .unwrap_or(usize::MAX)
         <= cap
     {
-        let _ = RedirectCoverage::None { none: true };
-        return full;
+        return Diagnostics::Full(full);
     }
-    serde_json::json!({
-        "evidence": diag.evidence,
-        "reasons": diag.reasons.iter().take(8).collect::<Vec<_>>(),
-        "diagnostics": diagnostics_truncated_marker(),
+    Diagnostics::Truncated(TruncatedDiagnostics {
+        evidence: evidence.as_str(),
+        reasons: select_truncated_reasons(evidence, &reasons)
+            .unwrap_or_else(|_| reasons.into_iter().take(8).collect()),
+        diagnostics: super::verdict::TRUNCATED_MARKER,
     })
 }
 
-fn diagnostics_truncated_marker() -> &'static str {
-    "truncated-after-decision"
-}
-
-/// Stable reason codes in sorted, deduplicated order (design §Diagnostics).
-fn sorted_reasons(diag: &CmdDiag) -> Vec<String> {
-    let mut out = diag.reasons.clone();
-    out.sort();
-    out.dedup();
-    out
+/// One canonical entry per rejected allow rule ID (08 §8.7): group findings by
+/// rule, deduplicate and sort each entry's coverage reasons by UTF-8 bytes.
+fn canonical_rejected(rejected: &[(String, Vec<String>)]) -> Vec<RejectedAllow> {
+    let mut by_rule: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for (rule_id, codes) in rejected {
+        by_rule
+            .entry(rule_id.clone())
+            .or_default()
+            .extend(codes.iter().cloned());
+    }
+    by_rule
+        .into_iter()
+        .map(|(rule_id, codes)| RejectedAllow {
+            rule_id,
+            reasons: sorted_unique(&codes),
+        })
+        .collect()
 }

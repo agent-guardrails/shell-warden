@@ -16,12 +16,14 @@
     ]
   },
   "expect": {
-    "verdict": "ask",
-    "commands": [
-      {
-        "index": 0,
-        "match": "raw"
-      }
-    ]
+    "result": {
+      "verdict": "ask",
+      "commands": [
+        {
+          "index": 0,
+          "match": "raw"
+        }
+      ]
+    }
   }
 }

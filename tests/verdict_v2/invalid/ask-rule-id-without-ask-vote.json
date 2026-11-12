@@ -1,0 +1,25 @@
+{
+  "protocol": "shell-warden.verdict.v2",
+  "result": {
+    "invocationId": "fixture:ask-rule-id-without-ask-vote",
+    "verdict": "ask",
+    "commands": [
+      {
+        "index": 0,
+        "verdict": "ask",
+        "ruleId": "policy/ask",
+        "classification": "static",
+        "match": "argv",
+        "facts": {
+          "evidence": "complete",
+          "reasons": ["complete"],
+          "selectedProfiles": ["base"],
+          "matched": [],
+          "qualified": [],
+          "rejected": [],
+          "votes": []
+        }
+      }
+    ]
+  }
+}
