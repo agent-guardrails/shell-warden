@@ -99,10 +99,12 @@ function verdictOutcome(result) {
   } catch (error) {
     return { ok: false, detail: `exit=0 unparsable-verdict=${error.message} stdout=${JSON.stringify(result.stdout)}` }
   }
-  if (!parsed || !VALID_VERDICTS.has(parsed.verdict)) {
+  // verdict v2 only (ADR-0023): the checker emits exactly {protocol, result}
+  const verdict = parsed && parsed.result && parsed.result.verdict
+  if (!VALID_VERDICTS.has(verdict)) {
     return { ok: false, detail: `exit=0 invalid-verdict=${JSON.stringify(parsed)}` }
   }
-  return { ok: true, detail: `exit=0 verdict=${parsed.verdict}` }
+  return { ok: true, detail: `exit=0 verdict=${verdict}` }
 }
 
 function invalidOutcome(result) {

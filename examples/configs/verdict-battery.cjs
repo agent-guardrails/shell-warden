@@ -31,7 +31,8 @@ function checkerBin() {
 
 function runCase(cfg, { raw }) {
   const letter = { version: 1, invocation: { id: "battery", sessionID: "battery" }, action: "shell", commands: [{ index: 0, cwd: process.cwd(), raw }] }
-  return JSON.parse(execFileSync(checkerBin(), ["--config", cfg], { encoding: "utf8", input: JSON.stringify(letter), timeout: 15_000 }))
+  // verdict v2 only (ADR-0023): the checker emits exactly {protocol, result}
+  return JSON.parse(execFileSync(checkerBin(), ["--config", cfg], { encoding: "utf8", input: JSON.stringify(letter), timeout: 15_000 })).result
 }
 
 const { config, battery } = parseArgs(process.argv)
