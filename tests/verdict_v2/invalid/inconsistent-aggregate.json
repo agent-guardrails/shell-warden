@@ -1,0 +1,22 @@
+{
+  "protocol": "shell-warden.verdict.v2",
+  "result": {
+    "invocationId": "fixture:bad-aggregate",
+    "verdict": "allow",
+    "commands": [
+      {
+        "index": 0,
+        "verdict": "ask",
+        "classification": "invalid",
+        "match": "raw"
+      },
+      {
+        "index": 1,
+        "verdict": "allow",
+        "ruleId": "base/echo",
+        "classification": "static",
+        "match": "argv"
+      }
+    ]
+  }
+}

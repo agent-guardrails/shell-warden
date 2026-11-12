@@ -16,12 +16,14 @@
     ]
   },
   "expect": {
-    "verdict": "deny",
-    "commands": [
-      {
-        "index": 0,
-        "ruleId": "rm/no-etc"
-      }
-    ]
+    "result": {
+      "verdict": "deny",
+      "commands": [
+        {
+          "index": 0,
+          "ruleId": "rm/no-etc"
+        }
+      ]
+    }
   }
 }

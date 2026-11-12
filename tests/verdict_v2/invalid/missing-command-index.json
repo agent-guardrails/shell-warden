@@ -1,0 +1,21 @@
+{
+  "protocol": "shell-warden.verdict.v2",
+  "result": {
+    "invocationId": "fixture:missing-command-index",
+    "verdict": "ask",
+    "commands": [
+      {
+        "index": 0,
+        "verdict": "ask",
+        "classification": "opaque",
+        "match": "raw"
+      },
+      {
+        "index": 1,
+        "verdict": "allow",
+        "classification": "static",
+        "match": "argv"
+      }
+    ]
+  }
+}

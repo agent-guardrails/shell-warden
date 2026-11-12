@@ -1,0 +1,29 @@
+{
+  "protocol": "shell-warden.verdict.v2",
+  "result": {
+    "invocationId": "fixture:truncated-complete-anchor",
+    "verdict": "ask",
+    "commands": [
+      {
+        "index": 0,
+        "verdict": "ask",
+        "classification": "static",
+        "match": "argv",
+        "facts": {
+          "evidence": "complete",
+          "reasons": [
+            "allow-coverage-missing",
+            "complete",
+            "option-not-allowed",
+            "option-not-repeatable",
+            "option-value-position-uncovered",
+            "option-value-uncovered",
+            "redirect-policy-uncovered",
+            "remainder-uncovered"
+          ],
+          "diagnostics": "truncated-after-decision"
+        }
+      }
+    ]
+  }
+}

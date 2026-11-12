@@ -1,0 +1,16 @@
+{
+  "protocol": "shell-warden.verdict.v2",
+  "result": {
+    "invocationId": "fixture:missing-deny-rule-id",
+    "verdict": "deny",
+    "message": "Denied by policy.",
+    "commands": [
+      {
+        "index": 0,
+        "verdict": "deny",
+        "classification": "static",
+        "match": "argv"
+      }
+    ]
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "protocol": "shell-warden.verdict.v2",
+  "result": {
+    "invocationId": "fixture:utf8-rule-id-order",
+    "verdict": "allow",
+    "commands": [
+      {
+        "index": 0,
+        "verdict": "allow",
+        "ruleId": "policy/\uE000",
+        "classification": "static",
+        "match": "argv",
+        "facts": {
+          "evidence": "complete",
+          "reasons": ["complete"],
+          "selectedProfiles": ["base"],
+          "matched": ["policy/\uE000", "policy/\uD800\uDC00"],
+          "qualified": ["policy/\uE000", "policy/\uD800\uDC00"],
+          "rejected": [],
+          "votes": ["allow:policy/\uD800\uDC00", "allow:policy/\uE000"]
+        }
+      }
+    ]
+  }
+}

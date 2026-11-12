@@ -1,0 +1,22 @@
+{
+  "protocol": "shell-warden.verdict.v2",
+  "result": {
+    "invocationId": "fixture:invalid-deny",
+    "verdict": "deny",
+    "message": "The option is denied by policy.",
+    "commands": [
+      {
+        "index": 0,
+        "verdict": "deny",
+        "ruleId": "vcs/no-force",
+        "classification": "invalid",
+        "match": "raw",
+        "facts": {
+          "evidence": "invalid",
+          "reasons": ["unknown-option"],
+          "diagnostics": "truncated-after-decision"
+        }
+      }
+    ]
+  }
+}

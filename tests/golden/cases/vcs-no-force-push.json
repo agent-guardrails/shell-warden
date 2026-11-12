@@ -16,13 +16,15 @@
     ]
   },
   "expect": {
-    "verdict": "deny",
-    "message": "contains:forbidden",
-    "commands": [
-      {
-        "index": 0,
-        "ruleId": "git/deny-force-push"
-      }
-    ]
+    "result": {
+      "verdict": "deny",
+      "message": "contains:forbidden",
+      "commands": [
+        {
+          "index": 0,
+          "ruleId": "git/deny-force-push"
+        }
+      ]
+    }
   }
 }

@@ -1,0 +1,15 @@
+{
+  "protocol": "shell-warden.verdict.v2",
+  "result": {
+    "invocationId": "fixture:foreign-invocation",
+    "verdict": "ask",
+    "commands": [
+      {
+        "index": 0,
+        "verdict": "ask",
+        "classification": "opaque",
+        "match": "raw"
+      }
+    ]
+  }
+}

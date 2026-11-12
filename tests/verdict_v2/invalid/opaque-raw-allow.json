@@ -1,0 +1,15 @@
+{
+  "protocol": "shell-warden.verdict.v2",
+  "result": {
+    "invocationId": "fixture:opaque-allow",
+    "verdict": "allow",
+    "commands": [
+      {
+        "index": 0,
+        "verdict": "allow",
+        "classification": "opaque",
+        "match": "raw"
+      }
+    ]
+  }
+}

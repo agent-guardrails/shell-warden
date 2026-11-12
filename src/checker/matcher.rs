@@ -934,7 +934,7 @@ impl CoverageCode {
             CoverageCode::RequiredOptionMissing => reason::REQUIRED_OPTION_MISSING,
             CoverageCode::OptionNotRepeatable => reason::OPTION_NOT_REPEATABLE,
             CoverageCode::OptionNotAllowed => reason::OPTION_NOT_ALLOWED,
-            CoverageCode::OptionValuesUncovered => reason::OPTION_VALUES_UNCOVERED,
+            CoverageCode::OptionValuesUncovered => reason::OPTION_VALUE_UNCOVERED,
             CoverageCode::RemainderUncovered => reason::REMAINDER_UNCOVERED,
             CoverageCode::RedirectPolicyUncovered => reason::REDIRECT_POLICY_UNCOVERED,
         }

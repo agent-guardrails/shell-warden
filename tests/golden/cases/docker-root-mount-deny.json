@@ -16,12 +16,14 @@
     ]
   },
   "expect": {
-    "verdict": "deny",
-    "commands": [
-      {
-        "index": 0,
-        "ruleId": "docker/no-root-mount"
-      }
-    ]
+    "result": {
+      "verdict": "deny",
+      "commands": [
+        {
+          "index": 0,
+          "ruleId": "docker/no-root-mount"
+        }
+      ]
+    }
   }
 }
