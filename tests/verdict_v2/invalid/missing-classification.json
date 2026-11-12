@@ -1,0 +1,14 @@
+{
+  "protocol": "shell-warden.verdict.v2",
+  "result": {
+    "invocationId": "fixture:missing-classification",
+    "verdict": "ask",
+    "commands": [
+      {
+        "index": 0,
+        "verdict": "ask",
+        "match": "raw"
+      }
+    ]
+  }
+}

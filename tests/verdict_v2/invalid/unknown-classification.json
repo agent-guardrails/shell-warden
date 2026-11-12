@@ -1,0 +1,15 @@
+{
+  "protocol": "shell-warden.verdict.v2",
+  "result": {
+    "invocationId": "fixture:unknown-classification",
+    "verdict": "ask",
+    "commands": [
+      {
+        "index": 0,
+        "verdict": "ask",
+        "classification": "partial",
+        "match": "raw"
+      }
+    ]
+  }
+}

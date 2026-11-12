@@ -1,0 +1,29 @@
+{
+  "protocol": "shell-warden.verdict.v2",
+  "result": {
+    "invocationId": "fixture:invalid-ask",
+    "verdict": "ask",
+    "commands": [
+      {
+        "index": 0,
+        "verdict": "ask",
+        "classification": "invalid",
+        "match": "raw",
+        "facts": {
+          "evidence": "invalid",
+          "reasons": ["allow-evidence-not-complete", "unknown-option"],
+          "selectedProfiles": ["git"],
+          "matched": ["vcs/status"],
+          "qualified": [],
+          "rejected": [
+            {
+              "ruleId": "vcs/status",
+              "reasons": ["allow-evidence-not-complete"]
+            }
+          ],
+          "votes": []
+        }
+      }
+    ]
+  }
+}

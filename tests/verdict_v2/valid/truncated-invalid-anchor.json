@@ -1,0 +1,29 @@
+{
+  "protocol": "shell-warden.verdict.v2",
+  "result": {
+    "invocationId": "fixture:truncated-invalid-anchor",
+    "verdict": "ask",
+    "commands": [
+      {
+        "index": 0,
+        "verdict": "ask",
+        "classification": "invalid",
+        "match": "raw",
+        "facts": {
+          "evidence": "invalid",
+          "reasons": [
+            "allow-coverage-missing",
+            "allow-evidence-not-complete",
+            "option-not-allowed",
+            "option-not-repeatable",
+            "option-value-position-uncovered",
+            "option-value-uncovered",
+            "redirect-policy-uncovered",
+            "unsupported-syntax"
+          ],
+          "diagnostics": "truncated-after-decision"
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "protocol": "shell-warden.verdict.v2",
+  "result": {
+    "invocationId": "fixture:static-allow-without-allow-vote",
+    "verdict": "allow",
+    "commands": [
+      {
+        "index": 0,
+        "verdict": "allow",
+        "classification": "static",
+        "match": "argv",
+        "facts": {
+          "evidence": "complete",
+          "reasons": ["complete"],
+          "selectedProfiles": ["base"],
+          "matched": [],
+          "qualified": [],
+          "rejected": [],
+          "votes": []
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "protocol": "shell-warden.verdict.v2",
+  "result": {
+    "invocationId": "fixture:truncated-opaque-anchor",
+    "verdict": "ask",
+    "commands": [
+      {
+        "index": 0,
+        "verdict": "ask",
+        "classification": "opaque",
+        "match": "raw",
+        "facts": {
+          "evidence": "opaque",
+          "reasons": [
+            "allow-coverage-missing",
+            "allow-evidence-not-complete",
+            "opaque-expansion",
+            "option-not-allowed",
+            "option-not-repeatable",
+            "option-value-position-uncovered",
+            "option-value-uncovered",
+            "redirect-policy-uncovered"
+          ],
+          "diagnostics": "truncated-after-decision"
+        }
+      }
+    ]
+  }
+}

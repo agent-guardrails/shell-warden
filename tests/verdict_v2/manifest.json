@@ -1,0 +1,452 @@
+{
+  "fixtures": [
+    {
+      "path": "valid/ask-emitted-vote.json",
+      "schemaVersion": "v2",
+      "roles": ["checker-producer", "checker-serialization", "hook-consumer"],
+      "expectedInvocationId": "fixture:ask-emitted-vote",
+      "positionalIndexes": [0],
+      "phase": "valid",
+      "expectedError": null
+    },
+    {
+      "path": "valid/ask-only-allow-votes.json",
+      "schemaVersion": "v2",
+      "roles": ["checker-producer", "checker-serialization", "hook-consumer"],
+      "expectedInvocationId": "fixture:ask-only-allow-votes",
+      "positionalIndexes": [0],
+      "phase": "valid",
+      "expectedError": null
+    },
+    {
+      "path": "valid/invalid-ask-plus-static-allow.json",
+      "schemaVersion": "v2",
+      "roles": ["checker-producer", "checker-serialization", "hook-consumer"],
+      "expectedInvocationId": "fixture:mixed-ask",
+      "positionalIndexes": [0, 1],
+      "phase": "valid",
+      "expectedError": null
+    },
+    {
+      "path": "valid/invalid-raw-ask.json",
+      "schemaVersion": "v2",
+      "roles": ["checker-producer", "checker-serialization", "hook-consumer"],
+      "expectedInvocationId": "fixture:invalid-ask",
+      "positionalIndexes": [0],
+      "phase": "valid",
+      "expectedError": null
+    },
+    {
+      "path": "valid/invalid-raw-ask-emitted-ask-vote.json",
+      "schemaVersion": "v2",
+      "roles": ["checker-producer", "checker-serialization", "hook-consumer"],
+      "expectedInvocationId": "fixture:invalid-raw-ask-emitted-ask-vote",
+      "positionalIndexes": [0],
+      "phase": "valid",
+      "expectedError": null
+    },
+    {
+      "path": "valid/invalid-raw-deny.json",
+      "schemaVersion": "v2",
+      "roles": ["checker-producer", "checker-serialization", "hook-consumer"],
+      "expectedInvocationId": "fixture:invalid-deny",
+      "positionalIndexes": [0],
+      "phase": "valid",
+      "expectedError": null
+    },
+    {
+      "path": "valid/opaque-raw-ask.json",
+      "schemaVersion": "v2",
+      "roles": ["checker-producer", "checker-serialization", "hook-consumer"],
+      "expectedInvocationId": "fixture:opaque-ask",
+      "positionalIndexes": [0],
+      "phase": "valid",
+      "expectedError": null
+    },
+    {
+      "path": "valid/opaque-complete-reason.json",
+      "schemaVersion": "v2",
+      "roles": ["checker-producer", "checker-serialization", "hook-consumer"],
+      "expectedInvocationId": "fixture:opaque-complete-reason",
+      "positionalIndexes": [0],
+      "phase": "valid",
+      "expectedError": null
+    },
+    {
+      "path": "valid/static-argv-allow.json",
+      "schemaVersion": "v2",
+      "roles": ["checker-producer", "checker-serialization", "hook-consumer"],
+      "expectedInvocationId": "fixture:static-allow",
+      "positionalIndexes": [0],
+      "phase": "valid",
+      "expectedError": null
+    },
+    {
+      "path": "valid/truncated-complete-anchor.json",
+      "schemaVersion": "v2",
+      "roles": ["checker-producer", "checker-serialization", "hook-consumer"],
+      "expectedInvocationId": "fixture:truncated-complete-anchor",
+      "positionalIndexes": [0],
+      "phase": "valid",
+      "expectedError": null
+    },
+    {
+      "path": "valid/truncated-invalid-anchor.json",
+      "schemaVersion": "v2",
+      "roles": ["checker-producer", "checker-serialization", "hook-consumer"],
+      "expectedInvocationId": "fixture:truncated-invalid-anchor",
+      "positionalIndexes": [0],
+      "phase": "valid",
+      "expectedError": null
+    },
+    {
+      "path": "valid/truncated-opaque-anchor.json",
+      "schemaVersion": "v2",
+      "roles": ["checker-producer", "checker-serialization", "hook-consumer"],
+      "expectedInvocationId": "fixture:truncated-opaque-anchor",
+      "positionalIndexes": [0],
+      "phase": "valid",
+      "expectedError": null
+    },
+    {
+      "path": "valid/utf8-rule-id-order.json",
+      "schemaVersion": "v2",
+      "roles": ["checker-producer", "checker-serialization", "hook-consumer"],
+      "expectedInvocationId": "fixture:utf8-rule-id-order",
+      "positionalIndexes": [0],
+      "phase": "valid",
+      "expectedError": null
+    },
+    {
+      "path": "invalid/v1-flat-response-rejected.json",
+      "schemaVersion": "v2",
+      "roles": ["hook-consumer"],
+      "expectedInvocationId": "fixture:v1-flat-response-rejected",
+      "positionalIndexes": [0],
+      "phase": "consumer-rejection",
+      "expectedError": {
+        "code": "schema.required",
+        "location": "/",
+        "schemaPath": "#/required",
+        "params": { "missingProperty": "protocol" }
+      }
+    },
+    {
+      "path": "invalid/arbitrary-diagnostic-property.json",
+      "schemaVersion": "v2",
+      "roles": ["checker-serialization", "hook-consumer"],
+      "expectedInvocationId": "fixture:arbitrary-diagnostic",
+      "positionalIndexes": [0],
+      "phase": "schema",
+      "expectedError": {
+        "code": "schema.additionalProperties",
+        "location": "/result/commands/0/facts",
+        "schemaPath": "#/additionalProperties",
+        "params": { "additionalProperty": "parserError" }
+      }
+    },
+    {
+      "path": "invalid/ask-rule-id-without-ask-vote.json",
+      "schemaVersion": "v2",
+      "roles": ["checker-producer", "hook-consumer"],
+      "expectedInvocationId": "fixture:ask-rule-id-without-ask-vote",
+      "positionalIndexes": [0],
+      "phase": "semantic",
+      "expectedError": { "code": "rule_id.unexpected", "location": "/result/commands/0/ruleId" }
+    },
+    {
+      "path": "invalid/contradictory-allow-deny-vote.json",
+      "schemaVersion": "v2",
+      "roles": ["checker-producer", "hook-consumer"],
+      "expectedInvocationId": "fixture:contradictory-allow-deny-vote",
+      "positionalIndexes": [0],
+      "phase": "semantic",
+      "expectedError": { "code": "votes.verdict_mismatch", "location": "/result/commands/0/facts/votes" }
+    },
+    {
+      "path": "invalid/duplicate-command-index.json",
+      "schemaVersion": "v2",
+      "roles": ["checker-producer", "hook-consumer"],
+      "expectedInvocationId": "fixture:duplicate-command-index",
+      "positionalIndexes": [0, 1],
+      "phase": "semantic",
+      "expectedError": { "code": "indexes.duplicate", "location": "/result/commands" }
+    },
+    {
+      "path": "invalid/facts-evidence-inconsistent.json",
+      "schemaVersion": "v2",
+      "roles": ["checker-serialization", "hook-consumer"],
+      "expectedInvocationId": "fixture:bad-evidence",
+      "positionalIndexes": [0],
+      "phase": "schema",
+      "expectedError": {
+        "code": "schema.const",
+        "location": "/result/commands/0/facts/evidence",
+        "schemaPath": "#/allOf/4/then/properties/facts/properties/evidence/const"
+      }
+    },
+    {
+      "path": "invalid/foreign-invocation-id.json",
+      "schemaVersion": "v2",
+      "roles": ["checker-producer", "hook-consumer"],
+      "expectedInvocationId": "fixture:expected-invocation",
+      "positionalIndexes": [0],
+      "phase": "semantic",
+      "expectedError": { "code": "invocation.mismatch", "location": "/result/invocationId" }
+    },
+    {
+      "path": "invalid/inconsistent-aggregate.json",
+      "schemaVersion": "v2",
+      "roles": ["checker-producer", "hook-consumer"],
+      "expectedInvocationId": "fixture:bad-aggregate",
+      "positionalIndexes": [0, 1],
+      "phase": "semantic",
+      "expectedError": { "code": "aggregate.mismatch", "location": "/result/verdict" }
+    },
+    {
+      "path": "invalid/invalid-allow.json",
+      "schemaVersion": "v2",
+      "roles": ["checker-serialization", "hook-consumer"],
+      "expectedInvocationId": "fixture:invalid-allow",
+      "positionalIndexes": [0],
+      "phase": "schema",
+      "expectedError": {
+        "code": "schema.enum",
+        "location": "/result/commands/0/verdict",
+        "schemaPath": "#/allOf/0/oneOf/2/properties/verdict/enum"
+      }
+    },
+    {
+      "path": "invalid/invalid-evidence-complete-only.json",
+      "schemaVersion": "v2",
+      "roles": ["checker-producer", "hook-consumer"],
+      "expectedInvocationId": "fixture:invalid-evidence-complete-only",
+      "positionalIndexes": [0],
+      "phase": "semantic",
+      "expectedError": { "code": "reasons.invalid_required", "location": "/result/commands/0/facts/reasons" }
+    },
+    {
+      "path": "invalid/malformed-classification-type.json",
+      "schemaVersion": "v2",
+      "roles": ["checker-serialization", "hook-consumer"],
+      "expectedInvocationId": "fixture:malformed-classification",
+      "positionalIndexes": [0],
+      "phase": "schema",
+      "expectedError": {
+        "code": "schema.enum",
+        "location": "/result/commands/0/classification",
+        "schemaPath": "#/properties/classification/enum"
+      }
+    },
+    {
+      "path": "invalid/missing-aggregate-deny-message.json",
+      "schemaVersion": "v2",
+      "roles": ["checker-serialization", "hook-consumer"],
+      "expectedInvocationId": "fixture:missing-aggregate-deny-message",
+      "positionalIndexes": [0],
+      "phase": "schema",
+      "expectedError": {
+        "code": "schema.required",
+        "location": "/result",
+        "schemaPath": "#/allOf/0/then/required",
+        "params": { "missingProperty": "message" }
+      }
+    },
+    {
+      "path": "invalid/missing-classification.json",
+      "schemaVersion": "v2",
+      "roles": ["checker-serialization", "hook-consumer"],
+      "expectedInvocationId": "fixture:missing-classification",
+      "positionalIndexes": [0],
+      "phase": "schema",
+      "expectedError": {
+        "code": "schema.required",
+        "location": "/result/commands/0",
+        "schemaPath": "#/required",
+        "params": { "missingProperty": "classification" }
+      }
+    },
+    {
+      "path": "invalid/missing-command-index.json",
+      "schemaVersion": "v2",
+      "roles": ["checker-producer", "hook-consumer"],
+      "expectedInvocationId": "fixture:missing-command-index",
+      "positionalIndexes": [0, 1, 2],
+      "phase": "semantic",
+      "expectedError": { "code": "indexes.missing", "location": "/result/commands" }
+    },
+    {
+      "path": "invalid/missing-deny-rule-id.json",
+      "schemaVersion": "v2",
+      "roles": ["checker-serialization", "hook-consumer"],
+      "expectedInvocationId": "fixture:missing-deny-rule-id",
+      "positionalIndexes": [0],
+      "phase": "schema",
+      "expectedError": {
+        "code": "schema.required",
+        "location": "/result/commands/0",
+        "schemaPath": "#/allOf/1/then/required",
+        "params": { "missingProperty": "ruleId" }
+      }
+    },
+    {
+      "path": "invalid/missing-match.json",
+      "schemaVersion": "v2",
+      "roles": ["checker-serialization", "hook-consumer"],
+      "expectedInvocationId": "fixture:missing-match",
+      "positionalIndexes": [0],
+      "phase": "schema",
+      "expectedError": {
+        "code": "schema.required",
+        "location": "/result/commands/0",
+        "schemaPath": "#/required",
+        "params": { "missingProperty": "match" }
+      }
+    },
+    {
+      "path": "invalid/non-contiguous-command-index.json",
+      "schemaVersion": "v2",
+      "roles": ["checker-producer", "hook-consumer"],
+      "expectedInvocationId": "fixture:non-contiguous-command-index",
+      "positionalIndexes": [0, 1, 2],
+      "phase": "semantic",
+      "expectedError": { "code": "indexes.position", "location": "/result/commands/1/index" }
+    },
+    {
+      "path": "invalid/non-string-protocol.json",
+      "schemaVersion": "v2",
+      "roles": ["checker-serialization", "hook-consumer"],
+      "expectedInvocationId": "fixture:non-string-protocol",
+      "positionalIndexes": [0],
+      "phase": "schema",
+      "expectedError": {
+        "code": "schema.const",
+        "location": "/protocol",
+        "schemaPath": "#/properties/protocol/const"
+      }
+    },
+    {
+      "path": "invalid/opaque-argv.json",
+      "schemaVersion": "v2",
+      "roles": ["checker-serialization", "hook-consumer"],
+      "expectedInvocationId": "fixture:opaque-argv",
+      "positionalIndexes": [0],
+      "phase": "schema",
+      "expectedError": {
+        "code": "schema.const",
+        "location": "/result/commands/0/match",
+        "schemaPath": "#/allOf/0/oneOf/1/properties/match/const"
+      }
+    },
+    {
+      "path": "invalid/opaque-raw-allow.json",
+      "schemaVersion": "v2",
+      "roles": ["checker-serialization", "hook-consumer"],
+      "expectedInvocationId": "fixture:opaque-allow",
+      "positionalIndexes": [0],
+      "phase": "schema",
+      "expectedError": {
+        "code": "schema.enum",
+        "location": "/result/commands/0/verdict",
+        "schemaPath": "#/allOf/0/oneOf/1/properties/verdict/enum"
+      }
+    },
+    {
+      "path": "invalid/out-of-range-command-index.json",
+      "schemaVersion": "v2",
+      "roles": ["checker-producer", "hook-consumer"],
+      "expectedInvocationId": "fixture:out-of-range-command-index",
+      "positionalIndexes": [0, 1],
+      "phase": "semantic",
+      "expectedError": { "code": "indexes.unexpected", "location": "/result/commands" }
+    },
+    {
+      "path": "invalid/rule-id-not-winning-vote.json",
+      "schemaVersion": "v2",
+      "roles": ["checker-producer", "hook-consumer"],
+      "expectedInvocationId": "fixture:rule-id-not-winning-vote",
+      "positionalIndexes": [0],
+      "phase": "semantic",
+      "expectedError": { "code": "rule_id.winner_mismatch", "location": "/result/commands/0/ruleId" }
+    },
+    {
+      "path": "invalid/static-allow-without-allow-vote.json",
+      "schemaVersion": "v2",
+      "roles": ["checker-producer", "hook-consumer"],
+      "expectedInvocationId": "fixture:static-allow-without-allow-vote",
+      "positionalIndexes": [0],
+      "phase": "semantic",
+      "expectedError": { "code": "votes.allow_required", "location": "/result/commands/0/facts/votes" }
+    },
+    {
+      "path": "invalid/static-raw.json",
+      "schemaVersion": "v2",
+      "roles": ["checker-serialization", "hook-consumer"],
+      "expectedInvocationId": "fixture:static-raw",
+      "positionalIndexes": [0],
+      "phase": "schema",
+      "expectedError": {
+        "code": "schema.const",
+        "location": "/result/commands/0/match",
+        "schemaPath": "#/allOf/0/oneOf/0/properties/match/const"
+      }
+    },
+    {
+      "path": "invalid/static-structural-reason.json",
+      "schemaVersion": "v2",
+      "roles": ["checker-producer", "hook-consumer"],
+      "expectedInvocationId": "fixture:static-structural-reason",
+      "positionalIndexes": [0],
+      "phase": "semantic",
+      "expectedError": { "code": "reasons.complete_required", "location": "/result/commands/0/facts/reasons" }
+    },
+    {
+      "path": "invalid/truncated-static-unknown-option.json",
+      "schemaVersion": "v2",
+      "roles": ["checker-producer", "hook-consumer"],
+      "expectedInvocationId": "fixture:truncated-static-unknown-option",
+      "positionalIndexes": [0],
+      "phase": "semantic",
+      "expectedError": { "code": "reasons.complete_required", "location": "/result/commands/0/facts/reasons" }
+    },
+    {
+      "path": "invalid/unknown-classification.json",
+      "schemaVersion": "v2",
+      "roles": ["checker-serialization", "hook-consumer"],
+      "expectedInvocationId": "fixture:unknown-classification",
+      "positionalIndexes": [0],
+      "phase": "schema",
+      "expectedError": {
+        "code": "schema.enum",
+        "location": "/result/commands/0/classification",
+        "schemaPath": "#/properties/classification/enum"
+      }
+    },
+    {
+      "path": "invalid/unknown-match.json",
+      "schemaVersion": "v2",
+      "roles": ["checker-serialization", "hook-consumer"],
+      "expectedInvocationId": "fixture:unknown-match",
+      "positionalIndexes": [0],
+      "phase": "schema",
+      "expectedError": {
+        "code": "schema.enum",
+        "location": "/result/commands/0/match",
+        "schemaPath": "#/properties/match/enum"
+      }
+    },
+    {
+      "path": "invalid/unknown-protocol.json",
+      "schemaVersion": "v2",
+      "roles": ["checker-serialization", "hook-consumer"],
+      "expectedInvocationId": "fixture:unknown-protocol",
+      "positionalIndexes": [0],
+      "phase": "schema",
+      "expectedError": {
+        "code": "schema.const",
+        "location": "/protocol",
+        "schemaPath": "#/properties/protocol/const"
+      }
+    }
+  ]
+}

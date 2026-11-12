@@ -496,3 +496,195 @@ fn reorder_rules_options_policies_keeps_verdicts() {
 fn allow_log_oneline_smoke() {
     allow_log_oneline_impl();
 }
+
+// ── Verdict v2 wire contract (02-letter-verdict §2.7/§2.8, ADR-0023) ────────
+
+#[test]
+fn v2_classification_and_match_follow_the_evidence_state() {
+    // complete → static + argv (02 §2.7 mapping table)
+    let v = run(SKETCH, "git status");
+    let j = serde_json::to_value(&v).unwrap();
+    assert_eq!(j["commands"][0]["classification"], "static");
+    assert_eq!(j["commands"][0]["match"], "argv");
+
+    // opaque → opaque + raw
+    let v = run(SKETCH, "git log \"$BRANCH\"");
+    let j = serde_json::to_value(&v).unwrap();
+    assert_eq!(j["commands"][0]["classification"], "opaque");
+    assert_eq!(j["commands"][0]["match"], "raw");
+
+    // invalid → invalid + raw; the ask floor keeps it ask, and the bare
+    // default ask (no ordinary vote) MUST omit ruleId (08 §8.6.4)
+    let v = run(SKETCH, "git status --wat");
+    assert_eq!(v.verdict, VerdictKind::Ask);
+    let j = serde_json::to_value(&v).unwrap();
+    assert_eq!(j["commands"][0]["classification"], "invalid");
+    assert_eq!(j["commands"][0]["match"], "raw");
+    assert!(j["commands"][0]["ruleId"].is_null());
+    assert_eq!(
+        run_facts(&v)["evidence"],
+        "invalid",
+        "v2 carries the true evidence state"
+    );
+}
+
+#[test]
+fn invalid_evidence_can_emit_ask_and_deny_from_ordinary_rules() {
+    // an emitted ask vote on invalid evidence carries the deterministic ruleId
+    let cfg = load_str(UTF8_RULES).expect("config must be valid");
+    let v = evaluate(&cfg, &letter("git status --wat"));
+    assert_eq!(v.verdict, VerdictKind::Ask);
+    let j = serde_json::to_value(&v).unwrap();
+    assert_eq!(j["commands"][0]["ruleId"], "policy/ask-invalid");
+    assert_eq!(j["commands"][0]["classification"], "invalid");
+
+    // an ordinary deny rule matching raw text stays dominant on invalid evidence
+    let v = run(SKETCH, "git push --force --wat origin main");
+    assert_eq!(v.verdict, VerdictKind::Deny);
+    let j = serde_json::to_value(&v).unwrap();
+    assert_eq!(j["commands"][0]["classification"], "invalid");
+    assert_eq!(j["commands"][0]["match"], "raw");
+    assert_eq!(j["commands"][0]["ruleId"], "git/deny-force-push");
+    // deny commands MUST carry ruleId; aggregate deny carries a message
+    assert!(v.message.is_some());
+}
+
+#[test]
+fn empty_command_is_invalid_raw_ask() {
+    let v = run(SKETCH, "   ");
+    assert_eq!(v.verdict, VerdictKind::Ask);
+    let j = serde_json::to_value(&v).unwrap();
+    assert_eq!(j["commands"][0]["classification"], "invalid");
+    assert_eq!(j["commands"][0]["match"], "raw");
+    let facts = run_facts(&v);
+    assert_eq!(facts["evidence"], "invalid");
+    let reasons: Vec<&str> = facts["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r.as_str().unwrap())
+        .collect();
+    assert!(reasons.contains(&"empty-command"), "reasons: {reasons:?}");
+}
+
+#[test]
+fn diagnostics_are_canonical_sorted_and_anchored() {
+    // complete evidence carries the complete anchor (02 §2.8)
+    let v = run(SKETCH, "git status");
+    let facts = run_facts(&v);
+    let reasons: Vec<&str> = facts["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r.as_str().unwrap())
+        .collect();
+    assert!(reasons.contains(&"complete"), "reasons: {reasons:?}");
+    assert!(reasons.windows(2).all(|w| w[0] < w[1]), "sorted reasons");
+    let matched: Vec<&str> = facts["matched"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m.as_str().unwrap())
+        .collect();
+    assert!(matched.windows(2).all(|w| w[0] < w[1]), "sorted matched");
+
+    // opaque evidence carries the opaque-expansion anchor
+    let v = run(SKETCH, "git log \"$BRANCH\"");
+    let facts = run_facts(&v);
+    let reasons: Vec<&str> = facts["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r.as_str().unwrap())
+        .collect();
+    assert!(
+        reasons.contains(&"opaque-expansion"),
+        "reasons: {reasons:?}"
+    );
+    assert!(
+        !reasons
+            .iter()
+            .any(|r| shell_warden::checker::verdict::is_invalid_cause(r)),
+        "opaque evidence must not carry an invalid-cause reason"
+    );
+
+    // rejected allow findings collapse to one canonical entry per ruleId with
+    // sorted coverage reasons (08 §8.7)
+    let v = run(SKETCH, "git log");
+    let facts = run_facts(&v);
+    let rejected = facts["rejected"].as_array().unwrap();
+    assert!(!rejected.is_empty());
+    let mut ids: Vec<&str> = rejected
+        .iter()
+        .map(|e| e["ruleId"].as_str().unwrap())
+        .collect();
+    let dedup_len = {
+        ids.sort();
+        ids.dedup();
+        ids.len()
+    };
+    assert_eq!(rejected.len(), dedup_len, "one entry per rejected rule id");
+    for entry in rejected {
+        let codes: Vec<&str> = entry["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r.as_str().unwrap())
+            .collect();
+        assert!(
+            codes.windows(2).all(|w| w[0] < w[1]),
+            "sorted codes: {codes:?}"
+        );
+    }
+}
+
+const UTF8_RULES: &str = r#"{  "version": 2,
+  "defaults": { "action": "ask", "redirectPolicy": "no-redirects" },
+  "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
+  "profiles": [
+    {
+      "id": "git",
+      "executables": ["git"],
+      "options": {},
+      "rules": [
+        {
+          "id": "policy/ask-invalid",
+          "action": "ask",
+          "match": { "arguments": { "exact": ["status"] } }
+        },
+        {
+          "id": "policy/ask-status",
+          "action": "ask",
+          "match": { "arguments": { "prefix": ["status"] } }
+        }
+      ]
+    }
+  ]
+}"#;
+
+#[test]
+fn rule_id_is_the_utf8_byte_order_smallest_winning_vote() {
+    let cfg = load_str(UTF8_RULES).expect("config must be valid");
+    // both rules emit ask votes for `git status`; the UTF-8 byte-order smallest
+    // wins ("policy/ask-invalid" < "policy/ask-status")
+    let v = evaluate(&cfg, &letter("git status"));
+    assert_eq!(v.verdict, VerdictKind::Ask);
+    let j = serde_json::to_value(&v).unwrap();
+    assert_eq!(j["commands"][0]["ruleId"], "policy/ask-invalid");
+    let facts = run_facts(&v);
+    assert_eq!(
+        facts["votes"],
+        serde_json::json!(["ask:policy/ask-invalid", "ask:policy/ask-status"]),
+        "votes stay in evaluation order"
+    );
+    // `git fetch origin`: no rule matches — the bare default ask MUST omit
+    // ruleId even though the evidence itself is complete (static/argv/ask)
+    let v = evaluate(&cfg, &letter("git fetch origin"));
+    assert_eq!(v.verdict, VerdictKind::Ask);
+    let j = serde_json::to_value(&v).unwrap();
+    assert!(j["commands"][0]["ruleId"].is_null());
+    assert_eq!(j["commands"][0]["classification"], "static");
+    assert_eq!(j["commands"][0]["match"], "argv");
+    let facts = run_facts(&v);
+    assert_eq!(facts["votes"], serde_json::json!([]));
+}

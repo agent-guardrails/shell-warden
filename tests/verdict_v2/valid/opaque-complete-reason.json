@@ -1,0 +1,24 @@
+{
+  "protocol": "shell-warden.verdict.v2",
+  "result": {
+    "invocationId": "fixture:opaque-complete-reason",
+    "verdict": "ask",
+    "commands": [
+      {
+        "index": 0,
+        "verdict": "ask",
+        "classification": "opaque",
+        "match": "raw",
+        "facts": {
+          "evidence": "opaque",
+          "reasons": ["complete", "opaque-expansion"],
+          "selectedProfiles": ["base"],
+          "matched": [],
+          "qualified": [],
+          "rejected": [],
+          "votes": []
+        }
+      }
+    ]
+  }
+}
