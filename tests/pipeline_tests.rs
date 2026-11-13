@@ -4,8 +4,11 @@
 // properties) and wrapper/nesting behavior. Letter fixtures per 02 §2.2.
 
 use shell_warden::checker::config::{load_path, load_str};
+use shell_warden::checker::evidence::{EvidenceState, reason};
+use shell_warden::checker::grammar::Relation;
 use shell_warden::checker::letter::Letter;
 use shell_warden::checker::pipeline::evaluate;
+use shell_warden::checker::split::extract;
 use shell_warden::checker::verdict::{Verdict, VerdictKind};
 
 const SKETCH: &str = include_str!("fixtures/sketch.jsonc");
@@ -852,6 +855,320 @@ fn sed_allow_without_typed_value_still_requires_full_coverage() {
 }
 
 // ── Wrapper / substitution semantics ────────────────────────────────────────
+
+fn nested_command_substitutions(depth: usize, deepest: &str) -> String {
+    let mut raw = deepest.to_string();
+    for _ in 0..depth {
+        raw = format!("echo $({raw})");
+    }
+    raw
+}
+
+fn repeated_sudo_wrappers(depth: usize, command: &str) -> String {
+    format!("{}{command}", "sudo ".repeat(depth))
+}
+
+fn repeated_timeout_wrappers(depth: usize, command: &str) -> String {
+    format!("{}{command}", "timeout 1s ".repeat(depth))
+}
+
+#[track_caller]
+fn assert_invalid_raw_evidence_limit(verdict: &Verdict) {
+    let wire = serde_json::to_value(verdict).unwrap();
+    let facts = run_facts(verdict);
+    let invalid_causes: Vec<&str> = facts["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|value| value.as_str())
+        .filter(|code| shell_warden::checker::verdict::is_invalid_cause(code))
+        .collect();
+    assert_eq!(
+        (
+            verdict.verdict,
+            wire["commands"][0]["classification"].as_str(),
+            wire["commands"][0]["match"].as_str(),
+            facts["evidence"].as_str(),
+            invalid_causes
+        ),
+        (
+            VerdictKind::Ask,
+            Some("invalid"),
+            Some("raw"),
+            Some("invalid"),
+            vec![reason::EVIDENCE_LIMIT]
+        )
+    );
+}
+
+#[test]
+fn command_substitution_depth_32_is_fully_extracted() {
+    // Given
+    let deepest = "depth-probe";
+    let raw = nested_command_substitutions(32, deepest);
+
+    // When
+    let evidence = extract(&raw);
+
+    // Then
+    let limit_states: Vec<EvidenceState> = evidence
+        .parts
+        .iter()
+        .filter(|part| part.state.stable_code() == reason::EVIDENCE_LIMIT)
+        .map(|part| part.state)
+        .collect();
+    let deepest_argv = evidence
+        .parts
+        .iter()
+        .find(|part| part.raw == deepest)
+        .map(|part| {
+            part.argv
+                .iter()
+                .map(|argument| argument.text.as_str())
+                .collect::<Vec<_>>()
+        });
+    assert_eq!(
+        (evidence.parts.len(), limit_states, deepest_argv),
+        (33, Vec::new(), Some(vec!["depth-probe"])),
+        "depth 32 must retain every part and the deepest executable without evidence overflow"
+    );
+}
+
+#[test]
+fn command_substitution_depth_33_keeps_invalid_overflow_argv() {
+    // Given
+    let deepest = "depth-probe";
+    let raw = nested_command_substitutions(33, deepest);
+
+    // When
+    let evidence = extract(&raw);
+
+    // Then
+    let overflow = evidence
+        .parts
+        .iter()
+        .find(|part| part.state.stable_code() == reason::EVIDENCE_LIMIT)
+        .expect("depth 33 must emit an evidence-limit part");
+    let overflow_argv: Vec<&str> = overflow
+        .argv
+        .iter()
+        .map(|argument| argument.text.as_str())
+        .collect();
+    assert_eq!(
+        (overflow.state, overflow.raw == deepest, overflow_argv),
+        (
+            EvidenceState::Invalid(reason::EVIDENCE_LIMIT),
+            true,
+            vec!["depth-probe"]
+        ),
+        "depth 33 overflow must stay invalid and identifiable by executable argv"
+    );
+}
+
+#[test]
+fn command_substitution_depth_33_is_invalid_raw_ask() {
+    // Given
+    let raw = nested_command_substitutions(33, "depth-probe");
+
+    // When
+    let verdict = run(SKETCH, &raw);
+    let wire = serde_json::to_value(&verdict).unwrap();
+    let facts = run_facts(&verdict);
+
+    // Then
+    let has_evidence_limit = facts["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|value| value == reason::EVIDENCE_LIMIT);
+    assert_eq!(
+        (
+            verdict.verdict,
+            wire["commands"][0]["classification"].as_str(),
+            wire["commands"][0]["match"].as_str(),
+            facts["evidence"].as_str(),
+            has_evidence_limit
+        ),
+        (
+            VerdictKind::Ask,
+            Some("invalid"),
+            Some("raw"),
+            Some("invalid"),
+            true
+        ),
+        "depth 33 must surface invalid raw evidence with the evidence-limit reason"
+    );
+}
+
+#[test]
+fn invalid_classification_rule_denies_command_substitution_depth_33() {
+    const INVALID_DEPTH_DENY: &str = r#"{
+  "version": 2,
+  "defaults": { "action": "ask", "redirectPolicy": "no-redirects" },
+  "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
+  "profiles": [
+    {
+      "id": "depth-probe",
+      "executables": ["depth-probe"],
+      "options": {},
+      "rules": [
+        {
+          "id": "depth-probe/deny-invalid",
+          "action": "deny",
+          "match": { "classification": "invalid" }
+        }
+      ]
+    }
+  ]
+}"#;
+
+    // Given
+    let raw = nested_command_substitutions(33, "depth-probe");
+
+    // When
+    let verdict = run(INVALID_DEPTH_DENY, &raw);
+    let wire = serde_json::to_value(&verdict).unwrap();
+    let facts = run_facts(&verdict);
+
+    // Then
+    let invalid_causes: Vec<&str> = facts["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|value| value.as_str())
+        .filter(|code| shell_warden::checker::verdict::is_invalid_cause(code))
+        .collect();
+    assert_eq!(
+        (
+            verdict.verdict,
+            wire["commands"][0]["ruleId"].as_str(),
+            invalid_causes
+        ),
+        (
+            VerdictKind::Deny,
+            Some("depth-probe/deny-invalid"),
+            vec![reason::EVIDENCE_LIMIT]
+        ),
+        "an ordinary invalid-classification deny must match the live overflow part"
+    );
+}
+
+#[test]
+fn depth_limit_sudo_32_preserves_allow() {
+    // Given
+    let raw = repeated_sudo_wrappers(32, "git status");
+
+    // When
+    let verdict = run(SKETCH, &raw);
+
+    // Then
+    assert_eq!(verdict.verdict, VerdictKind::Allow);
+}
+
+#[test]
+fn depth_limit_sudo_33_is_invalid_raw_ask() {
+    // Given
+    let raw = repeated_sudo_wrappers(33, "git status");
+
+    // When
+    let verdict = run(SKETCH, &raw);
+
+    // Then
+    assert_invalid_raw_evidence_limit(&verdict);
+}
+
+#[test]
+fn depth_limit_timeout_32_preserves_allow() {
+    // Given
+    let raw = repeated_timeout_wrappers(32, "git status");
+
+    // When
+    let verdict = run(SKETCH, &raw);
+
+    // Then
+    assert_eq!(verdict.verdict, VerdictKind::Allow);
+}
+
+#[test]
+fn depth_limit_timeout_33_is_invalid_raw_ask() {
+    // Given
+    let raw = repeated_timeout_wrappers(33, "git status");
+
+    // When
+    let verdict = run(SKETCH, &raw);
+
+    // Then
+    assert_invalid_raw_evidence_limit(&verdict);
+}
+
+#[test]
+fn depth_limit_dollar_prefixed_substitution_reaches_literal_sibling() {
+    // Given
+    let raw = "echo $($BRANCH; git push --force --dry-run origin main)";
+
+    // When
+    let verdict = run(SKETCH, raw);
+    let wire = serde_json::to_value(&verdict).unwrap();
+
+    // Then
+    assert_eq!(
+        (verdict.verdict, wire["commands"][0]["ruleId"].as_str()),
+        (VerdictKind::Deny, Some("git/deny-force-push")),
+        "an opaque prefix must not hide a literal deny-capable sibling"
+    );
+}
+
+#[test]
+fn depth_limit_malformed_leaf_is_invalid_raw() {
+    // Given
+    let raw = nested_command_substitutions(33, "git status <<< input");
+
+    // When
+    let verdict = run(SKETCH, &raw);
+
+    // Then
+    assert_invalid_raw_evidence_limit(&verdict);
+}
+
+#[test]
+fn depth_limit_multisegment_coordinates_do_not_drift() {
+    // Given
+    let leaf = "git status; git log --oneline";
+    let depth_32 = nested_command_substitutions(32, leaf);
+    let depth_33 = nested_command_substitutions(33, leaf);
+
+    // When
+    let baseline = extract(&depth_32);
+    let overflow = extract(&depth_33);
+
+    // Then
+    let baseline_coordinates: Vec<(Relation, u32)> = baseline
+        .parts
+        .iter()
+        .filter(|part| part.argv.first().map(|arg| arg.text.as_str()) == Some("git"))
+        .map(|part| (part.relation, part.relation_ordinal))
+        .collect();
+    let overflow_parts: Vec<_> = overflow
+        .parts
+        .iter()
+        .filter(|part| part.argv.first().map(|arg| arg.text.as_str()) == Some("git"))
+        .collect();
+    assert_eq!(baseline_coordinates.len(), 2);
+    assert_eq!(overflow_parts.len(), 2);
+    assert!(
+        overflow_parts
+            .iter()
+            .all(|part| part.state == EvidenceState::Invalid(reason::EVIDENCE_LIMIT))
+    );
+    let overflow_coordinates: Vec<(Relation, u32)> = overflow_parts
+        .iter()
+        .map(|part| (part.relation, part.relation_ordinal))
+        .collect();
+    assert_eq!(
+        overflow_coordinates, baseline_coordinates,
+        "overflow must not change leaf relation or ordinal coordinates"
+    );
+}
 
 #[test]
 fn bash_c_children_reduce() {
