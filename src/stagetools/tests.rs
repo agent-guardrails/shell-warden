@@ -17,18 +17,74 @@ fn test_lock() -> MutexGuard<'static, ()> {
         .unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Cargo puts package bins together in target/debug/; unit tests see no
-/// CARGO_BIN_EXE, so the helper is derived from our own exe location.
+/// Cargo puts package bins together in the active profile directory; unit tests
+/// see no CARGO_BIN_EXE, so the helper is derived from Cargo's test layout.
+fn tool_binary_from(exe: &std::path::Path) -> PathBuf {
+    let dir = exe
+        .ancestors()
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| name == "deps" || name == "build")
+        })
+        .and_then(std::path::Path::parent)
+        // SAFE-EXPECT: Cargo test executables are emitted below deps or build in a profile.
+        .expect("Cargo test profile dir");
+    dir.join("warden-test-tool")
+}
+
 fn tool_binary() -> PathBuf {
     let exe = std::env::current_exe().expect("current_exe");
-    let dir = exe.parent().and_then(|p| p.parent()).expect("target dir");
-    let helper = dir.join("warden-test-tool");
+    let helper = tool_binary_from(&exe);
     assert!(
         helper.is_file(),
         "warden-test-tool not built at {}",
         helper.display()
     );
     helper
+}
+
+#[test]
+fn tool_binary_finds_debug_profile_from_rust_1_100_layout() {
+    // Given a unit-test executable emitted below debug/build/<crate>/<hash>/out.
+    let exe = std::path::Path::new(
+        "/repo/target/debug/build/shell-warden/hash/out/shell_warden_serve-hash",
+    );
+
+    // When the stage-tool helper path is resolved.
+    let helper = tool_binary_from(exe);
+
+    // Then it points to the package binary in the debug profile directory.
+    assert_eq!(
+        helper,
+        std::path::Path::new("/repo/target/debug/warden-test-tool")
+    );
+}
+
+#[test]
+fn tool_binary_finds_debug_profile_from_rust_1_99_layout() {
+    // Given a unit-test executable emitted below debug/deps.
+    let exe = std::path::Path::new("/repo/target/debug/deps/shell_warden_serve-hash");
+
+    // When the stage-tool helper path is resolved.
+    let helper = tool_binary_from(exe);
+
+    // Then it points to the package binary in the debug profile directory.
+    assert_eq!(
+        helper,
+        std::path::Path::new("/repo/target/debug/warden-test-tool")
+    );
+}
+
+#[test]
+fn tool_binary_finds_release_profile() {
+    let exe = std::path::Path::new("/repo/target/release/deps/shell_warden_serve-hash");
+
+    let helper = tool_binary_from(exe);
+
+    assert_eq!(
+        helper,
+        std::path::Path::new("/repo/target/release/warden-test-tool")
+    );
 }
 
 fn spec(lifecycle: Lifecycle, argv: Vec<String>) -> ToolSpec {
