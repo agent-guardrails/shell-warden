@@ -219,16 +219,18 @@ impl VerdictEnvelope {
 
     /// One explicit v2 writer (HANDOFF §Rust 1/3): 64 KiB output bound with a
     /// trailing newline (whitespace after the single JSON value, 02 §2.1).
+    /// The bound covers the total emitted stdout, so the newline is appended
+    /// before the length is enforced (issue #60).
     pub fn to_wire(&self) -> Result<Vec<u8>, String> {
         let mut out =
             serde_json::to_vec(self).map_err(|e| format!("verdict serialization failed: {e}"))?;
+        out.push(b'\n');
         if out.len() > MAX_VERDICT_BYTES {
             return Err(format!(
                 "verdict exceeds {} bytes — checker defect",
                 MAX_VERDICT_BYTES
             ));
         }
-        out.push(b'\n');
         Ok(out)
     }
 }
@@ -874,6 +876,44 @@ mod tests {
         let filler = "x".repeat(MAX_VERDICT_BYTES);
         env.result.message = Some(filler);
         assert!(env.to_wire().is_err());
+    }
+
+    /// Serialized length with an empty `message` set: the stable base onto
+    /// which each unescaped filler byte adds exactly one wire byte.
+    fn base_len_with_empty_message() -> usize {
+        let mut env = valid_sample();
+        env.result.message = Some(String::new());
+        serde_json::to_vec(&env).unwrap().len()
+    }
+
+    #[test]
+    fn exact_cap_total_bytes_including_newline_is_accepted() {
+        // 02 §2.7: the 64 KiB bound covers the total emitted stdout,
+        // including the trailing newline after the single JSON value.
+        let mut env = valid_sample();
+        let filler = "x".repeat(MAX_VERDICT_BYTES - 1 - base_len_with_empty_message());
+        env.result.message = Some(filler);
+        let wire = env.to_wire().unwrap();
+        assert_eq!(wire.len(), MAX_VERDICT_BYTES);
+        assert_eq!(wire.last(), Some(&b'\n'));
+        // One-envelope framing: the whole wire bytes parse as a single value.
+        let parsed: serde_json::Value = serde_json::from_slice(&wire).unwrap();
+        assert_eq!(parsed["protocol"], PROTOCOL);
+    }
+
+    #[test]
+    fn cap_plus_one_total_bytes_is_a_checker_defect() {
+        // A 65,536-byte JSON value plus the trailing newline is 65,537 total
+        // bytes: the newline MUST be accounted for before the bound, so this
+        // is rejected (a pre-newline length check would emit it verbatim).
+        let mut env = valid_sample();
+        let filler = "x".repeat(MAX_VERDICT_BYTES - base_len_with_empty_message());
+        env.result.message = Some(filler);
+        let err = match env.to_wire() {
+            Err(e) => e,
+            Ok(wire) => panic!("emitted {} bytes, cap is {}", wire.len(), MAX_VERDICT_BYTES),
+        };
+        assert!(err.contains("verdict exceeds"), "{err}");
     }
 
     #[test]
