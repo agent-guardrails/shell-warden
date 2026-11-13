@@ -627,15 +627,15 @@ fn dead_part(part: &Part) -> bool {
 /// `analyzerCommand` part when the selected profile runs that analyzer.
 fn relabel_xargs_children(config: &Config, graph: &mut CommandGraph) {
     let mut targets: Vec<usize> = Vec::new();
-    for i in 0..graph.parts.len() {
-        let Some(pi) = select_profile_index(config, &graph.parts[i]) else {
+    for (i, part) in graph.parts.iter().enumerate() {
+        let Some(pi) = select_profile_index(config, part) else {
             continue;
         };
         let prof = &config.profiles()[pi];
         if prof.analyzer != Some(AnalyzerId::XargsV1) {
             continue;
         }
-        if graph.parts[i]
+        if part
             .argv
             .first()
             .map(|t| t.text.as_str() == "xargs" && t.resolvable)

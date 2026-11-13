@@ -271,20 +271,9 @@ fn clean_eof_exits_zero() {
 // ── Stage walk end-to-end (HANDOFF step 4): real tool + onError stage ──
 
 fn stage_config() -> String {
-    // Derive the helper's path from our own exe (target/debug/<helper>) —
-    // unit tests cannot use CARGO_BIN_EXE_* and some runtime setups omit it.
-    let me = std::env::current_exe().expect("current_exe");
-    let helper = me
-        .parent()
-        .and_then(|p| p.parent())
-        .map(|d| d.join("warden-test-tool"))
-        .expect("target dir");
-    assert!(
-        helper.is_file(),
-        "warden-test-tool not built at {}",
-        helper.display()
-    );
-    let helper = helper.display().to_string();
+    // Cargo exposes package binaries to integration tests at compile time.
+    let helper = env!("CARGO_BIN_EXE_warden-test-tool");
+    assert!(std::path::Path::new(helper).is_file(), "missing {helper}");
     format!(
         r#"{{
             "version": 1,
