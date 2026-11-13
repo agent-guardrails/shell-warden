@@ -43,8 +43,8 @@ pub struct Tok {
     /// broken quoting).
     pub resolvable: bool,
     pub quoting: Quoting,
-    /// Inner texts of active executions/expansions found inside this token
-    /// (`$(…)`, backticks, process substitution) — split recursively.
+    /// Inner texts of active executions found inside this token (`$(…)`,
+    /// backticks, process substitution) — split recursively.
     pub subtexts: Vec<(String, Span)>,
     pub span: Span,
 }
@@ -248,7 +248,7 @@ fn scan_chars(_raw: &str, chars: &[char]) -> Option<ScanResult> {
                         tail.clear();
                         let site_start = tail.len();
                         let _ = site_start;
-                        let (inner, next) = capture_expand(chars, j, &mut cur_sub, i);
+                        let (inner, next) = capture_expand(chars, j, &mut cur_sub);
                         let _ = inner;
                         cur_text.push('\u{fffd}'); // §[replacement] site marker
                         j = next;
@@ -286,7 +286,7 @@ fn scan_chars(_raw: &str, chars: &[char]) -> Option<ScanResult> {
             '$' => {
                 cur_start.get_or_insert(i);
                 cur_resolvable = false;
-                let (inner, next) = capture_expand(chars, i, &mut cur_sub, i);
+                let (inner, next) = capture_expand(chars, i, &mut cur_sub);
                 let _ = inner;
                 cur_text.push('\u{fffd}');
                 i = next;
@@ -529,17 +529,26 @@ fn unescape(c: char) -> char {
     }
 }
 
-/// Capture `$…` at position `start`: records the inner text into `subtexts`
-/// and returns the next index after the construct. Handles `$(`, `$((`,
-/// `${}`, `$NAME`, bare `$` (and callers use the same for backticks).
-#[allow(clippy::too_many_arguments)]
+/// Capture an active expansion at `start`, recording only executable inner
+/// texts and returning the next index after the construct.
 fn capture_expand(
     chars: &[char],
     start: usize,
     subtexts: &mut Vec<(String, Span)>,
-    _quote_start: usize,
 ) -> (Option<String>, usize) {
     let n = chars.len();
+    if chars.get(start) == Some(&'`') {
+        return match (start + 1..n).find(|&index| chars[index] == '`') {
+            Some(end) => {
+                subtexts.push((
+                    chars[start + 1..end].iter().collect::<String>(),
+                    (start, end + 1),
+                ));
+                (Some(chars[start..=end].iter().collect::<String>()), end + 1)
+            }
+            None => (None, n),
+        };
+    }
     let first = *chars.get(start + 1).unwrap_or(&'\0');
     if first == '(' {
         if chars.get(start + 2) == Some(&'(') {
@@ -562,10 +571,7 @@ fn capture_expand(
     if first == '{' {
         match (start + 1..n).find(|&j| chars[j] == '}') {
             Some(end) => {
-                subtexts.push((
-                    chars[start..=end].iter().collect::<String>(),
-                    (start, end + 1),
-                ));
+                capture_executable_subtexts(chars, (start + 2, end), subtexts);
                 return (Some(chars[start..=end].iter().collect::<String>()), end + 1);
             }
             None => return (None, n),
@@ -576,11 +582,45 @@ fn capture_expand(
         while end < n && (chars[end].is_ascii_alphanumeric() || chars[end] == '_') {
             end += 1;
         }
-        subtexts.push((chars[start..end].iter().collect::<String>(), (start, end)));
         return (Some(chars[start..end].iter().collect::<String>()), end);
     }
     // bare $: opaque noise
     (Some("$".to_string()), (start + 2).min(n))
+}
+
+fn capture_executable_subtexts(chars: &[char], range: Span, subtexts: &mut Vec<(String, Span)>) {
+    let (start, end) = range;
+    let mut index = start;
+    while index < end {
+        match chars[index] {
+            '\\' => index = (index + 2).min(end),
+            '$' | '`' => {
+                let (_, next) = capture_expand(chars, index, subtexts);
+                index = next.min(end);
+            }
+            '<' | '>' if chars.get(index + 1) == Some(&'(') => {
+                let close = find_balanced(chars, index + 1, '(', ')');
+                subtexts.push((
+                    chars[index + 2..close].iter().collect::<String>(),
+                    (index, close + 1),
+                ));
+                index = (close + 1).min(end);
+            }
+            '\'' => {
+                index = (index + 1..end)
+                    .find(|&candidate| chars[candidate] == '\'')
+                    .map_or(end, |close| close + 1);
+            }
+            '"' => {
+                let close = (index + 1..end)
+                    .find(|&candidate| chars[candidate] == '"')
+                    .unwrap_or(end);
+                capture_executable_subtexts(chars, (index + 1, close), subtexts);
+                index = (close + 1).min(end);
+            }
+            _ => index += 1,
+        }
+    }
 }
 
 fn find_balanced(chars: &[char], open_at: usize, open: char, close: char) -> usize {
@@ -681,7 +721,7 @@ fn read_target(chars: &[char], i: usize) -> (Option<Tok>, usize) {
         }
         if c == '$' || c == '`' {
             resolvable = false;
-            let (_inner, next) = capture_expand(chars, j, &mut subtexts, j);
+            let (_inner, next) = capture_expand(chars, j, &mut subtexts);
             text.push('\u{fffd}');
             sub_believable = true;
             j = next;
@@ -721,5 +761,65 @@ fn read_target(chars: &[char], i: usize) -> (Option<Tok>, usize) {
             }),
             j,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn executable_subtexts(raw: &str) -> Vec<String> {
+        scan(raw)
+            .segments
+            .into_iter()
+            .flat_map(|segment| segment.items)
+            .flat_map(|item| match item {
+                Item::Tok(token) => token.subtexts,
+            })
+            .map(|(text, _)| text)
+            .collect()
+    }
+
+    #[test]
+    fn variable_braced_and_arithmetic_expansions_are_not_executable_subtexts() {
+        // Given / When / Then
+        for raw in ["echo $VAR", "echo ${NAME}", "echo $((1 + 2))"] {
+            assert_eq!(executable_subtexts(raw), Vec::<String>::new(), "{raw}");
+        }
+    }
+
+    #[test]
+    fn shell_execution_forms_are_executable_subtexts() {
+        // Given / When / Then
+        for raw in [
+            "echo $(denied-command)",
+            "echo `denied-command`",
+            "cat <(denied-command)",
+            "cat >(denied-command)",
+        ] {
+            assert_eq!(
+                executable_subtexts(raw),
+                vec!["denied-command".to_string()],
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn command_substitution_inside_braced_expansion_is_executable_subtext() {
+        // Given / When / Then
+        assert_eq!(
+            executable_subtexts("echo ${X:-$(denied-command)}"),
+            vec!["denied-command".to_string()]
+        );
+    }
+
+    #[test]
+    fn escaped_command_substitution_inside_braced_expansion_is_literal() {
+        // Given / When / Then
+        assert_eq!(
+            executable_subtexts(r"echo ${X:-\$(denied-command)}"),
+            Vec::<String>::new()
+        );
     }
 }
