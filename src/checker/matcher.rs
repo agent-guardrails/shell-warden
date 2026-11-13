@@ -459,13 +459,8 @@ fn existentials(
     regexes: &grammar::RegexCache,
 ) -> bool {
     let Some(any) = &e.any else { return true };
-    if !any
-        .iter()
+    any.iter()
         .any(|test| assigns.iter().any(|a| env_test_matches(test, a, regexes)))
-    {
-        return false;
-    }
-    true
 }
 
 fn universals(
