@@ -921,6 +921,7 @@ pub enum CoverageCode {
     OptionNotRepeatable,
     OptionNotAllowed,
     OptionValuesUncovered,
+    OptionValuePositionUncovered,
     RemainderUncovered,
     RedirectPolicyUncovered,
 }
@@ -935,6 +936,7 @@ impl CoverageCode {
             CoverageCode::OptionNotRepeatable => reason::OPTION_NOT_REPEATABLE,
             CoverageCode::OptionNotAllowed => reason::OPTION_NOT_ALLOWED,
             CoverageCode::OptionValuesUncovered => reason::OPTION_VALUE_UNCOVERED,
+            CoverageCode::OptionValuePositionUncovered => reason::OPTION_VALUE_POSITION_UNCOVERED,
             CoverageCode::RemainderUncovered => reason::REMAINDER_UNCOVERED,
             CoverageCode::RedirectPolicyUncovered => reason::REDIRECT_POLICY_UNCOVERED,
         }
@@ -1201,12 +1203,15 @@ fn option_values_covers(
     regexes: &grammar::RegexCache,
     cwd: &str,
 ) -> Result<(), CoverageCode> {
-    let fail = || CoverageCode::OptionValuesUncovered;
+    let each_uncovered = || CoverageCode::OptionValuesUncovered;
+    let by_position_uncovered = || CoverageCode::OptionValuePositionUncovered;
     let Some(coverage) = entry.values() else {
         // zero-arity entry: no values may exist (parser-enforced; defensive
-        // because a mismatch would silently call an option "covered")
+        // because a mismatch would silently call an option "covered"). No
+        // ordinal selector is involved, so the generic `each`-mode reason
+        // still applies.
         if occs.iter().any(|o| !o.values.is_empty()) {
-            return Err(fail());
+            return Err(each_uncovered());
         }
         return Ok(());
     };
@@ -1217,20 +1222,20 @@ fn option_values_covers(
                     .iter()
                     .all(|(v, resolvable)| token_value_holds(each, v, *resolvable, regexes, cwd))
             }) {
-                return Err(fail());
+                return Err(each_uncovered());
             }
         }
         OptionValueCoverage::ByPosition { by_position } => {
             if by_position.len() > MAX_OPTION_ARITY as usize {
-                return Err(fail());
+                return Err(by_position_uncovered());
             }
             for occ in occs {
                 if occ.values.len() != by_position.len() {
-                    return Err(fail());
+                    return Err(by_position_uncovered());
                 }
                 for (sel, (v, resolvable)) in by_position.iter().zip(occ.values.iter()) {
                     if !token_value_holds(sel, v, *resolvable, regexes, cwd) {
-                        return Err(fail());
+                        return Err(by_position_uncovered());
                     }
                 }
             }
@@ -2181,5 +2186,98 @@ mod tests {
             ] }))
         .unwrap();
         assert!(!nested_matcher_holds(&any_other, &[n]));
+    }
+
+    /// Reason-vocabulary regression (issue 61): the two option-value coverage
+    /// modes emit distinct stable diagnostic codes — an `each` failure stays
+    /// `option-value-uncovered`, a `byPosition` failure emits
+    /// `option-value-position-uncovered`. The matching decision itself is
+    /// unchanged: both modes still reject an uncovered entry with `Err` and
+    /// accept a covered one with `Ok(())`.
+    #[test]
+    fn option_value_uncovered_reasons_distinguish_each_and_by_position() {
+        let entry = |values| {
+            grammar::OptionCoverageEntry::PositiveArity(grammar::PositiveArityOptionCoverage {
+                option: "target".into(),
+                required: false,
+                repeatable: false,
+                values,
+            })
+        };
+        let occs = vec![OptionOccurrenceView {
+            ordinal: 1,
+            values: vec![("b".into(), true)],
+        }];
+        let regexes = grammar::RegexCache::default();
+        let each = TokenSelector::Str(grammar::StringValueSelector::OneOf(vec!["a".into()]));
+        let by_position = |sels: Vec<TokenSelector>| grammar::OptionValueCoverage::ByPosition {
+            by_position: sels,
+        };
+        let each_cov = |sel| grammar::OptionValueCoverage::Each { each: sel };
+
+        // each mode: uncovered ⇒ option-value-uncovered
+        let each_entry = entry(each_cov(each.clone()));
+        assert_eq!(
+            option_values_covers(&each_entry, &occs, &regexes, "/"),
+            Err(CoverageCode::OptionValuesUncovered)
+        );
+        // byPosition mode: uncovered ⇒ option-value-position-uncovered
+        let by_pos_entry = entry(by_position(vec![each.clone()]));
+        assert_eq!(
+            option_values_covers(&by_pos_entry, &occs, &regexes, "/"),
+            Err(CoverageCode::OptionValuePositionUncovered)
+        );
+        // arity-mismatch and oversize-byPosition failures in the byPosition
+        // path carry the same byPosition-specific reason
+        let two_vals = vec![OptionOccurrenceView {
+            ordinal: 1,
+            values: vec![("a".into(), true), ("a".into(), true)],
+        }];
+        assert_eq!(
+            option_values_covers(&by_pos_entry, &two_vals, &regexes, "/"),
+            Err(CoverageCode::OptionValuePositionUncovered)
+        );
+        let oversize = by_position(
+            (0..=MAX_OPTION_ARITY)
+                .map(|_| TokenSelector::Str(grammar::StringValueSelector::Any))
+                .collect(),
+        );
+        let oversize_entry = entry(oversize);
+        assert_eq!(
+            option_values_covers(&oversize_entry, &occs, &regexes, "/"),
+            Err(CoverageCode::OptionValuePositionUncovered)
+        );
+        // a zero-arity entry under value-bearing occurrences keeps the generic
+        // option-value-uncovered code (no ordinal selector is involved)
+        let zero_entry = grammar::OptionCoverageEntry::ZeroArity(grammar::OptionCoverage {
+            option: "target".into(),
+            required: false,
+            repeatable: false,
+        });
+        assert_eq!(
+            option_values_covers(&zero_entry, &occs, &regexes, "/"),
+            Err(CoverageCode::OptionValuesUncovered)
+        );
+
+        // stable vocabulary mapping
+        assert_eq!(
+            CoverageCode::OptionValuesUncovered.stable_code(),
+            reason::OPTION_VALUE_UNCOVERED
+        );
+        assert_eq!(
+            CoverageCode::OptionValuePositionUncovered.stable_code(),
+            reason::OPTION_VALUE_POSITION_UNCOVERED
+        );
+
+        // decisions unchanged: covered values still pass in both modes
+        let fits = TokenSelector::Str(grammar::StringValueSelector::OneOf(vec!["b".into()]));
+        assert_eq!(
+            option_values_covers(&entry(each_cov(fits.clone())), &occs, &regexes, "/"),
+            Ok(())
+        );
+        assert_eq!(
+            option_values_covers(&entry(by_position(vec![fits])), &occs, &regexes, "/"),
+            Ok(())
+        );
     }
 }
