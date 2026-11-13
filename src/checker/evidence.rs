@@ -50,6 +50,7 @@ pub mod reason {
     pub const OPTION_NOT_REPEATABLE: &str = "option-not-repeatable";
     pub const OPTION_NOT_ALLOWED: &str = "option-not-allowed";
     pub const OPTION_VALUE_UNCOVERED: &str = "option-value-uncovered";
+    pub const OPTION_VALUE_POSITION_UNCOVERED: &str = "option-value-position-uncovered";
     pub const REMAINDER_UNCOVERED: &str = "remainder-uncovered";
     pub const REDIRECT_POLICY_UNCOVERED: &str = "redirect-policy-uncovered";
 }
