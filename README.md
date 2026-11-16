@@ -28,7 +28,7 @@ no long-lived process.
 ## Usage
 
 ```
-shell-warden [--config FILE]
+shell-warden [--config FILE]...
 # letter JSON (schemas/shell-warden.letter.v1.schema.json) on stdin,
 # verdict v2 envelope (schemas/shell-warden.verdict.v2.schema.json) on stdout:
 # {"protocol":"shell-warden.verdict.v2","result":{...}} — ADR-0023, v2 only
@@ -38,6 +38,21 @@ shell-warden [--config FILE]
 - Default config path: `$XDG_CONFIG_HOME/shell-warden/config.jsonc`
   (fallback `~/.config/shell-warden/config.jsonc`). `--config` also accepts
   `{env:NAME}` substitution toward an absolute path.
+- Repeat `--config` to assemble disjoint profiles, for example:
+  `shell-warden --config /policies/git.jsonc --config /policies/rust.jsonc`.
+  Explicit files suppress the default config path; there is no implicit project
+  discovery. Argument order preserves profile order, not override precedence.
+  Every file must be a complete, independently valid v2 policy. Duplicate
+  canonical paths (including symlinks), profile IDs, or executable spellings
+  reject the set. Defaults must match, and shared redirect-policy names require
+  identical definitions. Rules and fallback hints stay profile-local; cross-file
+  references are not supported.
+- Effective limits are the minimum across files. `configBytes` covers the sum
+  of original bytes, including comments; profile/rule caps cover the assembled
+  policy. Any invalid file or conflict exits 2 before evaluation with empty
+  stdout and source paths on stderr. `shell-warden --help` describes the CLI.
+  Design: https://github.com/agent-guardrails/docs/issues/39.
+  Tracking: https://github.com/agent-guardrails/shell-warden/issues/51.
 - Verdicts fail closed: `invalid`/`opaque` evidence and any limit overflow can
   never produce `allow`; the hook mapping stays `allow → once`,
   `deny → reject`, `ask → silence`.

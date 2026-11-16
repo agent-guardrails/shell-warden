@@ -16,6 +16,8 @@
 use super::analyzers;
 use super::grammar::*;
 use serde_json::Value;
+use std::collections::BTreeMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 pub type ConfigResult = Result<Config, String>;
@@ -107,7 +109,7 @@ fn extract_env_names(s: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut i = 0;
     while i + 5 < bytes.len() {
-        if &s[i..i + 5] == "{env:"
+        if bytes[i..].starts_with(b"{env:")
             && let Some(close) = s[i..].find('}')
         {
             out.push(s[i + 5..i + close].to_string());
@@ -121,11 +123,137 @@ fn extract_env_names(s: &str) -> Vec<String> {
 
 /// Load + validate from a path. Returns the error string for exit-2 semantics.
 pub fn load_path(path: &Path) -> ConfigResult {
-    let bytes =
-        std::fs::read(path).map_err(|e| format!("config unreadable: {}: {e}", path.display()))?;
-    let text =
-        String::from_utf8(bytes).map_err(|_| "config invalid: file is not UTF-8".to_string())?;
-    load_str(&text)
+    read_config(path).map(|(config, _)| config)
+}
+
+fn read_config(path: &Path) -> Result<(Config, usize), String> {
+    let read = || -> Result<_, String> {
+        let file = std::fs::File::open(path).map_err(|e| format!("config unreadable: {e}"))?;
+        let mut bytes = Vec::new();
+        file.take(Limits::default().config_bytes + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|e| format!("config unreadable: {e}"))?;
+        let text = String::from_utf8(bytes)
+            .map_err(|_| "config invalid: file is not UTF-8".to_string())?;
+        let config = load_str(&text)?;
+        Ok((config, text.len()))
+    };
+    read().map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Assemble independently valid files without replacing any profile or rule.
+/// The result becomes visible only after every file and aggregate cap passes.
+pub fn load_paths(paths: &[PathBuf]) -> ConfigResult {
+    if paths.is_empty() {
+        return Err("config invalid: no configuration paths".to_string());
+    }
+    let sources = || {
+        paths
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let aggregate_error = |e| format!("config invalid: input set [{}]: {e}", sources());
+    let mut canonical_sources = BTreeMap::new();
+    let mut profile_sources = BTreeMap::new();
+    let mut executable_sources = BTreeMap::new();
+    let mut policy_sources: BTreeMap<String, &Path> = BTreeMap::new();
+    let mut merged: Option<RawConfig> = None;
+    let mut total_bytes = 0usize;
+
+    for path in paths {
+        let canonical = std::fs::canonicalize(path)
+            .map_err(|e| format!("{}: config unreadable: {e}", path.display()))?;
+        if let Some(first) = canonical_sources.insert(canonical.clone(), path) {
+            return Err(merge_conflict(
+                "canonical path",
+                &canonical.display().to_string(),
+                first,
+                path,
+            ));
+        }
+        let (config, bytes) = read_config(&canonical).map_err(|e| {
+            if path == &canonical {
+                e
+            } else {
+                format!("{}: {e}", path.display())
+            }
+        })?;
+        let raw = config.raw;
+        // Preserve the legacy single-file implicit no-redirects fallback, but
+        // never let another file supply (and potentially loosen) that bundle.
+        if paths.len() > 1
+            && !raw
+                .redirect_policies
+                .contains_key(&raw.defaults.redirect_policy)
+        {
+            return Err(format!(
+                "{}: config invalid: defaults.redirectPolicy \"{}\" must be declared in its own file",
+                path.display(),
+                raw.defaults.redirect_policy
+            ));
+        }
+        if let Some(first) = &merged
+            && first.defaults != raw.defaults
+        {
+            return Err(merge_conflict("defaults", "", &paths[0], path));
+        }
+        for profile in &raw.profiles {
+            if let Some(first) = profile_sources.insert(profile.id.clone(), path) {
+                return Err(merge_conflict("profile id", &profile.id, first, path));
+            }
+            for executable in &profile.executables {
+                if let Some(first) = executable_sources.insert(executable.clone(), path) {
+                    return Err(merge_conflict("executable", executable, first, path));
+                }
+            }
+        }
+        for (name, policy) in &raw.redirect_policies {
+            if let Some(first) = policy_sources.get(name) {
+                if merged.as_ref().and_then(|m| m.redirect_policies.get(name)) != Some(policy) {
+                    return Err(merge_conflict("redirect policy", name, first, path));
+                }
+            } else {
+                policy_sources.insert(name.clone(), path.as_path());
+            }
+        }
+        total_bytes = total_bytes
+            .checked_add(bytes)
+            .ok_or_else(|| aggregate_error("configBytes sum overflow".to_string()))?;
+        if let Some(all) = &mut merged {
+            all.limits = minimum_limits(&all.limits, &raw.limits);
+            all.profiles.extend(raw.profiles);
+            all.redirect_policies.extend(raw.redirect_policies);
+        } else {
+            merged = Some(raw);
+        }
+        let limit = merged.as_ref().unwrap().limits.config_bytes;
+        if total_bytes as u64 > limit {
+            return Err(aggregate_error(format!(
+                "{total_bytes} total bytes exceeds configBytes cap {limit}"
+            )));
+        }
+    }
+    validate(merged.unwrap()).map_err(aggregate_error)
+}
+
+fn merge_conflict(kind: &str, id: &str, first: &Path, second: &Path) -> String {
+    format!(
+        "config invalid: conflicting {kind} \"{id}\" in {} and {}",
+        first.display(),
+        second.display()
+    )
+}
+
+fn minimum_limits(a: &Limits, b: &Limits) -> Limits {
+    Limits {
+        config_bytes: a.config_bytes.min(b.config_bytes),
+        profiles: a.profiles.min(b.profiles),
+        rules: a.rules.min(b.rules),
+        evidence_items: a.evidence_items.min(b.evidence_items),
+        diagnostics_bytes: a.diagnostics_bytes.min(b.diagnostics_bytes),
+    }
 }
 
 /// Load + validate from a string (used by golden tests directly).
@@ -137,6 +265,13 @@ pub fn load_path(path: &Path) -> ConfigResult {
 /// duplicate object key at any nesting depth — selectors, structs, and
 /// map-valued fields alike — before a normalized value exists.
 pub fn load_str(text: &str) -> ConfigResult {
+    if text.len() as u64 > Limits::default().config_bytes {
+        return Err(format!(
+            "config invalid: {} bytes exceeds configBytes cap {}",
+            text.len(),
+            Limits::default().config_bytes
+        ));
+    }
     let stripped =
         strip_jsonc(text).map_err(|e| format!("config invalid: JSONC syntax error: {e}"))?;
     let value =
@@ -338,6 +473,30 @@ fn validate(raw: RawConfig) -> Result<Config, String> {
         ));
     }
     let limits = raw.limits.clone();
+    let caps = Limits::default();
+    for (name, value, cap) in [
+        ("configBytes", limits.config_bytes, caps.config_bytes),
+        (
+            "profiles",
+            u64::from(limits.profiles),
+            u64::from(caps.profiles),
+        ),
+        ("rules", u64::from(limits.rules), u64::from(caps.rules)),
+        (
+            "evidenceItems",
+            u64::from(limits.evidence_items),
+            u64::from(caps.evidence_items),
+        ),
+        (
+            "diagnosticsBytes",
+            limits.diagnostics_bytes,
+            caps.diagnostics_bytes,
+        ),
+    ] {
+        if value == 0 || value > cap {
+            return Err(format!("limits.{name} must be between 1 and {cap}"));
+        }
+    }
     if raw.profiles.len() as u32 > limits.profiles {
         return Err(format!(
             "profiles count {} exceeds cap {}",

@@ -12,45 +12,68 @@ fn main() {
 }
 
 fn run() -> i32 {
-    // options: [--config FILE] (absolute path after hook validation, 04 §4.2)
-    let mut config_path = None;
+    // Explicit files assemble disjoint profiles, never last-file-wins.
+    let mut config_paths = Vec::new();
     let mut args = std::env::args().skip(1).peekable();
     while let Some(a) = args.next() {
         match a.as_str() {
             "--config" => match args.next() {
-                Some(p) => config_path = Some(p),
+                Some(p) => config_paths.push(p),
                 None => {
                     eprintln!("--config requires a path");
                     return 1;
                 }
             },
+            "--help" | "-h" => {
+                println!(
+                    "Usage: shell-warden [--config FILE]...\n\
+                     Read a letter from stdin and write a verdict v2 envelope.\n\n\
+                     --config FILE  Repeat to assemble disjoint profiles in argument order.\n\
+                                    No override precedence: conflicting profiles/executables fail.\n\
+                                    Defaults must match; shared redirect policies must be identical.\n\
+                                    Limits use minima and cover the complete input set.\n\
+                                    Paths must be absolute after {{env:NAME}} expansion.\n\
+                                    Explicit files suppress the XDG/HOME default config path.\n\
+                                    Any invalid file rejects the whole set (exit 2, empty stdout).\n\
+                     --version      Print version.\n\
+                     --help, -h     Print help."
+                );
+                return 0;
+            }
             "--version" => {
                 println!("shell-warden {}", env!("CARGO_PKG_VERSION"));
                 return 0;
             }
             other => {
-                eprintln!("unknown argument \"{other}\" — usage: shell-warden [--config FILE]");
+                eprintln!("unknown argument \"{other}\" — usage: shell-warden [--config FILE]...");
                 return 1;
             }
         }
     }
 
     // config: strict, fail-closed (06 §6.1; invalid ⇒ 2, no stdout)
-    let path = match config_path.map(|p| checker::config::expand_env(&p)) {
-        Some(Ok(p)) => p,
-        Some(Err(e)) => {
-            eprintln!("{e}");
-            return 2;
-        }
-        None => match checker::config::default_config_path() {
-            Some(p) => p,
+    let paths = if config_paths.is_empty() {
+        match checker::config::default_config_path() {
+            Some(p) => vec![p],
             None => {
                 eprintln!("no config path: HOME/XDG_CONFIG_HOME unset");
                 return 2;
             }
-        },
+        }
+    } else {
+        match config_paths
+            .iter()
+            .map(|p| checker::config::expand_env(p))
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(paths) => paths,
+            Err(e) => {
+                eprintln!("{e}");
+                return 2;
+            }
+        }
     };
-    let config = match checker::config::load_path(&path) {
+    let config = match checker::config::load_paths(&paths) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("{e}");
