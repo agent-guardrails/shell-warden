@@ -60,6 +60,26 @@ shell-warden [--config FILE]...
 `shell-warden-serve` (binary kept as reference, never shipped) is the retired
 JSON-RPC orchestrator; `warden-test-tool.exe`-style helpers are test-only.
 
+## Bash invocation coverage
+
+`bash /absolute/script.sh ARGS...` and `bash -- /absolute/script.sh ARGS...`
+select the script's exact path profile and check its arguments and redirects.
+The path must be normalized; script contents are never opened or audited.
+`-c` after the script path remains a script argument.
+
+`bash -c STRING` and `sh -c STRING` expose command-string children. Any visible
+environment assignment reaching either interpreter, including assignments from
+`env` or outer wrappers, keeps an opaque parent and cannot allow. This includes
+`BASH_ENV` even when its value matches environment coverage. Unsupported startup
+flags, stdin mode, and trailing `$0`/positional bindings also remain opaque.
+Environment and redirect observations survive supported wrapper extraction;
+assignment-only segments retain default ask, and quoted empty arguments remain
+visible to coverage.
+
+The letter does not contain the represented command's ambient environment.
+These checks cover observable assignments, not unknown inherited shell state.
+Tracking: https://github.com/agent-guardrails/shell-warden/issues/74.
+
 ## Tests
 
 `cargo test` runs unit + scenario-golden suites; `cargo fmt --check` and

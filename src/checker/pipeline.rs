@@ -620,7 +620,9 @@ fn select_profile_index(config: &Config, part: &Part) -> Option<usize> {
 }
 
 fn dead_part(part: &Part) -> bool {
-    part.argv.is_empty() && part.redirects.is_empty()
+    // Assignment-only segments can affect later shell startup. Without a
+    // modeled shell-state transition they must retain their default ask.
+    part.argv.is_empty() && part.redirects.is_empty() && part.assigns.is_empty()
 }
 
 /// xargs-v1: the operand child of an `xargs` part becomes an
