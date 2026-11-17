@@ -6,8 +6,8 @@
 // The closed relation enum (grammar::Relation):
 //   chain — operator-bounded executable segments;
 //   pipeline — segment following `|`;
-//   wrapper — transparent interpreter unwrap (bash/sh -c, sudo, nohup, nice,
-//             timeout, env);
+//   wrapper — transparent interpreter unwrap (bash/sh -c, bash script,
+//             sudo, nohup, nice, timeout, env);
 //   commandSubstitution — inner text of `$(…)`, backticks and process
 //             substitution, split recursively;
 //   analyzerCommand — parts emitted by an analyzer (xargs-v1 operand).
@@ -150,10 +150,7 @@ fn segment_observations(
         if !tok.resolvable {
             unresolvable = true;
         }
-        if tok.text.is_empty() {
-            continue;
-        }
-        if argv.is_empty() && assigns.is_empty() && is_assignment(&tok.text) {
+        if argv.is_empty() && is_assignment(&tok.text) {
             let name = tok.text[..tok.text.find('=').unwrap_or(0)].to_string();
             assigns.push(EnvAssign {
                 name,
@@ -238,7 +235,7 @@ fn split_heredoc_like(
         if !tok.resolvable {
             unresolvable = true;
         }
-        if argv.is_empty() && assigns.is_empty() && is_assignment(&tok.text) {
+        if argv.is_empty() && is_assignment(&tok.text) {
             let name = tok.text[..tok.text.find('=').unwrap_or(0)].to_string();
             assigns.push(EnvAssign {
                 name,
@@ -402,46 +399,81 @@ fn emit_child(
 }
 
 fn unwrap_bash(part: Part, part_id: usize, depth: usize, graph: &mut CommandEvidence) {
-    let pos = match part.argv.iter().position(|w| w.text == "-c") {
-        Some(p) => p,
-        None => {
-            graph.parts[part_id].state = EvidenceState::Opaque(reason::OPAQUE_EXPANSION);
+    // Interpreter options are parsed in position, never searched for inside
+    // script arguments or option values. Unmodeled startup flags stay opaque.
+    if part.argv.get(1).map(|w| w.text.as_str()) != Some("-c") {
+        let script_index = if part.argv.get(1).map(|w| w.text.as_str()) == Some("--") {
+            2
+        } else {
+            1
+        };
+        if part.argv[0].text == "bash"
+            && part
+                .argv
+                .get(script_index)
+                .is_some_and(|word| word.resolvable && absolute_script_operand(&word.text))
+        {
+            emit_child(
+                part_id,
+                part.raw.clone(),
+                part.assigns.clone(),
+                part.argv[script_index..].to_vec(),
+                part.redirects.clone(),
+                state_at_depth(depth + 1, EvidenceState::Complete),
+                graph,
+            );
+            // The file's exact path selects its policy. Its basename is not
+            // another interpreter invocation and its contents are never read.
+            if part.assigns.is_empty() {
+                collapse(part_id, graph);
+            } else {
+                graph.parts[part_id].state = EvidenceState::Opaque(reason::OPAQUE_EXPANSION);
+            }
             return;
         }
-    };
-    let Some(operand) = part.argv.get(pos + 1) else {
+        graph.parts[part_id].state = EvidenceState::Opaque(reason::OPAQUE_EXPANSION);
+        return;
+    }
+    let Some(operand) = part.argv.get(2) else {
         graph.parts[part_id].state = EvidenceState::Opaque(reason::OPAQUE_EXPANSION);
         return;
     };
-    // The operand is evaluated wholly; extra words after it are $0/$1 args —
-    // appended to the last child argv (they only ADD stricter matches).
-    let extras: Vec<String> = part.argv[pos + 2..]
-        .iter()
-        .map(|a| a.text.clone())
-        .collect();
-    let operand = operand.text.clone();
-    drop(part);
-    collapse(part_id, graph);
-    emit_sh_children(part_id, &operand, &extras, depth + 1, graph);
+    // Visible environment can trigger execution before the operand (BASH_ENV,
+    // loader hooks, imported functions, etc.). String coverage is not a proof
+    // of startup semantics. Retain this opaque parent, but still expose children
+    // so their restrictive votes participate.
+    //
+    // Trailing words set $0/$1, not child argv. Until bindings are modeled they
+    // also retain an opaque parent; never append them to a child's arguments.
+    if part.assigns.is_empty() && part.argv.len() == 3 {
+        collapse(part_id, graph);
+    } else {
+        graph.parts[part_id].state = EvidenceState::Opaque(reason::OPAQUE_EXPANSION);
+    }
+    emit_sh_children(&part, &operand.text, depth + 1, graph);
 }
 
-fn emit_sh_children(
-    part_id: usize,
-    operand: &str,
-    extras: &[String],
-    depth: usize,
-    graph: &mut CommandEvidence,
-) {
+fn absolute_script_operand(path: &str) -> bool {
+    path.starts_with('/')
+        && !path.chars().any(|c| c.is_ascii_control())
+        && path[1..]
+            .split('/')
+            .all(|component| !matches!(component, "" | "." | ".."))
+}
+
+fn emit_sh_children(parent: &Part, operand: &str, depth: usize, graph: &mut CommandEvidence) {
+    let part_id = parent.id;
     let children_scanned = parse::scan(operand.trim());
     // emit each segment of the operand as a wrapper child, mirroring shell
     for seg in &children_scanned.segments {
         let (assigns, mut argv, redirects, unresolvable) = segment_observations(seg);
-        for extra in extras {
-            argv.push(ArgToken {
-                text: extra.clone(),
-                resolvable: true,
-                span: (0, 0),
-            });
+        let mut assigns = [parent.assigns.clone(), assigns].concat();
+        let mut redirects = [parent.redirects.clone(), redirects].concat();
+        for (index, assign) in assigns.iter_mut().enumerate() {
+            assign.ordinal = index as u32 + 1;
+        }
+        for (index, redirect) in redirects.iter_mut().enumerate() {
+            redirect.ordinal = index as u32 + 1;
         }
         if depth <= MAX_SPLIT_DEPTH {
             for (inner, _span) in seg
@@ -512,7 +544,7 @@ fn unwrap_transparent(
         part.raw.clone(),
         part.assigns.clone(),
         rest,
-        Vec::new(),
+        part.redirects.clone(),
         state_at_depth(child_depth, EvidenceState::Complete),
         graph,
     );
@@ -545,7 +577,7 @@ fn unwrap_nice(part: Part, part_id: usize, depth: usize, graph: &mut CommandEvid
         part.raw.clone(),
         part.assigns.clone(),
         rest,
-        Vec::new(),
+        part.redirects.clone(),
         state_at_depth(child_depth, EvidenceState::Complete),
         graph,
     );
@@ -583,7 +615,7 @@ fn unwrap_timeout(part: Part, part_id: usize, depth: usize, graph: &mut CommandE
                 part.raw.clone(),
                 part.assigns.clone(),
                 rest,
-                Vec::new(),
+                part.redirects.clone(),
                 state_at_depth(child_depth, EvidenceState::Complete),
                 graph,
             );
@@ -598,11 +630,19 @@ fn unwrap_timeout(part: Part, part_id: usize, depth: usize, graph: &mut CommandE
 
 fn unwrap_env(part: Part, part_id: usize, depth: usize, graph: &mut CommandEvidence) {
     let mut rest: Vec<ArgToken> = Vec::new();
+    let mut assigns = part.assigns.clone();
     let mut idx = 1usize;
     let mut opaque: Option<&'static str> = None;
     while idx < part.argv.len() {
         let w = &part.argv[idx];
         if is_assignment(&w.text) {
+            assigns.push(EnvAssign {
+                name: w.text[..w.text.find('=').expect("assignment has =")].to_string(),
+                text: w.text.clone(),
+                resolvable: w.resolvable,
+                span: w.span,
+                ordinal: assigns.len() as u32 + 1,
+            });
             idx += 1;
             continue;
         }
@@ -621,14 +661,14 @@ fn unwrap_env(part: Part, part_id: usize, depth: usize, graph: &mut CommandEvide
         graph.parts[part_id].state = EvidenceState::Opaque("env without command");
         return;
     }
-    // env assignments are transparent prefixes — argv untouched
+    // Keep every assignment occurrence, including shadowed values, for coverage.
     let child_depth = depth + 1;
     let child_id = emit_child(
         part_id,
         part.raw.clone(),
-        part.assigns.clone(),
+        assigns,
         rest,
-        Vec::new(),
+        part.redirects.clone(),
         state_at_depth(child_depth, EvidenceState::Complete),
         graph,
     );

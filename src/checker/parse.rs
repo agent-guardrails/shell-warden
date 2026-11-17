@@ -136,12 +136,16 @@ fn scan_chars(_raw: &str, chars: &[char]) -> Option<ScanResult> {
     let mut cur_start: Option<usize> = None;
     let mut cur_resolvable = true;
     let mut cur_quoting = Quoting::None;
+    // An empty quoted word is an argument, not absent syntax. Any quoting,
+    // including backslash escaping, also prevents an IO-number token. Keep
+    // this separately from the quote class, which resets after each quote.
+    let mut cur_quoted = false;
     let mut cur_sub: Vec<(String, Span)> = Vec::new();
     let mut trailing_empty = false; // last op chain saw a redirect target
 
     macro_rules! finish_token {
         ($kind:expr) => {
-            if !cur_text.is_empty() {
+            if !cur_text.is_empty() || cur_quoted {
                 // Spans are diagnostic bookkeeping only: end = decode length
                 // from the token start (never security-relevant).
                 let end = cur_start.unwrap_or(0) + cur_text.len().max(1);
@@ -155,6 +159,7 @@ fn scan_chars(_raw: &str, chars: &[char]) -> Option<ScanResult> {
                 }));
                 cur_resolvable = true;
                 cur_quoting = Quoting::None;
+                cur_quoted = false;
                 cur_start = None;
             }
         };
@@ -190,7 +195,7 @@ fn scan_chars(_raw: &str, chars: &[char]) -> Option<ScanResult> {
                 pending_sep = Some(Operator::Semi);
                 i += 1;
             }
-            '#' if cur_text.is_empty() => {
+            '#' if cur_text.is_empty() && !cur_quoted => {
                 // comment: the rest of the input is decoration
                 finish_token!(TokKind::Word);
                 new_segment!(i);
@@ -198,6 +203,7 @@ fn scan_chars(_raw: &str, chars: &[char]) -> Option<ScanResult> {
                 break;
             }
             '\'' => {
+                cur_quoted = true;
                 cur_quoting = Quoting::Single;
                 cur_start.get_or_insert(i);
                 match (i + 1..n).find(|&j| chars[j] == '\'') {
@@ -217,6 +223,7 @@ fn scan_chars(_raw: &str, chars: &[char]) -> Option<ScanResult> {
                 }
             }
             '"' => {
+                cur_quoted = true;
                 cur_quoting = Quoting::Double;
                 cur_start.get_or_insert(i);
                 let mut j = i + 1;
@@ -271,6 +278,7 @@ fn scan_chars(_raw: &str, chars: &[char]) -> Option<ScanResult> {
                 }
             }
             '\\' if i + 1 < n => {
+                cur_quoted = true;
                 cur_start.get_or_insert(i);
                 cur_quoting = Quoting::Escaped;
                 cur_text.push(unescape(chars[i + 1]));
@@ -399,7 +407,10 @@ fn scan_chars(_raw: &str, chars: &[char]) -> Option<ScanResult> {
                 // possibly FD-prefixed redirect (`2>`, `2>>`, `1<`): a pure
                 // digit pending token belongs to the operator, not argv.
                 let mut source_fd: Option<u32> = None;
-                if !cur_text.is_empty() && cur_text.chars().all(|ch| ch.is_ascii_digit()) {
+                if !cur_quoted
+                    && !cur_text.is_empty()
+                    && cur_text.chars().all(|ch| ch.is_ascii_digit())
+                {
                     source_fd = cur_text.parse::<u32>().ok();
                     cur_text.clear();
                     cur_resolvable = true;
