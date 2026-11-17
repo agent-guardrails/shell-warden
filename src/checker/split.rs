@@ -44,7 +44,7 @@ fn extract_raw(
     raw: &str,
     depth: usize,
     relation: Relation,
-    ordinal: u32,
+    _ordinal: u32,
     parent: Option<usize>,
     graph: &mut CommandEvidence,
 ) {
@@ -58,8 +58,9 @@ fn extract_raw(
             let part_relation = if scanned.malformed || seg.heredoc {
                 relation
             } else {
-                segment_relation(seg)
+                segment_relation(seg, relation)
             };
+            let ordinal = next_ordinal(graph, part_relation, parent);
             push_part(
                 seg.raw.trim().to_string(),
                 part_relation,
@@ -78,12 +79,34 @@ fn extract_raw(
     let scanned = parse::scan(raw);
     for seg in &scanned.segments {
         if scanned.malformed || seg.heredoc {
-            split_heredoc_like(seg, relation, ordinal, parent, depth, graph);
+            split_heredoc_like(
+                seg,
+                relation,
+                next_ordinal(graph, relation, parent),
+                parent,
+                depth,
+                graph,
+            );
             continue;
         }
-        let seg_relation = segment_relation(seg);
-        // recursion for captured inner texts (command substitution), BEFORE
-        // the ordinary part: substitution order matches shell evaluation.
+        let seg_relation = segment_relation(seg, relation);
+        let (assigns, argv, redirects, _) = segment_observations(seg);
+        let state = observations_state(&assigns, &argv, &redirects);
+        let ordinal = next_ordinal(graph, seg_relation, parent);
+        // Record the owner first so every executable child has a real parent
+        // and a larger ID. Reverse-ID evaluation still reduces children first.
+        let (part_id, _) = push_part(
+            seg.raw.trim().to_string(),
+            seg_relation,
+            ordinal,
+            parent,
+            assigns,
+            argv,
+            redirects,
+            state,
+            None,
+            graph,
+        );
         for (inner, _span) in seg
             .items
             .iter()
@@ -102,32 +125,11 @@ fn extract_raw(
                 inner.trim(),
                 depth + 1,
                 Relation::CommandSubstitution,
-                next_ordinal(graph, Relation::CommandSubstitution, parent),
-                parent,
+                next_ordinal(graph, Relation::CommandSubstitution, Some(part_id)),
+                Some(part_id),
                 graph,
             );
         }
-
-        let (assigns, argv, redirects, unresolvable) = segment_observations(seg);
-
-        let state = if unresolvable {
-            EvidenceState::Opaque(reason::OPAQUE_EXPANSION)
-        } else {
-            EvidenceState::Complete
-        };
-
-        let (part_id, _) = push_part(
-            seg.raw.trim().to_string(),
-            seg_relation,
-            ordinal,
-            parent,
-            assigns,
-            argv,
-            redirects,
-            state,
-            None,
-            graph,
-        );
 
         // wrapper unwrap turns transparent interpreters into child parts
         let part = graph.parts[part_id].clone();
@@ -135,7 +137,10 @@ fn extract_raw(
     }
 }
 
-fn segment_relation(seg: &parse::Segment) -> Relation {
+fn segment_relation(seg: &parse::Segment, inherited: Relation) -> Relation {
+    if inherited != Relation::Chain {
+        return inherited;
+    }
     match seg.sep {
         Some(Operator::Pipe) => Relation::Pipeline,
         _ => Relation::Chain,
@@ -148,6 +153,7 @@ fn segment_observations(
     let mut assigns: Vec<EnvAssign> = Vec::new();
     let mut argv: Vec<ArgToken> = Vec::new();
     let mut unresolvable = false;
+    let mut declaration_head = false;
     for tok in seg.items.iter().filter_map(|it| match it {
         parse::Item::Tok(t) if t.kind == TokKind::Word => Some(t),
         _ => None,
@@ -155,10 +161,25 @@ fn segment_observations(
         if !tok.resolvable {
             unresolvable = true;
         }
-        if argv.is_empty() && assigns.is_empty() && is_assignment(&tok.text) {
-            let name = tok.text[..tok.text.find('=').unwrap_or(0)].to_string();
+        let destination = tok
+            .source
+            .split_once('=')
+            .map(|(name, _)| name)
+            .filter(|name| super::parameter::is_name(name))
+            .or_else(|| {
+                (declaration_head && argv.len() == 1 && tok.resolvable)
+                    .then(|| tok.text.split_once('=').map(|(name, _)| name))
+                    .flatten()
+                    .filter(|name| super::parameter::is_name(name))
+            });
+        let prefix = argv.is_empty();
+        let declaration = argv.len() == 1 && declaration_head;
+        if (prefix || declaration) && destination.is_some_and(super::parameter::is_name) {
+            let name = destination.unwrap().to_string();
             assigns.push(EnvAssign {
                 name,
+                parameter: tok.assignment_parameter().map(|(_, value)| value),
+                prefix,
                 text: tok.text.clone(),
                 resolvable: tok.resolvable,
                 span: tok.span,
@@ -166,8 +187,12 @@ fn segment_observations(
             });
             continue;
         }
+        if argv.is_empty() {
+            declaration_head = tok.source == "export";
+        }
         argv.push(ArgToken {
             text: tok.text.clone(),
+            parameter: tok.parameter(),
             resolvable: tok.resolvable,
             span: tok.span,
         });
@@ -184,12 +209,19 @@ fn segment_observations(
             },
             source_fd: redirect.source_fd,
             target: redirect.target.text.clone(),
+            parameter: match redirect.op {
+                RawRedirOp::Supported(
+                    super::grammar::RedirectOp::Out | super::grammar::RedirectOp::AppendOut,
+                ) => redirect.target.parameter(),
+                _ => None,
+            },
             target_resolvable: redirect.target.resolvable,
-            is_fd_target: redirect
-                .target
-                .text
-                .chars()
-                .all(|character| character.is_ascii_digit()),
+            is_fd_target: matches!(
+                redirect.op,
+                RawRedirOp::Supported(
+                    super::grammar::RedirectOp::DupOut | super::grammar::RedirectOp::DupIn
+                )
+            ) && redirect.target.resolvable,
             span: redirect.span,
             ordinal: index as u32 + 1,
         })
@@ -199,6 +231,68 @@ fn segment_observations(
     (assigns, argv, redirects, unresolvable)
 }
 
+fn observations_state(
+    assigns: &[EnvAssign],
+    argv: &[ArgToken],
+    redirects: &[RedirectObs],
+) -> EvidenceState {
+    if redirects.iter().any(|r| r.op.is_none()) {
+        return EvidenceState::Invalid(reason::UNSUPPORTED_SYNTAX);
+    }
+    let opaque = argv.iter().any(|a| !a.resolvable && a.parameter.is_none())
+        || assigns
+            .iter()
+            .any(|a| !a.resolvable && a.parameter.is_none())
+        || redirects
+            .iter()
+            .any(|r| !r.target_resolvable && r.parameter.is_none())
+        || argv.first().is_some_and(|a| !a.resolvable);
+    let parameter = argv.iter().any(|a| a.parameter.is_some())
+        || assigns.iter().any(|a| a.parameter.is_some())
+        || redirects.iter().any(|r| r.parameter.is_some());
+    // Unknown wrapper/interpreter operands are not ordinary positional values.
+    let wrapper = parameter
+        && argv.first().is_some_and(|a| match a.text.as_str() {
+            "bash" | "sh" => argv.iter().skip(1).any(|a| !a.resolvable),
+            "sudo" | "nohup" | "nice" | "timeout" | "env" | "xargs" => true,
+            _ => false,
+        });
+    let dynamic_code_or_destination = argv.first().is_some_and(|head| {
+        let name = head.text.rsplit('/').next().unwrap_or(&head.text);
+        matches!(
+            name,
+            "export"
+                | "eval"
+                | "exec"
+                | "command"
+                | "builtin"
+                | "source"
+                | "."
+                | "bash"
+                | "sh"
+                | "node"
+                | "nodejs"
+                | "python"
+                | "python2"
+                | "python3"
+                | "perl"
+                | "ruby"
+                | "php"
+                | "lua"
+                | "Rscript"
+                | "deno"
+                | "bun"
+        ) && argv.iter().skip(1).any(|a| !a.resolvable)
+    });
+    if opaque || wrapper || dynamic_code_or_destination {
+        EvidenceState::Opaque(reason::OPAQUE_EXPANSION)
+    } else if parameter {
+        EvidenceState::Parameter
+    } else {
+        EvidenceState::Complete
+    }
+}
+
 fn retain_overflow_marker(
     seg: &parse::Segment,
     argv: &mut Vec<ArgToken>,
@@ -206,6 +300,7 @@ fn retain_overflow_marker(
 ) {
     if argv.is_empty() && redirects.is_empty() {
         argv.push(ArgToken {
+            parameter: None,
             text: seg.raw.trim().to_string(),
             resolvable: false,
             span: seg.span,
@@ -245,6 +340,8 @@ fn split_heredoc_like(
             let name = tok.text[..tok.text.find('=').unwrap_or(0)].to_string();
             assigns.push(EnvAssign {
                 name,
+                parameter: None,
+                prefix: true,
                 text: tok.text.clone(),
                 resolvable: tok.resolvable,
                 span: tok.span,
@@ -254,6 +351,7 @@ fn split_heredoc_like(
         }
         argv.push(ArgToken {
             text: tok.text.clone(),
+            parameter: None,
             resolvable: tok.resolvable,
             span: tok.span,
         });
@@ -343,10 +441,19 @@ fn is_assignment(w: &str) -> bool {
 /// `xargs` keeps its operand as an opaque child (stdiн-appended args are
 /// unconstrained); the xargs-v1 analyzer re-exposes it as analyzerCommand.
 fn unwrap_wrapper(part: Part, part_id: usize, depth: usize, graph: &mut CommandEvidence) {
-    let head = part.argv.first().map(|a| a.text.clone());
-    if part.state == EvidenceState::Complete {
+    let head = part
+        .argv
+        .first()
+        .filter(|a| a.resolvable)
+        .map(|a| a.text.clone());
+    if matches!(head.as_deref(), Some("bash" | "sh"))
+        && !matches!(part.state, EvidenceState::Invalid(_))
+    {
+        unwrap_bash(part, part_id, depth, graph);
+        return;
+    }
+    if !matches!(part.state, EvidenceState::Invalid(_)) {
         match head.as_deref() {
-            Some("bash") | Some("sh") => unwrap_bash(part, part_id, depth, graph),
             Some("sudo") => unwrap_transparent(
                 part,
                 part_id,
@@ -369,10 +476,43 @@ fn unwrap_wrapper(part: Part, part_id: usize, depth: usize, graph: &mut CommandE
             Some("xargs") => unwrap_xargs(part, part_id, depth, graph),
             _ => {}
         }
+    }
+}
+
+fn emit_wrapped(
+    part: &Part,
+    part_id: usize,
+    rest: Vec<ArgToken>,
+    transparent: bool,
+    depth: usize,
+    graph: &mut CommandEvidence,
+) {
+    if rest
+        .first()
+        .is_none_or(|head| !head.resolvable || head.text.starts_with('-'))
+    {
+        graph.parts[part_id].state = EvidenceState::Opaque(reason::OPAQUE_EXPANSION);
         return;
     }
-    if let Some("xargs") = head.as_deref() {
-        unwrap_xargs(part, part_id, depth, graph)
+    let child_depth = depth + 1;
+    let state = observations_state(&part.assigns, &rest, &part.redirects);
+    let child_id = emit_child(
+        part_id,
+        part.raw.clone(),
+        part.assigns.clone(),
+        rest,
+        part.redirects.clone(),
+        state_at_depth(child_depth, state),
+        graph,
+    );
+    if transparent && part.state == EvidenceState::Complete {
+        collapse(part_id, graph);
+    } else {
+        graph.parts[part_id].state = EvidenceState::Opaque(reason::OPAQUE_EXPANSION);
+    }
+    if child_depth <= MAX_SPLIT_DEPTH {
+        let child = graph.parts[child_id].clone();
+        unwrap_wrapper(child, child_id, child_depth, graph);
     }
 }
 
@@ -405,7 +545,11 @@ fn emit_child(
 }
 
 fn unwrap_bash(part: Part, part_id: usize, depth: usize, graph: &mut CommandEvidence) {
-    let pos = match part.argv.iter().position(|w| w.text == "-c") {
+    let pos = match part
+        .argv
+        .iter()
+        .position(|w| w.resolvable && w.text == "-c")
+    {
         Some(p) => p,
         None => {
             graph.parts[part_id].state = EvidenceState::Opaque(reason::OPAQUE_EXPANSION);
@@ -416,78 +560,50 @@ fn unwrap_bash(part: Part, part_id: usize, depth: usize, graph: &mut CommandEvid
         graph.parts[part_id].state = EvidenceState::Opaque(reason::OPAQUE_EXPANSION);
         return;
     };
-    // The operand is evaluated wholly; extra words after it are $0/$1 args —
-    // appended to the last child argv (they only ADD stricter matches).
-    let extras: Vec<String> = part.argv[pos + 2..]
-        .iter()
-        .map(|a| a.text.clone())
-        .collect();
+    if !operand.resolvable {
+        graph.parts[part_id].state = EvidenceState::Opaque(reason::OPAQUE_EXPANSION);
+        return;
+    }
+    // Only the fixed `shell -c literal-script` form is transparent. Other
+    // operands are not inner argv: in particular $0/$1 extras must never
+    // manufacture a required option (e.g. --dry-run) in a child command.
+    let transparent = pos == 1 && part.argv.len() == 3 && part.state.can_allow();
     let operand = operand.text.clone();
-    drop(part);
-    collapse(part_id, graph);
-    emit_sh_children(part_id, &operand, &extras, depth + 1, graph);
-}
-
-fn emit_sh_children(
-    part_id: usize,
-    operand: &str,
-    extras: &[String],
-    depth: usize,
-    graph: &mut CommandEvidence,
-) {
-    let children_scanned = parse::scan(operand.trim());
-    // emit each segment of the operand as a wrapper child, mirroring shell
-    for seg in &children_scanned.segments {
-        let (assigns, mut argv, redirects, unresolvable) = segment_observations(seg);
-        for extra in extras {
-            argv.push(ArgToken {
-                text: extra.clone(),
-                resolvable: true,
-                span: (0, 0),
-            });
+    if transparent {
+        collapse(part_id, graph);
+    } else {
+        graph.parts[part_id].state = EvidenceState::Opaque(reason::OPAQUE_EXPANSION);
+    }
+    let start = graph.parts.len();
+    extract_raw(
+        &operand,
+        depth + 1,
+        Relation::Wrapper,
+        1,
+        Some(part_id),
+        graph,
+    );
+    if graph.parts.len() == start {
+        graph.collapsed.retain(|id| *id != part_id);
+        graph.parts[part_id].state = EvidenceState::Opaque(reason::OPAQUE_EXPANSION);
+    }
+    // Outer assignments and redirects affect every executable descendant.
+    // Keep them as coverage obligations instead of losing them on collapse.
+    for child in &mut graph.parts[start..] {
+        let mut assigns = part.assigns.clone();
+        assigns.append(&mut child.assigns);
+        for (i, assignment) in assigns.iter_mut().enumerate() {
+            assignment.ordinal = i as u32 + 1;
         }
-        if depth <= MAX_SPLIT_DEPTH {
-            for (inner, _span) in seg
-                .items
-                .iter()
-                .filter_map(|it| match it {
-                    parse::Item::Tok(t) if !t.subtexts.is_empty() => Some(t.subtexts.clone()),
-                    _ => None,
-                })
-                .flatten()
-            {
-                extract_raw(
-                    inner.trim(),
-                    depth + 1,
-                    Relation::CommandSubstitution,
-                    next_ordinal(graph, Relation::CommandSubstitution, Some(part_id)),
-                    Some(part_id),
-                    graph,
-                );
-            }
+        child.assigns = assigns;
+        let mut redirects = part.redirects.clone();
+        redirects.append(&mut child.redirects);
+        for (i, redirect) in redirects.iter_mut().enumerate() {
+            redirect.ordinal = i as u32 + 1;
         }
-        let state = if children_scanned.malformed || seg.heredoc {
-            EvidenceState::Invalid(reason::UNSUPPORTED_SYNTAX)
-        } else if unresolvable {
-            EvidenceState::Opaque(reason::OPAQUE_EXPANSION)
-        } else {
-            EvidenceState::Complete
-        };
-        if depth > MAX_SPLIT_DEPTH {
-            retain_overflow_marker(seg, &mut argv, &redirects);
-        }
-        let child_id = emit_child(
-            part_id,
-            seg.raw.trim().to_string(),
-            assigns,
-            argv,
-            redirects,
-            state_at_depth(depth, state),
-            graph,
-        );
-        if depth <= MAX_SPLIT_DEPTH {
-            let child = graph.parts[child_id].clone();
-            unwrap_wrapper(child, child_id, depth, graph);
+        child.redirects = redirects;
+        if child.state.can_allow() {
+            child.state = observations_state(&child.assigns, &child.argv, &child.redirects);
         }
     }
 }
@@ -509,26 +625,19 @@ fn unwrap_transparent(
         graph.parts[part_id].state = EvidenceState::Opaque(opt_reason);
         return;
     }
-    let child_depth = depth + 1;
-    let ids = emit_child(
-        part_id,
-        part.raw.clone(),
-        part.assigns.clone(),
-        rest,
-        Vec::new(),
-        state_at_depth(child_depth, EvidenceState::Complete),
-        graph,
-    );
-    collapse(part_id, graph);
-    if child_depth <= MAX_SPLIT_DEPTH {
-        let child = graph.parts[ids].clone();
-        unwrap_wrapper(child, ids, child_depth, graph);
-    }
+    emit_wrapped(&part, part_id, rest, true, depth, graph);
 }
 
 fn unwrap_nice(part: Part, part_id: usize, depth: usize, graph: &mut CommandEvidence) {
     let mut rest: Vec<ArgToken> = part.argv[1..].to_vec();
     if rest.first().map(|w| w.text.as_str()) == Some("-n") {
+        if rest
+            .get(1)
+            .is_none_or(|priority| !priority.resolvable || priority.text.parse::<i64>().is_err())
+        {
+            graph.parts[part_id].state = EvidenceState::Opaque(reason::OPAQUE_EXPANSION);
+            return;
+        }
         rest.drain(..2.min(rest.len()));
     } else if rest
         .first()
@@ -542,26 +651,16 @@ fn unwrap_nice(part: Part, part_id: usize, depth: usize, graph: &mut CommandEvid
         graph.parts[part_id].state = EvidenceState::Opaque("nice without command");
         return;
     }
-    let child_depth = depth + 1;
-    let child_id = emit_child(
-        part_id,
-        part.raw.clone(),
-        part.assigns.clone(),
-        rest,
-        Vec::new(),
-        state_at_depth(child_depth, EvidenceState::Complete),
-        graph,
-    );
-    collapse(part_id, graph);
-    if child_depth <= MAX_SPLIT_DEPTH {
-        let child = graph.parts[child_id].clone();
-        unwrap_wrapper(child, child_id, child_depth, graph);
-    }
+    emit_wrapped(&part, part_id, rest, true, depth, graph);
 }
 
 fn unwrap_timeout(part: Part, part_id: usize, depth: usize, graph: &mut CommandEvidence) {
     let mut rest: Vec<ArgToken> = part.argv[1..].to_vec();
-    match rest.first().map(|w| w.text.clone()) {
+    match rest
+        .first()
+        .filter(|w| w.resolvable)
+        .map(|w| w.text.clone())
+    {
         None => graph.parts[part_id].state = EvidenceState::Opaque("timeout without duration"),
         Some(w) if w.starts_with("--") => {
             graph.parts[part_id].state = EvidenceState::Opaque(reason::OPAQUE_EXPANSION)
@@ -580,21 +679,7 @@ fn unwrap_timeout(part: Part, part_id: usize, depth: usize, graph: &mut CommandE
                 graph.parts[part_id].state = EvidenceState::Opaque("timeout without command");
                 return;
             }
-            let child_depth = depth + 1;
-            let child_id = emit_child(
-                part_id,
-                part.raw.clone(),
-                part.assigns.clone(),
-                rest,
-                Vec::new(),
-                state_at_depth(child_depth, EvidenceState::Complete),
-                graph,
-            );
-            collapse(part_id, graph);
-            if child_depth <= MAX_SPLIT_DEPTH {
-                let child = graph.parts[child_id].clone();
-                unwrap_wrapper(child, child_id, child_depth, graph);
-            }
+            emit_wrapped(&part, part_id, rest, true, depth, graph);
         }
     }
 }
@@ -605,6 +690,10 @@ fn unwrap_env(part: Part, part_id: usize, depth: usize, graph: &mut CommandEvide
     let mut opaque: Option<&'static str> = None;
     while idx < part.argv.len() {
         let w = &part.argv[idx];
+        if !w.resolvable {
+            graph.parts[part_id].state = EvidenceState::Opaque(reason::OPAQUE_EXPANSION);
+            return;
+        }
         if is_assignment(&w.text) {
             idx += 1;
             continue;
@@ -624,22 +713,9 @@ fn unwrap_env(part: Part, part_id: usize, depth: usize, graph: &mut CommandEvide
         graph.parts[part_id].state = EvidenceState::Opaque("env without command");
         return;
     }
-    // env assignments are transparent prefixes — argv untouched
-    let child_depth = depth + 1;
-    let child_id = emit_child(
-        part_id,
-        part.raw.clone(),
-        part.assigns.clone(),
-        rest,
-        Vec::new(),
-        state_at_depth(child_depth, EvidenceState::Complete),
-        graph,
-    );
-    collapse(part_id, graph);
-    if child_depth <= MAX_SPLIT_DEPTH {
-        let child = graph.parts[child_id].clone();
-        unwrap_wrapper(child, child_id, child_depth, graph);
-    }
+    // Utility assignment operands are not direct prefix-assignment evidence.
+    // Keep that unsupported wrapper visible instead of dropping destinations.
+    emit_wrapped(&part, part_id, rest, idx == 1, depth, graph);
 }
 
 fn unwrap_xargs(part: Part, part_id: usize, depth: usize, graph: &mut CommandEvidence) {

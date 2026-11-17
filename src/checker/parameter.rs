@@ -30,6 +30,26 @@ pub fn is_name(name: &str) -> bool {
 /// Parse a value word, not an assignment's destination. Unquoted recognition
 /// does not establish assignment semantics; callers must prove that separately.
 pub fn parse(source: &str) -> Option<ParameterWord> {
+    // Shell line continuations disappear before identifier tokenization.
+    // Preserve escaped backslash pairs: the second slash of "\\\\\n" is
+    // already escaped and cannot start a continuation.
+    let mut normalized = String::new();
+    let mut chars = source.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('\n') => {}
+                Some(next) => {
+                    normalized.push(c);
+                    normalized.push(next);
+                }
+                None => normalized.push(c),
+            }
+        } else {
+            normalized.push(c);
+        }
+    }
+    let source = normalized.as_str();
     let (body, form) = if source.starts_with('"') {
         (
             source.strip_prefix('"')?.strip_suffix('"')?,
@@ -130,6 +150,20 @@ mod tests {
         }
         assert_eq!(parse("\"$HOMEbackup\"").unwrap().name, "HOMEbackup");
         assert_eq!(parse("\"${HOME}backup\"").unwrap().suffix, "backup");
+    }
+
+    #[test]
+    fn line_continuations_do_not_shorten_variable_identifiers() {
+        for source in [
+            "\"$HO\\\nME/cache\"",
+            "\"${HO\\\nME}/cache\"",
+            "$HO\\\nME/cache",
+        ] {
+            let parsed = parse(source).unwrap();
+            assert_eq!(parsed.name, "HOME", "{source}");
+            assert_eq!(parsed.suffix, "/cache", "{source}");
+        }
+        assert_eq!(parse("\"$HOME/\\\\\nnext\"").unwrap().suffix, "/\\\nnext");
     }
 
     #[test]

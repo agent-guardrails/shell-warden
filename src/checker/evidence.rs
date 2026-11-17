@@ -9,14 +9,16 @@
 //   invalid  — malformed or unsupported structure, or a resource/evidence
 //              limit overflow.
 //
-// allow may only emit from a `complete` part that passes coverage validation;
+// allow emits only from supported complete/parameter parts after full proof;
 // deny/ask may still match the typed classification (e.g. facts) or raw text.
 
 use super::grammar::Relation;
+use super::parameter::ParameterWord;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EvidenceState {
     Complete,
+    Parameter,
     Opaque(&'static str),
     Invalid(&'static str),
 }
@@ -25,13 +27,14 @@ impl EvidenceState {
     pub fn stable_code(self) -> &'static str {
         match self {
             EvidenceState::Complete => "complete",
+            EvidenceState::Parameter => "parameter-expansion",
             EvidenceState::Opaque(reason) => reason,
             EvidenceState::Invalid(reason) => reason,
         }
     }
 
     pub fn can_allow(self) -> bool {
-        matches!(self, EvidenceState::Complete)
+        matches!(self, EvidenceState::Complete | EvidenceState::Parameter)
     }
 }
 
@@ -58,6 +61,7 @@ pub mod reason {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ArgToken {
     pub text: String,
+    pub parameter: Option<ParameterWord>,
     /// Fully known literal value. `false` ⇒ opaque (`\$…` marker kept).
     pub resolvable: bool,
     pub span: (usize, usize),
@@ -67,6 +71,9 @@ pub struct ArgToken {
 #[derive(Debug, Clone, PartialEq)]
 pub struct EnvAssign {
     pub name: String,
+    pub parameter: Option<ParameterWord>,
+    /// True for command-prefix assignments, false for declaration operands.
+    pub prefix: bool,
     pub text: String,
     pub resolvable: bool,
     pub span: (usize, usize),
@@ -82,6 +89,7 @@ pub struct RedirectObs {
     pub op: Option<super::grammar::RedirectOp>,
     pub source_fd: Option<u32>,
     pub target: String,
+    pub parameter: Option<ParameterWord>,
     pub target_resolvable: bool,
     pub is_fd_target: bool,
     pub span: (usize, usize),

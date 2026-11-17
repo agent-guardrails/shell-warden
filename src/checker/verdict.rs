@@ -1,7 +1,7 @@
-// Verdict output — the closed verdict v2 envelope (02-letter-verdict.md §2.7/§2.8,
-// ADR-0023: verdict v2 only).
+// Verdict output — the closed v3 envelope (12-contextual-parameters.md,
+// ADR-0026). Retired versions are never parsed or emitted.
 //
-// One writer, one response version: the checker emits `shell-warden.verdict.v2`
+// One writer, one response version: the checker emits `shell-warden.verdict.v3`
 // for every outcome and never selects, negotiates, or falls back. The released
 // v1 verdict schema stays an immutable historical record; nothing here reads or
 // writes it (letter v1 parsing is unchanged, 02 §2.2).
@@ -12,9 +12,9 @@
 // §8.6); §8.9 self-validation rejects any envelope that violates the semantic
 // invariants before a byte reaches stdout (fail closed, never synthesized).
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL: &str = "shell-warden.verdict.v2";
+pub const PROTOCOL: &str = "shell-warden.verdict.v3";
 pub const MAX_VERDICT_BYTES: usize = 64 * 1024; // 02 §2.7
 pub const MAX_FACTS_BYTES: usize = 16 * 1024; // 02 §2.8 (I6)
 pub const MAX_FACTS_DEPTH: usize = 8; // 02 §2.8 (I6)
@@ -24,8 +24,10 @@ pub const MAX_MESSAGE_CHARS: usize = 512; // 02 §2.7
 pub use super::grammar::VerdictKind;
 
 /// Stable reason codes (07 §7.3): the closed vocabulary accepted in
-/// `facts.reasons`. Sorted as in the v2 schema `Reason` enum.
-pub const STABLE_REASONS: [&str; 17] = [
+/// `facts.reasons`. The v3 schema has the same closed vocabulary.
+pub const STABLE_REASONS: [&str; 19] = [
+    "parameter-expansion",
+    "predicate-unknown",
     "complete",
     "opaque-expansion",
     "unknown-option",
@@ -77,6 +79,7 @@ pub fn is_invalid_cause(reason: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EvidenceClass {
     Complete,
+    Parameter,
     Opaque,
     Invalid,
 }
@@ -85,6 +88,7 @@ impl EvidenceClass {
     pub fn as_str(self) -> &'static str {
         match self {
             EvidenceClass::Complete => "complete",
+            EvidenceClass::Parameter => "parameter",
             EvidenceClass::Opaque => "opaque",
             EvidenceClass::Invalid => "invalid",
         }
@@ -96,6 +100,7 @@ impl EvidenceClass {
     pub fn reason_anchor(self) -> &'static str {
         match self {
             EvidenceClass::Complete => "complete",
+            EvidenceClass::Parameter => "parameter-expansion",
             EvidenceClass::Opaque => "opaque-expansion",
             EvidenceClass::Invalid => "", // lowest invalid cause, not a constant
         }
@@ -106,6 +111,7 @@ impl EvidenceClass {
     pub fn classification(self) -> ClassificationWire {
         match self {
             EvidenceClass::Complete => ClassificationWire::Static,
+            EvidenceClass::Parameter => ClassificationWire::Parameter,
             EvidenceClass::Opaque => ClassificationWire::Opaque,
             EvidenceClass::Invalid => ClassificationWire::Invalid,
         }
@@ -114,13 +120,16 @@ impl EvidenceClass {
     pub fn r#match(self) -> MatchKind {
         match self {
             EvidenceClass::Complete => MatchKind::Argv,
+            EvidenceClass::Parameter => MatchKind::Expression,
             EvidenceClass::Opaque | EvidenceClass::Invalid => MatchKind::Raw,
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 pub enum ClassificationWire {
+    #[serde(rename = "parameter")]
+    Parameter,
     #[serde(rename = "static")]
     Static,
     #[serde(rename = "opaque")]
@@ -129,8 +138,10 @@ pub enum ClassificationWire {
     Invalid,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 pub enum MatchKind {
+    #[serde(rename = "expression")]
+    Expression,
     /// Fully parsed token match (the only kind allow may carry).
     #[serde(rename = "argv")]
     Argv,
@@ -141,7 +152,7 @@ pub enum MatchKind {
 
 /// Canonical rejected allow entry (08 §8.7): one per rule ID, coverage reasons
 /// sorted and deduplicated by UTF-8 bytes.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct RejectedAllow {
     pub rule_id: String,
@@ -149,10 +160,11 @@ pub struct RejectedAllow {
 }
 
 /// Full diagnostics (08 §8.7): emitted votes only, canonical ordering.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct FullDiagnostics {
-    pub evidence: &'static str,
+    pub uncertain: Vec<UncertainPredicate>,
+    pub evidence: String,
     pub reasons: Vec<String>,
     pub selected_profiles: Vec<String>,
     pub matched: Vec<String>,
@@ -161,68 +173,112 @@ pub struct FullDiagnostics {
     pub votes: Vec<String>,
 }
 
-/// Truncated diagnostics (08 §8.7): bounded after the decision, never before.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct TruncatedDiagnostics {
-    pub evidence: &'static str,
-    pub reasons: Vec<String>,
-    pub diagnostics: &'static str,
+pub struct UncertainPredicate {
+    pub rule_id: String,
+    pub predicates: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+pub fn is_predicate_coordinate(value: &str) -> bool {
+    let parts: Vec<_> = value.split('/').collect();
+    value.chars().count() <= 256
+        && !value.chars().any(char::is_whitespace)
+        && parts.len() >= 5
+        && parts[0].is_empty()
+        && parts[1] == "parts"
+        && !parts[2].is_empty()
+        && parts[2].bytes().all(|c| c.is_ascii_digit())
+        && parts[2].parse::<u32>().is_ok()
+        && parts[3] == "match"
+        && matches!(
+            parts[4],
+            "arguments"
+                | "options"
+                | "environment"
+                | "redirects"
+                | "paths"
+                | "facts"
+                | "nestedParts"
+        )
+        && parts[5..].iter().all(|p| !p.is_empty())
+}
+
+/// Truncated diagnostics (08 §8.7): bounded after the decision, never before.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct TruncatedDiagnostics {
+    pub evidence: String,
+    pub reasons: Vec<String>,
+    pub diagnostics: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum Diagnostics {
     Full(FullDiagnostics),
     Truncated(TruncatedDiagnostics),
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Verdict {
     pub invocation_id: String,
     pub verdict: VerdictKind,
     /// Present on tighten; required on deny (schema top-level allOf).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "super::grammar::present_not_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub message: Option<String>,
     pub commands: Vec<CommandVerdict>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CommandVerdict {
     pub index: u32,
     pub verdict: VerdictKind,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "super::grammar::present_not_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub rule_id: Option<String>,
     pub classification: ClassificationWire,
     pub r#match: MatchKind,
-    /// Bounded v2 diagnostics (08 §8.7).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Bounded v3 diagnostics (12 §12.6).
+    #[serde(
+        default,
+        deserialize_with = "super::grammar::present_not_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub facts: Option<Diagnostics>,
 }
 
-/// The closed v2 response envelope (02 §2.7): exactly `protocol` and `result`.
-#[derive(Debug, Clone, Serialize)]
+/// The closed v3 response envelope: exactly `protocol` and `result`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct VerdictEnvelope {
-    pub protocol: &'static str,
+    pub protocol: String,
     pub result: Verdict,
 }
 
 impl VerdictEnvelope {
     pub fn new(result: Verdict) -> Self {
         VerdictEnvelope {
-            protocol: PROTOCOL,
+            protocol: PROTOCOL.to_string(),
             result,
         }
     }
 
-    /// One explicit v2 writer (HANDOFF §Rust 1/3): 64 KiB output bound with a
+    /// One explicit v3 writer: 64 KiB output bound with a
     /// trailing newline (whitespace after the single JSON value, 02 §2.1).
     pub fn to_wire(&self) -> Result<Vec<u8>, String> {
         let mut out =
             serde_json::to_vec(self).map_err(|e| format!("verdict serialization failed: {e}"))?;
-        if out.len() > MAX_VERDICT_BYTES {
+        if out.len() >= MAX_VERDICT_BYTES {
             return Err(format!(
                 "verdict exceeds {} bytes — checker defect",
                 MAX_VERDICT_BYTES
@@ -253,6 +309,7 @@ pub fn select_truncated_reasons(
     let canonical = sorted_unique(full_reasons);
     let anchor = match evidence {
         EvidenceClass::Complete => "complete".to_string(),
+        EvidenceClass::Parameter => "parameter-expansion".to_string(),
         EvidenceClass::Opaque => "opaque-expansion".to_string(),
         EvidenceClass::Invalid => canonical
             .iter()
@@ -266,11 +323,14 @@ pub fn select_truncated_reasons(
     }
     let mut out: Vec<String> = Vec::with_capacity(8);
     out.push(anchor.clone());
+    if canonical.iter().any(|r| r == "predicate-unknown") {
+        out.push("predicate-unknown".into());
+    }
     for reason in canonical.iter() {
         if out.len() >= 8 {
             break;
         }
-        if reason != &anchor {
+        if !out.contains(reason) {
             out.push(reason.clone());
         }
     }
@@ -318,6 +378,14 @@ impl VerdictEnvelope {
         expected_command_count: usize,
     ) -> Result<(), String> {
         let result = &self.result;
+        if self.protocol != PROTOCOL
+            || result.commands.is_empty()
+            || result.commands.len() > 128
+            || result.invocation_id.is_empty()
+            || result.invocation_id.chars().count() > 256
+        {
+            return Err("invalid verdict envelope or retired protocol".into());
+        }
         if result.invocation_id != expected_invocation_id {
             return Err(format!(
                 "verdict invocationId {:?} does not echo the letter invocation {:?}",
@@ -342,6 +410,7 @@ impl VerdictEnvelope {
             let legal = matches!(
                 (command.classification, command.r#match, command.verdict),
                 (ClassificationWire::Static, MatchKind::Argv, _)
+                    | (ClassificationWire::Parameter, MatchKind::Expression, _)
                     | (ClassificationWire::Opaque, MatchKind::Raw, VerdictKind::Ask)
                     | (
                         ClassificationWire::Opaque,
@@ -366,6 +435,18 @@ impl VerdictEnvelope {
             }
             if command.verdict == VerdictKind::Deny && command.rule_id.is_none() {
                 return Err(format!("commands[{position}] deny without ruleId"));
+            }
+            if command
+                .rule_id
+                .as_ref()
+                .is_some_and(|id| !is_identifier(id))
+            {
+                return Err(format!("commands[{position}] ruleId invalid"));
+            }
+            if command.classification == ClassificationWire::Parameter && command.facts.is_none() {
+                return Err(format!(
+                    "commands[{position}] parameter evidence requires diagnostics"
+                ));
             }
             if let Some(facts) = &command.facts {
                 self.validate_facts(position, command, facts)?;
@@ -415,11 +496,13 @@ impl VerdictEnvelope {
     ) -> Result<EvidenceClass, String> {
         let expected = match command.classification {
             ClassificationWire::Static => EvidenceClass::Complete,
+            ClassificationWire::Parameter => EvidenceClass::Parameter,
             ClassificationWire::Opaque => EvidenceClass::Opaque,
             ClassificationWire::Invalid => EvidenceClass::Invalid,
         };
         let class = match evidence {
             "complete" => EvidenceClass::Complete,
+            "parameter" => EvidenceClass::Parameter,
             "opaque" => EvidenceClass::Opaque,
             "invalid" => EvidenceClass::Invalid,
             other => {
@@ -443,7 +526,7 @@ impl VerdictEnvelope {
         command: &CommandVerdict,
         truncated: &TruncatedDiagnostics,
     ) -> Result<(), String> {
-        let class = self.check_evidence_classification(position, command, truncated.evidence)?;
+        let class = self.check_evidence_classification(position, command, &truncated.evidence)?;
         if truncated.diagnostics != TRUNCATED_MARKER {
             return Err(format!(
                 "commands[{position}] truncated facts carry a foreign diagnostics marker"
@@ -468,8 +551,30 @@ impl VerdictEnvelope {
         }
         // evidence/reason coherence (02 §2.8)
         match class {
+            EvidenceClass::Parameter => {
+                if !truncated.reasons.iter().any(|r| r == "parameter-expansion")
+                    || truncated
+                        .reasons
+                        .iter()
+                        .any(|r| is_invalid_cause(r) || r == "opaque-expansion")
+                {
+                    return Err(format!(
+                        "commands[{position}] incoherent parameter evidence"
+                    ));
+                }
+            }
             EvidenceClass::Complete => {
-                if !truncated.reasons.iter().any(|r| r == "complete") {
+                if !truncated.reasons.iter().any(|r| r == "complete")
+                    || truncated.reasons.iter().any(|r| {
+                        is_invalid_cause(r)
+                            || matches!(
+                                r.as_str(),
+                                "parameter-expansion"
+                                    | "opaque-expansion"
+                                    | "allow-evidence-not-complete"
+                            )
+                    })
+                {
                     return Err(format!(
                         "commands[{position}] complete evidence truncated reasons miss the complete anchor"
                     ));
@@ -495,6 +600,13 @@ impl VerdictEnvelope {
                 }
             }
         }
+        if command.verdict == VerdictKind::Allow
+            && truncated.reasons.iter().any(|r| r == "predicate-unknown")
+        {
+            return Err(format!(
+                "commands[{position}] unknown predicate cannot allow"
+            ));
+        }
         // serialized bound (16 KiB, depth ≤ 8) is checked in validate_facts
         Ok(())
     }
@@ -505,7 +617,7 @@ impl VerdictEnvelope {
         command: &CommandVerdict,
         full: &FullDiagnostics,
     ) -> Result<(), String> {
-        let class = self.check_evidence_classification(position, command, full.evidence)?;
+        let class = self.check_evidence_classification(position, command, &full.evidence)?;
         if full.reasons.len() > STABLE_REASONS.len() {
             return Err(format!(
                 "commands[{position}] reasons exceed the vocabulary"
@@ -525,6 +637,18 @@ impl VerdictEnvelope {
         }
         // evidence/reason coherence (02 §2.8)
         match class {
+            EvidenceClass::Parameter => {
+                if !full.reasons.iter().any(|r| r == "parameter-expansion")
+                    || full
+                        .reasons
+                        .iter()
+                        .any(|r| is_invalid_cause(r) || r == "opaque-expansion")
+                {
+                    return Err(format!(
+                        "commands[{position}] incoherent parameter evidence"
+                    ));
+                }
+            }
             EvidenceClass::Complete => {
                 if !full.reasons.iter().any(|r| r == "complete") {
                     return Err(format!(
@@ -532,7 +656,8 @@ impl VerdictEnvelope {
                     ));
                 }
                 if full.reasons.iter().any(|r| {
-                    r == "opaque-expansion"
+                    r == "parameter-expansion"
+                        || r == "opaque-expansion"
                         || r == "allow-evidence-not-complete"
                         || is_invalid_cause(r)
                 }) {
@@ -560,6 +685,27 @@ impl VerdictEnvelope {
                     ));
                 }
             }
+        }
+        if full.uncertain.len() > 4096
+            || full.reasons.iter().any(|r| r == "predicate-unknown") != !full.uncertain.is_empty()
+            || (!full.uncertain.is_empty() && command.verdict == VerdictKind::Allow)
+        {
+            return Err(format!("commands[{position}] incoherent uncertainty floor"));
+        }
+        let mut last: Option<&str> = None;
+        for entry in &full.uncertain {
+            if !is_identifier(&entry.rule_id)
+                || last.is_some_and(|id| id >= entry.rule_id.as_str())
+                || entry.predicates.is_empty()
+                || entry.predicates.len() > 4096
+                || !is_sorted_unique(&entry.predicates)
+                || !entry.predicates.iter().all(|p| is_predicate_coordinate(p))
+            {
+                return Err(format!(
+                    "commands[{position}] malformed uncertain predicates"
+                ));
+            }
+            last = Some(&entry.rule_id);
         }
         if full.selected_profiles.len() > 1024
             || !full.selected_profiles.iter().all(|p| is_identifier(p))
@@ -663,9 +809,7 @@ impl VerdictEnvelope {
                 ));
             }
         }
-        if command.classification == ClassificationWire::Static
-            && command.r#match == MatchKind::Argv
-            && command.verdict == VerdictKind::Allow
+        if command.verdict == VerdictKind::Allow
             && !full
                 .votes
                 .iter()
@@ -755,7 +899,8 @@ mod tests {
 
     fn full_facts() -> FullDiagnostics {
         FullDiagnostics {
-            evidence: "complete",
+            uncertain: Vec::new(),
+            evidence: "complete".into(),
             reasons: vec!["complete".to_string()],
             selected_profiles: vec!["base".to_string()],
             matched: vec!["policy/a".to_string()],
@@ -787,7 +932,7 @@ mod tests {
     }
 
     #[test]
-    fn envelope_shape_matches_the_v2_contract() {
+    fn envelope_shape_matches_the_v3_contract() {
         let json = String::from_utf8(valid_sample().to_wire().unwrap()).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["protocol"], PROTOCOL);

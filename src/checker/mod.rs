@@ -8,5 +8,6 @@ pub mod options;
 pub mod parameter;
 pub mod parse;
 pub mod pipeline;
+pub mod predicate;
 pub mod split;
 pub mod verdict;

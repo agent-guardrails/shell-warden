@@ -13,7 +13,7 @@ use shell_warden::checker::verdict::{Verdict, VerdictKind};
 
 const SKETCH: &str = include_str!("fixtures/sketch.jsonc");
 
-const SED_XARGS: &str = r#"{  "version": 2,
+const SED_XARGS: &str = r#"{  "version": 3,
   "defaults": { "action": "ask", "message": "No approved command profile matched.", "redirectPolicy": "no-redirects" },
   "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
   "profiles": [
@@ -105,7 +105,7 @@ fn run(config_text: &str, raw: &str) -> Verdict {
 }
 
 #[test]
-fn recognized_parameter_syntax_does_not_enable_allow_without_the_new_contract() {
+fn recognized_parameter_syntax_does_not_enable_allow_without_rule_local_grants() {
     for raw in [
         "git status \"$HOME\"",
         "git status \"${HOME}/cache\"",
@@ -118,7 +118,13 @@ fn recognized_parameter_syntax_does_not_enable_allow_without_the_new_contract() 
         assert_eq!(verdict.verdict, VerdictKind::Ask, "{raw}");
         assert_eq!(
             run_facts(&verdict)["evidence"],
-            serde_json::json!("opaque"),
+            serde_json::json!(
+                if raw.contains("/tmp/reports/") || raw.contains("/var/tmp/") {
+                    "opaque"
+                } else {
+                    "parameter"
+                }
+            ),
             "{raw}"
         );
         assert!(run_facts(&verdict)["votes"].as_array().unwrap().is_empty());
@@ -135,7 +141,7 @@ fn redirect_expansions_remain_observed_at_every_occurrence() {
     assert!(!part.redirects[0].target_resolvable);
     assert_eq!(part.redirects[1].ordinal, 2);
     assert!(part.redirects[1].target_resolvable);
-    assert!(matches!(part.state, EvidenceState::Opaque(_)));
+    assert_eq!(part.state, EvidenceState::Parameter);
     assert_eq!(
         run(SKETCH, "git status > \"$HOME/first\" > /tmp/reports/second").verdict,
         VerdictKind::Ask
@@ -160,11 +166,34 @@ fn redirect_substitution_children_keep_their_deny_votes() {
         );
         let graph = extract(&raw);
         assert_eq!(graph.parts.len(), 2, "{raw}");
+        assert_eq!(graph.parts[1].parent, Some(graph.parts[0].id), "{raw}");
+        assert_eq!(
+            graph.parts[1].relation,
+            Relation::CommandSubstitution,
+            "{raw}"
+        );
+        assert_eq!(graph.parts[1].relation_ordinal, 1, "{raw}");
         assert!(graph.parts.iter().any(|part| {
             part.argv.first().is_some_and(|token| token.text == "git")
                 && part.argv.get(1).is_some_and(|token| token.text == "push")
         }));
     }
+}
+
+#[test]
+fn shell_operand_extras_do_not_manufacture_child_options() {
+    let raw = "bash -c 'git push origin main' --dry-run";
+    assert_eq!(run(SKETCH, raw).verdict, VerdictKind::Ask);
+    let graph = extract(raw);
+    assert!(
+        graph
+            .parts
+            .iter()
+            .filter(|p| p.parent.is_some())
+            .all(|p| { !p.argv.iter().any(|a| a.text == "--dry-run") })
+    );
+    let raw = "bash -c 'git push --force origin main' \"$HOME\"";
+    assert_eq!(run(SKETCH, raw).verdict, VerdictKind::Deny);
 }
 
 #[test]
@@ -192,7 +221,7 @@ fn force_push_denied() {
 fn ask_dominates_allow() {
     // design row: `git log --oneline` plus an explicit matching ask ⇒ ask
     const WITH_ASK: &str = r#"{
-  "version": 2,
+  "version": 3,
   "defaults": { "action": "ask", "message": "No approved command profile matched.", "redirectPolicy": "no-redirects" },
   "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
   "profiles": [
@@ -213,7 +242,7 @@ fn ask_dominates_allow() {
   ]
 }"#;
     const WITHOUT_ASK: &str = r#"{
-  "version": 2,
+  "version": 3,
   "defaults": { "action": "ask", "message": "No approved command profile matched.", "redirectPolicy": "no-redirects" },
   "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
   "profiles": [
@@ -295,11 +324,11 @@ fn unknown_option_blocks_allow() {
 }
 
 #[test]
-fn opaque_double_quoted_expansion_asks() {
+fn ungranted_double_quoted_parameter_asks() {
     let v = run(SKETCH, "git log \"$BRANCH\"");
     assert_eq!(v.verdict, VerdictKind::Ask);
     let facts = run_facts(&v);
-    assert_eq!(facts["evidence"], "opaque");
+    assert_eq!(facts["evidence"], "parameter");
 }
 
 #[test]
@@ -368,7 +397,7 @@ fn environment_assignment_prevents_allow() {
 /// denies, non-matching values fall through to the default.
 #[test]
 fn environment_any_value_selector_denies_matching_assignment() {
-    const CFG: &str = r#"{  "version": 2,
+    const CFG: &str = r#"{  "version": 3,
   "defaults": { "action": "ask", "redirectPolicy": "no-redirects" },
   "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
   "profiles": [
@@ -411,7 +440,7 @@ fn environment_any_value_selector_denies_matching_assignment() {
 /// coverage).
 #[test]
 fn allow_environment_coverage_by_selector_and_occurrence() {
-    const CFG: &str = r#"{  "version": 2,
+    const CFG: &str = r#"{  "version": 3,
   "defaults": { "action": "ask", "redirectPolicy": "no-redirects" },
   "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
   "profiles": [
@@ -468,7 +497,7 @@ fn allow_environment_coverage_by_selector_and_occurrence() {
 /// schema-mandated dimensions.
 #[test]
 fn allow_environment_missing_occurrence_fails_config_load() {
-    const CFG: &str = r#"{  "version": 2,
+    const CFG: &str = r#"{  "version": 3,
   "defaults": { "action": "ask", "redirectPolicy": "no-redirects" },
   "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
   "profiles": [
@@ -544,7 +573,7 @@ fn sed_program_form_fact_emitted() {
 fn sed_fact_path_config(paths: &str, coordinate_version: &str) -> String {
     format!(
         r#"{{
-  "version": 2,
+  "version": 3,
   "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
   "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
   "profiles": [{{
@@ -644,7 +673,7 @@ fn xargs_stdin_arg_command_asks() {
 // compatibility table; `-i` keeps emitting in-place facts; unknown options,
 // uncovered safety-relevant facts, and wrong typed selectors fail closed.
 
-const SED_FULL: &str = r#"{  "version": 2,
+const SED_FULL: &str = r#"{  "version": 3,
   "defaults": { "action": "ask", "message": "No approved command profile matched.", "redirectPolicy": "no-redirects" },
   "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
   "profiles": [
@@ -757,7 +786,7 @@ fn sed_unknown_option_fails_closed() {
 fn sed_read_only_without_option_coverage_asks() {
     // same -n command, but the profile has no noPrint declaration/allow:
     // the unknown option makes evidence fail closed.
-    const SED_NO_N: &str = r#"{  "version": 2,
+    const SED_NO_N: &str = r#"{  "version": 3,
   "defaults": { "action": "ask", "redirectPolicy": "no-redirects" },
   "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
   "profiles": [
@@ -797,7 +826,7 @@ fn sed_read_only_without_option_coverage_asks() {
 fn sed_missing_safety_fact_coverage_does_not_allow() {
     // an allow that covers only programForm leaves the safety-relevant
     // executionPrimitive fact uncovered ⇒ the allow emits no vote.
-    const SED_UNCOVERED: &str = r#"{  "version": 2,
+    const SED_UNCOVERED: &str = r#"{  "version": 3,
   "defaults": { "action": "ask", "redirectPolicy": "no-redirects" },
   "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
   "profiles": [
@@ -848,7 +877,7 @@ fn sed_missing_safety_fact_coverage_does_not_allow() {
 fn sed_wrong_typed_fact_selector_does_not_allow() {
     // a typed selector that compiles but does not select the emitted value
     // (regex "inPlace" vs observed "readOnly") never qualifies the allow.
-    const SED_WRONG: &str = r#"{  "version": 2,
+    const SED_WRONG: &str = r#"{  "version": 3,
   "defaults": { "action": "ask", "redirectPolicy": "no-redirects" },
   "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
   "profiles": [
@@ -890,7 +919,7 @@ fn sed_wrong_typed_fact_selector_does_not_allow() {
 fn sed_allow_without_typed_value_still_requires_full_coverage() {
     // omitting the value selector selects every observed occurrence of the
     // fact — coverage must include the safety-relevant fact itself.
-    const SED_ALL_VALUES: &str = r#"{  "version": 2,
+    const SED_ALL_VALUES: &str = r#"{  "version": 3,
   "defaults": { "action": "ask", "redirectPolicy": "no-redirects" },
   "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
   "profiles": [
@@ -1078,7 +1107,7 @@ fn command_substitution_depth_33_is_invalid_raw_ask() {
 #[test]
 fn invalid_classification_rule_denies_command_substitution_depth_33() {
     const INVALID_DEPTH_DENY: &str = r#"{
-  "version": 2,
+  "version": 3,
   "defaults": { "action": "ask", "redirectPolicy": "no-redirects" },
   "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
   "profiles": [
@@ -1266,7 +1295,7 @@ fn sudo_unwraps_to_child_profile() {
 // ── Monotonicity + order-independence properties ────────────────────────────
 
 const MONO_BASE: &str = r#"{
-  "version": 2,
+  "version": 3,
   "defaults": { "action": "ask", "message": "No approved command profile matched.", "redirectPolicy": "no-redirects" },
   "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
   "profiles": [
@@ -1316,7 +1345,7 @@ fn added_allow_cannot_lower_ask() {
 fn reorder_rules_options_policies_keeps_verdicts() {
     // permute the sketch by hand: reverse rule order, put node first
     let permuted = r#"{
-  "version": 2,
+  "version": 3,
   "defaults": { "action": "ask", "message": "No approved command profile matched.", "redirectPolicy": "safe-local-io" },
   "profiles": [
     {
@@ -1414,7 +1443,7 @@ fn allow_log_oneline_smoke() {
 fn probe_config(remainder_value: &str) -> String {
     format!(
         r#"{{
-  "version": 2,
+  "version": 3,
   "defaults": {{ "action": "ask", "message": "No approved command profile matched.", "redirectPolicy": "no-redirects" }},
   "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
   "profiles": [
@@ -1492,7 +1521,7 @@ fn run_checker(config_path: &std::path::Path, letter: &str) -> (i32, String, Str
 #[test]
 fn binary_rejects_trailing_config_input_with_exit_2() {
     const VALID_LETTER: &str = r#"{"version":1,"invocation":{"id":"p","sessionID":"p"},"action":"shell","commands":[{"index":0,"cwd":"/repo","raw":"git push"}]}"#;
-    const VALID_CONFIG: &str = r#"{ "version": 2, "defaults": { "action": "ask", "redirectPolicy": "no-redirects" }, "redirectPolicies": {}, "profiles": [] }"#;
+    const VALID_CONFIG: &str = r#"{ "version": 3, "defaults": { "action": "ask", "redirectPolicy": "no-redirects" }, "redirectPolicies": {}, "profiles": [] }"#;
     for (name, suffix) in [
         ("trailing second object", r#" {"x":1}"#),
         ("trailing scalar", " 42"),
@@ -1540,7 +1569,7 @@ fn binary_rejects_trailing_config_input_with_exit_2() {
 /// The authoritative invalid fixture: every required root field except
 /// `defaults` is present, so the only fault is the fail-open omission.
 const DOCS_FAIL_OPEN_OMITTED_DEFAULTS: &str = r#"{
-  "version": 2,
+  "version": 3,
   "redirectPolicies": {
     "no-redirects": {
       "redirects": { "none": true },
@@ -1553,7 +1582,7 @@ const DOCS_FAIL_OPEN_OMITTED_DEFAULTS: &str = r#"{
 /// The authoritative minimal valid fixture: every required root field and
 /// `defaults` member present, one echo allow rule.
 const DOCS_MINIMAL_CONFIG: &str = r#"{
-  "version": 2,
+  "version": 3,
   "defaults": {
     "action": "ask",
     "redirectPolicy": "no-redirects"
@@ -1749,7 +1778,7 @@ fn option_probe_config(
         .unwrap_or_default();
     format!(
         r#"{{
-  "version": 2,
+  "version": 3,
   "defaults": {{ "action": "ask", "message": "No approved command profile matched.", "redirectPolicy": "no-redirects" }},
   "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
   "profiles": [
@@ -1990,7 +2019,7 @@ fn fixed_arity_probes() {
 fn short_option_cluster_never_swallows_the_argument() {
     let config = r#"
 {
-  "version": 2,
+  "version": 3,
   "defaults": { "action": "ask", "redirectPolicy": "no-redirects" },
   "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
   "profiles": [
@@ -2044,7 +2073,7 @@ fn remainder_path_source_selects_from_the_index() {
         format!(
             r#"
 {{
-  "version": 2,
+  "version": 3,
   "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
   "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
   "profiles": [
@@ -2103,7 +2132,7 @@ fn ask_deny_path_predicates_apply_lexical_policy() {
         format!(
             r#"
 {{
-  "version": 2,
+  "version": 3,
   "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
   "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
   "profiles": [
@@ -2228,7 +2257,7 @@ fn trailing_slash_exact_root_matches_normalized() {
         format!(
             r#"
 {{
-  "version": 2,
+  "version": 3,
   "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
   "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
   "profiles": [
@@ -2278,7 +2307,7 @@ fn environment_coordinate_produces_selected_occurrences() {
         format!(
             r#"
 {{
-  "version": 2,
+  "version": 3,
   "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
   "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
   "profiles": [
@@ -2341,7 +2370,7 @@ fn environment_coordinate_produces_selected_occurrences() {
 fn options_values_predicate_uses_closed_token_selector() {
     let config = r#"
 {
-  "version": 2,
+  "version": 3,
   "defaults": { "action": "ask", "redirectPolicy": "no-redirects" },
   "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
   "profiles": [
@@ -2426,7 +2455,7 @@ fn binary_option_probes_exit_with_verdicts() {
 #[test]
 fn config_v2_minimal_fixture_control() {
     const MINIMAL: &str = r#"{
-  "version": 2,
+  "version": 3,
   "defaults": {
     "action": "ask",
     "redirectPolicy": "no-redirects"
@@ -2475,7 +2504,7 @@ fn config_v2_minimal_fixture_control() {
 fn nested_probe_config(probe_name: &str, probe_entry: &str) -> String {
     format!(
         r#"{{
-  "version": 2,
+  "version": 3,
   "defaults": {{ "action": "ask", "message": "No approved command profile matched.", "redirectPolicy": "no-redirects" }},
   "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
   "profiles": [
@@ -2638,18 +2667,18 @@ fn nested_serde_fixture_rejected_before_evaluation() {
 // ── Verdict v2 wire contract (02-letter-verdict §2.7/§2.8, ADR-0023) ────────
 
 #[test]
-fn v2_classification_and_match_follow_the_evidence_state() {
+fn v3_classification_and_match_follow_the_evidence_state() {
     // complete → static + argv (02 §2.7 mapping table)
     let v = run(SKETCH, "git status");
     let j = serde_json::to_value(&v).unwrap();
     assert_eq!(j["commands"][0]["classification"], "static");
     assert_eq!(j["commands"][0]["match"], "argv");
 
-    // opaque → opaque + raw
+    // supported parameter → parameter + expression (not static argv)
     let v = run(SKETCH, "git log \"$BRANCH\"");
     let j = serde_json::to_value(&v).unwrap();
-    assert_eq!(j["commands"][0]["classification"], "opaque");
-    assert_eq!(j["commands"][0]["match"], "raw");
+    assert_eq!(j["commands"][0]["classification"], "parameter");
+    assert_eq!(j["commands"][0]["match"], "expression");
 
     // invalid → invalid + raw; the ask floor keeps it ask, and the bare
     // default ask (no ordinary vote) MUST omit ruleId (08 §8.6.4)
@@ -2736,7 +2765,7 @@ fn diagnostics_are_canonical_sorted_and_anchored() {
         .map(|r| r.as_str().unwrap())
         .collect();
     assert!(
-        reasons.contains(&"opaque-expansion"),
+        reasons.contains(&"parameter-expansion"),
         "reasons: {reasons:?}"
     );
     assert!(
@@ -2776,7 +2805,7 @@ fn diagnostics_are_canonical_sorted_and_anchored() {
     }
 }
 
-const UTF8_RULES: &str = r#"{  "version": 2,
+const UTF8_RULES: &str = r#"{  "version": 3,
   "defaults": { "action": "ask", "redirectPolicy": "no-redirects" },
   "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
   "profiles": [

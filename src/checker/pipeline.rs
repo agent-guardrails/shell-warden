@@ -1,4 +1,5 @@
-// Decision pipeline v2 (design/shell-warden-config-v2.md §Lattice reduction
+// Decision pipeline v3 (spec/shell-warden/12-contextual-parameters.md plus
+// design/shell-warden-config-v2.md §Lattice reduction
 // and fallback hints + §Action-sensitive matching and emitted votes):
 //
 //   raw shell text
@@ -12,7 +13,7 @@
 //
 // Monotonic: every matching rule is evaluated and emits its vote; there is no
 // numeric priority, no first/last match, no refinement phase, and no
-// configuration-order meaning. Adding a matching allow never lowers a result.
+// configuration-order meaning. Allow never overrides a restrictive vote/floor.
 // No emitted vote yields ask. Messages never decide a verdict: at the
 // winning action the message comes from the lexicographically smallest rule
 // ID; fallback hints fire only on the bare default ask.
@@ -27,9 +28,10 @@ use super::grammar::{
 use super::letter::{Command, Letter};
 use super::matcher::{
     NestedResult, OptionOccurrenceView, PartFacts, PathCoordinateObs, PathSourceTag, allow_covers,
-    predicate_holds,
+    predicate_holds, predicate_result,
 };
 use super::options::{ParsedOptions, parse_options};
+use super::predicate::Predicate;
 use super::verdict::{
     CommandVerdict, Diagnostics, EvidenceClass, FullDiagnostics, RejectedAllow,
     TruncatedDiagnostics, Verdict, is_invalid_cause, select_truncated_reasons, sorted_unique,
@@ -100,6 +102,7 @@ struct CmdDiag {
     qualified: Vec<String>,
     rejected: Vec<(String, Vec<String>)>,
     votes: Vec<String>,
+    uncertain: Vec<super::verdict::UncertainPredicate>,
 }
 
 pub(super) fn command_verdict(config: &Config, cmd: &Command) -> (CommandVerdict, Option<String>) {
@@ -142,6 +145,17 @@ pub(super) fn command_verdict(config: &Config, cmd: &Command) -> (CommandVerdict
             let canonical = occurred_canonicals(&parsed);
             part.facts =
                 super::analyzers::analyze(analyzer, &head, &parsed.positionals, &canonical);
+            if analyzer == AnalyzerId::ExportV1 {
+                for assign in part.assigns.iter().filter(|a| !a.prefix) {
+                    part.facts.push(super::evidence::FactObs {
+                        analyzer_id: "export-v1",
+                        fact_name: "assignment".into(),
+                        value: assign.name.clone(),
+                        occurrence: part.facts.len() as u32 + 1,
+                        safety_relevant: true,
+                    });
+                }
+            }
         }
     }
 
@@ -192,8 +206,34 @@ pub(super) fn command_verdict(config: &Config, cmd: &Command) -> (CommandVerdict
             let prof = &config.profiles()[pi];
             let pos: Vec<ArgToken> = part.argv.clone();
             let parsed = parse_options(argv_for_options(&pos), &prof.options);
+            let dynamic_option_value = parsed
+                .occurrences
+                .iter()
+                .any(|o| o.values.iter().any(|v| !v.resolvable));
+            let dynamic_declaration_destination = prof.analyzer == Some(AnalyzerId::ExportV1)
+                && parsed.positionals.iter().any(|a| !a.resolvable);
+            let sed_program = prof.analyzer == Some(AnalyzerId::SedV1)
+                && !parsed
+                    .occurrences
+                    .iter()
+                    .any(|o| matches!(o.canonical.as_str(), "expression" | "file"))
+                && parsed.positionals.first().is_some_and(|a| !a.resolvable);
+            let unmodeled_sed_operand = graph.parts[i]
+                .argv
+                .first()
+                .is_some_and(|head| head.text.rsplit('/').next() == Some("sed"))
+                && prof.analyzer != Some(AnalyzerId::SedV1)
+                && parsed.positionals.iter().any(|a| !a.resolvable);
             let state = if parsed.invalid_reasons.is_empty() {
-                part.state
+                if dynamic_option_value
+                    || dynamic_declaration_destination
+                    || sed_program
+                    || unmodeled_sed_operand
+                {
+                    EvidenceState::Opaque(reason::OPAQUE_EXPANSION)
+                } else {
+                    part.state
+                }
             } else {
                 EvidenceState::Invalid(parsed.invalid_reasons[0])
             };
@@ -275,10 +315,17 @@ pub(super) fn command_verdict(config: &Config, cmd: &Command) -> (CommandVerdict
         .iter()
         .enumerate()
         .any(|(i, p)| participating(i) && matches!(p.state, EvidenceState::Opaque(_)));
+    let has_parameter = graph
+        .parts
+        .iter()
+        .enumerate()
+        .any(|(i, p)| participating(i) && matches!(p.state, EvidenceState::Parameter));
     let evidence = if has_invalid {
         EvidenceClass::Invalid
     } else if has_opaque {
         EvidenceClass::Opaque
+    } else if has_parameter {
+        EvidenceClass::Parameter
     } else {
         EvidenceClass::Complete
     };
@@ -310,6 +357,7 @@ pub(super) fn command_verdict(config: &Config, cmd: &Command) -> (CommandVerdict
         }
         let code = match part.state {
             EvidenceState::Complete => "complete",
+            EvidenceState::Parameter => "parameter-expansion",
             EvidenceState::Opaque(_) => "opaque-expansion",
             EvidenceState::Invalid(code) => code,
         };
@@ -349,6 +397,7 @@ fn evaluate_part_rules(
     let positionals: Vec<ArgToken> = parsed.positionals.clone();
     let path_coords = path_coordinates(prof, parsed, part, state);
     let ctx = PartFacts {
+        parameter_boundary: parsed.dashdash.is_some() && !parsed.unbounded_parameter,
         part,
         profile_id: Some(prof.id.as_str()),
         positionals: &positionals,
@@ -361,21 +410,47 @@ fn evaluate_part_rules(
 
     // every matching rule is evaluated and emits its vote (monotonicity)
     let mut votes: Vec<(&Rule, VerdictKind)> = Vec::new();
+    let mut uncertain = false;
     for rule in &prof.rules {
         match rule.action {
-            VerdictKind::Ask | VerdictKind::Deny => {
-                if predicate_holds(&rule.r#match, &ctx) {
+            VerdictKind::Ask | VerdictKind::Deny => match predicate_result(&rule.r#match, &ctx) {
+                Predicate::Match => {
                     push_unique(&mut diag.matched, rule.id.clone());
                     diag.votes
                         .push(format!("{}:{}", vote_word(rule.action), rule.id));
                     votes.push((rule, rule.action));
                 }
-            }
+                Predicate::NoMatch => {}
+                Predicate::Unknown(coordinates) => {
+                    uncertain = true;
+                    push_unique(&mut diag.reasons, "predicate-unknown".into());
+                    diag.uncertain.push(super::verdict::UncertainPredicate {
+                        rule_id: rule.id.clone(),
+                        predicates: coordinates
+                            .into_iter()
+                            .map(|p| format!("/parts/{}/match{p}", part.id))
+                            .collect(),
+                    });
+                }
+            },
             VerdictKind::Allow => {
+                if rule
+                    .r#match
+                    .classification
+                    .is_some_and(|c| c != super::matcher::state_class(state))
+                {
+                    continue;
+                }
                 push_unique(&mut diag.matched, rule.id.clone());
                 let effective =
                     effective_redirect(config, Some(prof), rule.redirect_policy.as_ref());
-                match allow_covers(&rule.r#match, &ctx, &effective, cwd) {
+                match allow_covers(
+                    &rule.r#match,
+                    &ctx,
+                    &effective,
+                    cwd,
+                    rule.expansions.as_ref(),
+                ) {
                     Ok(()) => {
                         push_unique(&mut diag.qualified, rule.id.clone());
                         diag.votes
@@ -399,6 +474,11 @@ fn evaluate_part_rules(
         .map(|(_, a)| *a)
         .max_by_key(|a| a.rank())
         .unwrap_or(VerdictKind::Ask);
+    let winning = if uncertain && winning == VerdictKind::Allow {
+        VerdictKind::Ask
+    } else {
+        winning
+    };
     if let Some(rule) = votes
         .iter()
         .filter(|(_, a)| *a == winning)
@@ -410,6 +490,9 @@ fn evaluate_part_rules(
             rule_id: Some(rule.id.clone()),
             message: rule.message.clone(),
         };
+    }
+    if uncertain {
+        return PartOutcome::default_ask();
     }
 
     // no vote: default ask with fallback hints (lexico-smallest matching id)
@@ -620,7 +703,7 @@ fn select_profile_index(config: &Config, part: &Part) -> Option<usize> {
 }
 
 fn dead_part(part: &Part) -> bool {
-    part.argv.is_empty() && part.redirects.is_empty()
+    part.argv.is_empty() && part.redirects.is_empty() && part.assigns.is_empty()
 }
 
 /// xargs-v1: the operand child of an `xargs` part becomes an
@@ -825,7 +908,23 @@ fn build_facts(config: &Config, diag: &CmdDiag, evidence: EvidenceClass) -> Diag
     }
     let reasons = sorted_unique(&reasons);
     let full = FullDiagnostics {
-        evidence: evidence.as_str(),
+        uncertain: {
+            let mut grouped = std::collections::BTreeMap::<String, Vec<String>>::new();
+            for entry in &diag.uncertain {
+                grouped
+                    .entry(entry.rule_id.clone())
+                    .or_default()
+                    .extend(entry.predicates.clone());
+            }
+            grouped
+                .into_iter()
+                .map(|(rule_id, predicates)| super::verdict::UncertainPredicate {
+                    rule_id,
+                    predicates: sorted_unique(&predicates),
+                })
+                .collect()
+        },
+        evidence: evidence.as_str().to_string(),
         reasons: reasons.clone(),
         selected_profiles: diag.selected_profiles.clone(),
         matched: sorted_unique(&diag.matched),
@@ -842,10 +941,10 @@ fn build_facts(config: &Config, diag: &CmdDiag, evidence: EvidenceClass) -> Diag
         return Diagnostics::Full(full);
     }
     Diagnostics::Truncated(TruncatedDiagnostics {
-        evidence: evidence.as_str(),
+        evidence: evidence.as_str().to_string(),
         reasons: select_truncated_reasons(evidence, &reasons)
             .unwrap_or_else(|_| reasons.into_iter().take(8).collect()),
-        diagnostics: super::verdict::TRUNCATED_MARKER,
+        diagnostics: super::verdict::TRUNCATED_MARKER.to_string(),
     })
 }
 

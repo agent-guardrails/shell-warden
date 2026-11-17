@@ -1,0 +1,15 @@
+{
+  "protocol": "shell-warden.verdict.v3",
+  "result": {
+    "invocationId": "fixture:invalid-allow",
+    "verdict": "allow",
+    "commands": [
+      {
+        "index": 0,
+        "verdict": "allow",
+        "classification": "invalid",
+        "match": "raw"
+      }
+    ]
+  }
+}

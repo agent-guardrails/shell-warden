@@ -46,7 +46,7 @@ impl Drop for Files {
 
 fn policy(profiles: Vec<Value>) -> Value {
     json!({
-        "version": 2,
+        "version": 3,
         "defaults": {"action": "ask", "redirectPolicy": "no-redirects"},
         "redirectPolicies": {
             "no-redirects": {"redirects": {"none": true}, "paths": {"none": true}}

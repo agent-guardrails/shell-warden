@@ -157,6 +157,7 @@ fn scan_chars(_raw: &str, chars: &[char]) -> Option<ScanResult> {
     let mut cur_text = String::new();
     let mut cur_start: Option<usize> = None;
     let mut cur_source_start: Option<usize> = None;
+    let mut cur_quoted = false;
     let mut cur_resolvable = true;
     let mut cur_quoting = Quoting::None;
     let mut cur_sub: Vec<(String, Span)> = Vec::new();
@@ -165,7 +166,7 @@ fn scan_chars(_raw: &str, chars: &[char]) -> Option<ScanResult> {
 
     macro_rules! finish_token {
         ($kind:expr) => {
-            if !cur_text.is_empty() || cur_source_start.is_some_and(|start| start < i) {
+            if !cur_text.is_empty() || cur_quoted {
                 // Spans are diagnostic bookkeeping only: end = decode length
                 // from the token start (never security-relevant).
                 let end = cur_start.unwrap_or(0) + cur_text.len().max(1);
@@ -185,6 +186,7 @@ fn scan_chars(_raw: &str, chars: &[char]) -> Option<ScanResult> {
                 cur_start = None;
             }
             cur_source_start = None;
+            cur_quoted = false;
         };
     }
 
@@ -228,6 +230,7 @@ fn scan_chars(_raw: &str, chars: &[char]) -> Option<ScanResult> {
                 break;
             }
             '\'' => {
+                cur_quoted = true;
                 cur_quoting = Quoting::Single;
                 cur_start.get_or_insert(i);
                 match (i + 1..n).find(|&j| chars[j] == '\'') {
@@ -247,6 +250,7 @@ fn scan_chars(_raw: &str, chars: &[char]) -> Option<ScanResult> {
                 }
             }
             '"' => {
+                cur_quoted = true;
                 cur_quoting = Quoting::Double;
                 cur_start.get_or_insert(i);
                 let mut j = i + 1;
@@ -256,7 +260,12 @@ fn scan_chars(_raw: &str, chars: &[char]) -> Option<ScanResult> {
                 while j < n {
                     let ch = chars[j];
                     if escaped {
-                        tail.push(unescape(ch));
+                        if ch != '\n' {
+                            if !matches!(ch, '$' | '`' | '"' | '\\') {
+                                tail.push('\\');
+                            }
+                            tail.push(ch);
+                        }
                         escaped = false;
                         j += 1;
                         continue;
@@ -303,7 +312,9 @@ fn scan_chars(_raw: &str, chars: &[char]) -> Option<ScanResult> {
             '\\' if i + 1 < n => {
                 cur_start.get_or_insert(i);
                 cur_quoting = Quoting::Escaped;
-                cur_text.push(unescape(chars[i + 1]));
+                if chars[i + 1] != '\n' {
+                    cur_text.push(chars[i + 1]);
+                }
                 i += 2;
             }
             '\\' => {
@@ -342,7 +353,11 @@ fn scan_chars(_raw: &str, chars: &[char]) -> Option<ScanResult> {
                 cur_resolvable = false;
                 let close = find_balanced(chars, i + 1, '(', ')');
                 cur_sub.push((
-                    chars[i + 2..close].iter().collect::<String>(),
+                    chars
+                        .get(i + 2..close)
+                        .unwrap_or_default()
+                        .iter()
+                        .collect::<String>(),
                     (i, close + 1),
                 ));
                 cur_text.push('\u{fffd}');
@@ -354,7 +369,11 @@ fn scan_chars(_raw: &str, chars: &[char]) -> Option<ScanResult> {
                 cur_resolvable = false;
                 let close = find_balanced(chars, i + 1, '(', ')');
                 cur_sub.push((
-                    chars[i + 2..close].iter().collect::<String>(),
+                    chars
+                        .get(i + 2..close)
+                        .unwrap_or_default()
+                        .iter()
+                        .collect::<String>(),
                     (i, close + 1),
                 ));
                 cur_text.push('\u{fffd}');
@@ -432,6 +451,9 @@ fn scan_chars(_raw: &str, chars: &[char]) -> Option<ScanResult> {
                 if !cur_text.is_empty()
                     && chars[cur_source_start.unwrap_or(i)..i]
                         .iter()
+                        .collect::<String>()
+                        .replace("\\\n", "")
+                        .chars()
                         .all(|ch| ch.is_ascii_digit())
                 {
                     source_fd = cur_text.parse::<u32>().ok();
@@ -556,15 +578,6 @@ fn dummy_target(n: usize) -> Tok {
     }
 }
 
-fn unescape(c: char) -> char {
-    match c {
-        'n' => '\n',
-        't' => '\t',
-        'r' => '\r',
-        other => other,
-    }
-}
-
 /// Capture an active expansion at `start`, recording only executable inner
 /// texts and returning the next index after the construct.
 fn capture_expand(
@@ -597,7 +610,11 @@ fn capture_expand(
         }
         let close = find_balanced(chars, start + 1, '(', ')');
         subtexts.push((
-            chars[start + 2..close].iter().collect::<String>(),
+            chars
+                .get(start + 2..close)
+                .unwrap_or_default()
+                .iter()
+                .collect::<String>(),
             (start, close + 1),
         ));
         return (
@@ -638,7 +655,11 @@ fn capture_executable_subtexts(chars: &[char], range: Span, subtexts: &mut Vec<(
             '<' | '>' if chars.get(index + 1) == Some(&'(') => {
                 let close = find_balanced(chars, index + 1, '(', ')');
                 subtexts.push((
-                    chars[index + 2..close].iter().collect::<String>(),
+                    chars
+                        .get(index + 2..close)
+                        .unwrap_or_default()
+                        .iter()
+                        .collect::<String>(),
                     (index, close + 1),
                 ));
                 index = (close + 1).min(end);
@@ -800,6 +821,40 @@ mod tests {
             assert!(token.parameter().is_some(), "{source}");
             // Recognition is not permission and does not invent literal argv.
             assert!(!token.resolvable, "{source}");
+        }
+    }
+
+    #[test]
+    fn literal_escapes_use_shell_not_c_string_semantics() {
+        for (source, expected) in [
+            (r#""\n\t\r\q""#, r"\n\t\r\q"),
+            (r"\n\t\r", "ntr"),
+            (r#""\$HOME""#, "$HOME"),
+            ("\"a\\\nb\"", "ab"),
+            ("a\\\nb", "ab"),
+        ] {
+            let token = word(source);
+            assert_eq!(token.text, expected, "{source}");
+            assert!(token.resolvable, "{source}");
+            assert_eq!(token.parameter(), None, "{source}");
+        }
+        assert!(scan("\\\n").segments.is_empty());
+        let result = scan("echo 2\\\n>out");
+        assert_eq!(result.segments[0].items.len(), 1);
+        assert_eq!(result.segments[0].redirects[0].source_fd, Some(2));
+    }
+
+    #[test]
+    fn incomplete_substitutions_never_panic_or_qualify_as_parameters() {
+        for raw in ["$(", "<(", ">(", "\"$HOME/$(", "\"$HOME/<("] {
+            let result = scan(raw);
+            for segment in result.segments {
+                for item in segment.items {
+                    let Item::Tok(token) = item;
+                    assert_eq!(token.parameter(), None, "{raw}");
+                    assert!(!token.resolvable, "{raw}");
+                }
+            }
         }
     }
 

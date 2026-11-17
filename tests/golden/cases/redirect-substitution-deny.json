@@ -12,7 +12,7 @@
     ]
   },
   "expect": {
-    "protocol": "shell-warden.verdict.v2",
+    "protocol": "shell-warden.verdict.v3",
     "result": {
       "verdict": "deny",
       "commands": [

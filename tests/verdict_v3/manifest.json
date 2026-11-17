@@ -1,0 +1,468 @@
+{
+  "fixtures": [
+    {
+      "path": "invalid/arbitrary-diagnostic-property.json",
+      "valid": false,
+      "expectedInvocationId": "fixture:arbitrary-diagnostic",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "invalid/ask-rule-id-without-ask-vote.json",
+      "valid": false,
+      "expectedInvocationId": "fixture:ask-rule-id-without-ask-vote",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "invalid/attribution-no-reason.json",
+      "valid": false,
+      "expectedInvocationId": "fixture:parameter",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "invalid/contradictory-allow-deny-vote.json",
+      "valid": false,
+      "expectedInvocationId": "fixture:contradictory-allow-deny-vote",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "invalid/duplicate-command-index.json",
+      "valid": false,
+      "expectedInvocationId": "fixture:duplicate-command-index",
+      "positionalIndexes": [
+        0,
+        1
+      ]
+    },
+    {
+      "path": "invalid/facts-evidence-inconsistent.json",
+      "valid": false,
+      "expectedInvocationId": "fixture:bad-evidence",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "invalid/foreign-invocation-id.json",
+      "valid": false,
+      "expectedInvocationId": "fixture:expected-invocation",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "invalid/inconsistent-aggregate.json",
+      "valid": false,
+      "expectedInvocationId": "fixture:bad-aggregate",
+      "positionalIndexes": [
+        0,
+        1
+      ]
+    },
+    {
+      "path": "invalid/invalid-allow.json",
+      "valid": false,
+      "expectedInvocationId": "fixture:invalid-allow",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "invalid/invalid-evidence-complete-only.json",
+      "valid": false,
+      "expectedInvocationId": "fixture:invalid-evidence-complete-only",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "invalid/malformed-classification-type.json",
+      "valid": false,
+      "expectedInvocationId": "fixture:malformed-classification",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "invalid/missing-aggregate-deny-message.json",
+      "valid": false,
+      "expectedInvocationId": "fixture:missing-aggregate-deny-message",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "invalid/missing-classification.json",
+      "valid": false,
+      "expectedInvocationId": "fixture:missing-classification",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "invalid/missing-command-index.json",
+      "valid": false,
+      "expectedInvocationId": "fixture:missing-command-index",
+      "positionalIndexes": [
+        0,
+        1,
+        2
+      ]
+    },
+    {
+      "path": "invalid/missing-deny-rule-id.json",
+      "valid": false,
+      "expectedInvocationId": "fixture:missing-deny-rule-id",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "invalid/missing-match.json",
+      "valid": false,
+      "expectedInvocationId": "fixture:missing-match",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "invalid/missing-uncertain-field.json",
+      "valid": false,
+      "expectedInvocationId": "fixture:parameter",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "invalid/non-contiguous-command-index.json",
+      "valid": false,
+      "expectedInvocationId": "fixture:non-contiguous-command-index",
+      "positionalIndexes": [
+        0,
+        1,
+        2
+      ]
+    },
+    {
+      "path": "invalid/non-string-protocol.json",
+      "valid": false,
+      "expectedInvocationId": "fixture:non-string-protocol",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "invalid/null-facts.json",
+      "valid": false,
+      "expectedInvocationId": "fixture:parameter",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "invalid/opaque-argv.json",
+      "valid": false,
+      "expectedInvocationId": "fixture:opaque-argv",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "invalid/opaque-raw-allow.json",
+      "valid": false,
+      "expectedInvocationId": "fixture:opaque-allow",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "invalid/out-of-range-command-index.json",
+      "valid": false,
+      "expectedInvocationId": "fixture:out-of-range-command-index",
+      "positionalIndexes": [
+        0,
+        1
+      ]
+    },
+    {
+      "path": "invalid/parameter-argv.json",
+      "valid": false,
+      "expectedInvocationId": "fixture:parameter",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "invalid/parameter-no-allow-vote.json",
+      "valid": false,
+      "expectedInvocationId": "fixture:parameter",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "invalid/parameter-no-facts.json",
+      "valid": false,
+      "expectedInvocationId": "fixture:parameter",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "invalid/parameter-runtime-literal.json",
+      "valid": false,
+      "expectedInvocationId": "fixture:parameter",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "invalid/retired-v2.json",
+      "valid": false,
+      "expectedInvocationId": "fixture:parameter",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "invalid/rule-id-not-winning-vote.json",
+      "valid": false,
+      "expectedInvocationId": "fixture:rule-id-not-winning-vote",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "invalid/static-allow-without-allow-vote.json",
+      "valid": false,
+      "expectedInvocationId": "fixture:static-allow-without-allow-vote",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "invalid/static-raw.json",
+      "valid": false,
+      "expectedInvocationId": "fixture:static-raw",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "invalid/static-structural-reason.json",
+      "valid": false,
+      "expectedInvocationId": "fixture:static-structural-reason",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "invalid/truncated-static-unknown-option.json",
+      "valid": false,
+      "expectedInvocationId": "fixture:truncated-static-unknown-option",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "invalid/unknown-allow.json",
+      "valid": false,
+      "expectedInvocationId": "fixture:parameter",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "invalid/unknown-classification.json",
+      "valid": false,
+      "expectedInvocationId": "fixture:unknown-classification",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "invalid/unknown-false-winning-rule.json",
+      "valid": false,
+      "expectedInvocationId": "fixture:parameter",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "invalid/unknown-invalid-coordinate.json",
+      "valid": false,
+      "expectedInvocationId": "fixture:parameter",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "invalid/unknown-match.json",
+      "valid": false,
+      "expectedInvocationId": "fixture:unknown-match",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "invalid/unknown-no-attribution.json",
+      "valid": false,
+      "expectedInvocationId": "fixture:parameter",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "invalid/unknown-protocol.json",
+      "valid": false,
+      "expectedInvocationId": "fixture:unknown-protocol",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "invalid/v1-flat-response-rejected.json",
+      "valid": false,
+      "expectedInvocationId": "fixture:v1-flat-response-rejected",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "valid/ask-emitted-vote.json",
+      "valid": true,
+      "expectedInvocationId": "fixture:ask-emitted-vote",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "valid/ask-only-allow-votes.json",
+      "valid": true,
+      "expectedInvocationId": "fixture:ask-only-allow-votes",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "valid/invalid-ask-plus-static-allow.json",
+      "valid": true,
+      "expectedInvocationId": "fixture:mixed-ask",
+      "positionalIndexes": [
+        0,
+        1
+      ]
+    },
+    {
+      "path": "valid/invalid-raw-ask-emitted-ask-vote.json",
+      "valid": true,
+      "expectedInvocationId": "fixture:invalid-raw-ask-emitted-ask-vote",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "valid/invalid-raw-ask.json",
+      "valid": true,
+      "expectedInvocationId": "fixture:invalid-ask",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "valid/invalid-raw-deny.json",
+      "valid": true,
+      "expectedInvocationId": "fixture:invalid-deny",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "valid/opaque-complete-reason.json",
+      "valid": true,
+      "expectedInvocationId": "fixture:opaque-complete-reason",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "valid/opaque-raw-ask.json",
+      "valid": true,
+      "expectedInvocationId": "fixture:opaque-ask",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "valid/parameter-allow.json",
+      "valid": true,
+      "expectedInvocationId": "fixture:parameter",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "valid/predicate-unknown-ask.json",
+      "valid": true,
+      "expectedInvocationId": "fixture:parameter",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "valid/predicate-unknown-truncated.json",
+      "valid": true,
+      "expectedInvocationId": "fixture:parameter",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "valid/static-argv-allow.json",
+      "valid": true,
+      "expectedInvocationId": "fixture:static-allow",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "valid/truncated-complete-anchor.json",
+      "valid": true,
+      "expectedInvocationId": "fixture:truncated-complete-anchor",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "valid/truncated-invalid-anchor.json",
+      "valid": true,
+      "expectedInvocationId": "fixture:truncated-invalid-anchor",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "valid/truncated-opaque-anchor.json",
+      "valid": true,
+      "expectedInvocationId": "fixture:truncated-opaque-anchor",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "valid/utf8-rule-id-order.json",
+      "valid": true,
+      "expectedInvocationId": "fixture:utf8-rule-id-order",
+      "positionalIndexes": [
+        0
+      ]
+    }
+  ]
+}
