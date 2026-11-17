@@ -92,6 +92,11 @@ fn extract_raw(
                 _ => None,
             })
             .flatten()
+            .chain(
+                seg.redirects
+                    .iter()
+                    .flat_map(|redirect| redirect.target.subtexts.clone()),
+            )
         {
             extract_raw(
                 inner.trim(),
@@ -150,9 +155,6 @@ fn segment_observations(
         if !tok.resolvable {
             unresolvable = true;
         }
-        if tok.text.is_empty() {
-            continue;
-        }
         if argv.is_empty() && assigns.is_empty() && is_assignment(&tok.text) {
             let name = tok.text[..tok.text.find('=').unwrap_or(0)].to_string();
             assigns.push(EnvAssign {
@@ -171,7 +173,7 @@ fn segment_observations(
         });
     }
 
-    let redirects = seg
+    let redirects: Vec<RedirectObs> = seg
         .redirects
         .iter()
         .enumerate()
@@ -192,6 +194,7 @@ fn segment_observations(
             ordinal: index as u32 + 1,
         })
         .collect();
+    unresolvable |= redirects.iter().any(|redirect| !redirect.target_resolvable);
 
     (assigns, argv, redirects, unresolvable)
 }

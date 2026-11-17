@@ -1,0 +1,23 @@
+{
+  "letter": {
+    "version": 1,
+    "invocation": { "id": "m:c", "sessionID": "s1", "projectDir": "/repo" },
+    "action": "shell",
+    "commands": [
+      {
+        "index": 0,
+        "raw": "git status > \"/tmp/reports/$(git push --force origin main)\"",
+        "cwd": "/repo"
+      }
+    ]
+  },
+  "expect": {
+    "protocol": "shell-warden.verdict.v2",
+    "result": {
+      "verdict": "deny",
+      "commands": [
+        { "index": 0, "verdict": "deny", "ruleId": "git/deny-force-push", "classification": "opaque", "match": "raw" }
+      ]
+    }
+  }
+}

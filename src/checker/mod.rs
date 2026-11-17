@@ -5,6 +5,7 @@ pub mod grammar;
 pub mod letter;
 pub mod matcher;
 pub mod options;
+pub mod parameter;
 pub mod parse;
 pub mod pipeline;
 pub mod split;

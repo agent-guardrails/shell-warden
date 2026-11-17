@@ -104,6 +104,81 @@ fn run(config_text: &str, raw: &str) -> Verdict {
     evaluate(&cfg, &letter(raw))
 }
 
+#[test]
+fn recognized_parameter_syntax_does_not_enable_allow_without_the_new_contract() {
+    for raw in [
+        "git status \"$HOME\"",
+        "git status \"${HOME}/cache\"",
+        "HOME=/tmp git status \"$HOME\"",
+        "git status > \"$HOME/out\"",
+        "git status > \"/tmp/reports/$HOME/out\"",
+        "git status >> \"/var/tmp/git-reports/${HOME}\"",
+    ] {
+        let verdict = run(SKETCH, raw);
+        assert_eq!(verdict.verdict, VerdictKind::Ask, "{raw}");
+        assert_eq!(
+            run_facts(&verdict)["evidence"],
+            serde_json::json!("opaque"),
+            "{raw}"
+        );
+        assert!(run_facts(&verdict)["votes"].as_array().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn redirect_expansions_remain_observed_at_every_occurrence() {
+    let graph = extract("git status > \"$HOME/first\" > /tmp/reports/second");
+    assert_eq!(graph.parts.len(), 1);
+    let part = &graph.parts[0];
+    assert_eq!(part.redirects.len(), 2);
+    assert_eq!(part.redirects[0].ordinal, 1);
+    assert!(!part.redirects[0].target_resolvable);
+    assert_eq!(part.redirects[1].ordinal, 2);
+    assert!(part.redirects[1].target_resolvable);
+    assert!(matches!(part.state, EvidenceState::Opaque(_)));
+    assert_eq!(
+        run(SKETCH, "git status > \"$HOME/first\" > /tmp/reports/second").verdict,
+        VerdictKind::Ask
+    );
+}
+
+#[test]
+fn redirect_substitution_children_keep_their_deny_votes() {
+    for target in [
+        "\"$HOME/$(git push --force origin main)\"",
+        "\"${HOME:-$(git push --force origin main)}\"",
+        "\"/tmp/reports/`git push --force origin main`\"",
+        "\"$HOME/$((1 + $(git push --force origin main)))\"",
+    ] {
+        let raw = format!("git status > {target}");
+        let verdict = run(SKETCH, &raw);
+        assert_eq!(verdict.verdict, VerdictKind::Deny, "{raw}");
+        assert_eq!(
+            verdict.commands[0].rule_id.as_deref(),
+            Some("git/deny-force-push"),
+            "{raw}"
+        );
+        let graph = extract(&raw);
+        assert_eq!(graph.parts.len(), 2, "{raw}");
+        assert!(graph.parts.iter().any(|part| {
+            part.argv.first().is_some_and(|token| token.text == "git")
+                && part.argv.get(1).is_some_and(|token| token.text == "push")
+        }));
+    }
+}
+
+#[test]
+fn empty_literal_arguments_are_not_dropped_from_coverage() {
+    assert_eq!(run(SKETCH, "git status").verdict, VerdictKind::Allow);
+    for raw in ["git status \"\"", "git status ''"] {
+        let graph = extract(raw);
+        assert_eq!(graph.parts[0].argv.len(), 3, "{raw}");
+        assert_eq!(graph.parts[0].argv[2].text, "");
+        assert!(graph.parts[0].argv[2].resolvable);
+        assert_eq!(run(SKETCH, raw).verdict, VerdictKind::Ask, "{raw}");
+    }
+}
+
 // ── Design scenario table ───────────────────────────────────────────────────
 
 #[test]
