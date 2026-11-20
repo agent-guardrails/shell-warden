@@ -221,7 +221,7 @@ fn segment_observations(
                 RawRedirOp::Supported(
                     super::grammar::RedirectOp::DupOut | super::grammar::RedirectOp::DupIn
                 )
-            ) && redirect.target.resolvable,
+            ) && redirect.target.is_fd_operand(),
             span: redirect.span,
             ordinal: index as u32 + 1,
         })

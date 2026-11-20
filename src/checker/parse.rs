@@ -54,6 +54,15 @@ pub struct Tok {
 }
 
 impl Tok {
+    /// Supported FD operands are literal unsigned decimal descriptors. Bash
+    /// `>&` can interpret signed numbers as filenames instead. Preserve the
+    /// existing numeric range; closing/moving descriptors remain unsupported.
+    pub fn is_fd_operand(&self) -> bool {
+        self.resolvable
+            && self.text.bytes().all(|byte| byte.is_ascii_digit())
+            && self.text.parse::<i32>().is_ok()
+    }
+
     /// A supported argument/redirect candidate. This is syntactic evidence,
     /// not an allow permission; the effective value is still unknown.
     pub fn parameter(&self) -> Option<ParameterWord> {
@@ -498,7 +507,7 @@ fn scan_chars(_raw: &str, chars: &[char]) -> Option<ScanResult> {
                                 other => other,
                             };
                             let (tok, next) = read_target(chars, i);
-                            let digits = tok.as_ref().map(|t| t.text.parse::<i32>().is_ok());
+                            let digits = tok.as_ref().map(Tok::is_fd_operand);
                             match (dup, digits) {
                                 (RedirectOp::DupOut | RedirectOp::DupIn, Some(true)) => {
                                     let t = tok.unwrap();
