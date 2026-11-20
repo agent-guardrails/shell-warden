@@ -141,21 +141,26 @@ pub(super) fn command_verdict(config: &Config, cmd: &Command) -> (CommandVerdict
             // the executable head is evidence of profile selection, not a
             // positional argument: rules match arguments after it
             let pos: Vec<ArgToken> = part.argv.clone();
-            let parsed = parse_options(argv_for_options(&pos), &prof.options);
+            let mut parsed = parse_options(argv_for_options(&pos), &prof.options);
+            if analyzer == AnalyzerId::ExportV1 {
+                // Extracted declaration assignments precede the remaining
+                // operands. Merge their known destinations before the analyzer
+                // numbers facts; diagnostic spans must not decide source order.
+                let destinations =
+                    part.assigns
+                        .iter()
+                        .filter(|a| !a.prefix)
+                        .map(|assign| ArgToken {
+                            text: assign.name.clone(),
+                            parameter: None,
+                            resolvable: true,
+                            span: assign.span,
+                        });
+                parsed.positionals.splice(..0, destinations);
+            }
             let canonical = occurred_canonicals(&parsed);
             part.facts =
                 super::analyzers::analyze(analyzer, &head, &parsed.positionals, &canonical);
-            if analyzer == AnalyzerId::ExportV1 {
-                for assign in part.assigns.iter().filter(|a| !a.prefix) {
-                    part.facts.push(super::evidence::FactObs {
-                        analyzer_id: "export-v1",
-                        fact_name: "assignment".into(),
-                        value: assign.name.clone(),
-                        occurrence: part.facts.len() as u32 + 1,
-                        safety_relevant: true,
-                    });
-                }
-            }
         }
     }
 

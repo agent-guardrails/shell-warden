@@ -647,8 +647,15 @@ fn capture_expand(
         }
         return (Some(chars[start..end].iter().collect::<String>()), end);
     }
-    // bare $: opaque noise
-    (Some("$".to_string()), (start + 2).min(n))
+    // Positional/special parameters consume their next character. A literal
+    // dollar must not swallow a closing quote or command delimiter.
+    let next = if first.is_ascii_digit() || matches!(first, '?' | '$' | '#' | '@' | '*' | '-' | '!')
+    {
+        start + 2
+    } else {
+        start + 1
+    };
+    (Some("$".to_string()), next.min(n))
 }
 
 fn capture_executable_subtexts(chars: &[char], range: Span, subtexts: &mut Vec<(String, Span)>) {
@@ -812,6 +819,20 @@ mod tests {
         assert_eq!(result.segments[0].items.len(), 1, "{raw}");
         match &result.segments[0].items[0] {
             Item::Tok(token) => token.clone(),
+        }
+    }
+
+    #[test]
+    fn literal_dollar_does_not_consume_a_quote_or_delimiter() {
+        for source in ["$\"", "$;", "$ ", "$\n", "$>"] {
+            let chars: Vec<_> = source.chars().collect();
+            let (_, next) = capture_expand(&chars, 0, &mut Vec::new());
+            assert_eq!(next, 1, "{source}");
+        }
+        for source in ["$?", "$$", "$1", "$@", "$#", "$*", "$-", "$!"] {
+            let chars: Vec<_> = source.chars().collect();
+            let (_, next) = capture_expand(&chars, 0, &mut Vec::new());
+            assert_eq!(next, 2, "{source}");
         }
     }
 
