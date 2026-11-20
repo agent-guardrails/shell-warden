@@ -251,12 +251,15 @@ fn observations_state(
         || assigns.iter().any(|a| a.parameter.is_some())
         || redirects.iter().any(|r| r.parameter.is_some());
     // Unknown wrapper/interpreter operands are not ordinary positional values.
+    // Basenames only broaden this blocking check, not transparent unwrapping.
     let wrapper = parameter
-        && argv.first().is_some_and(|a| match a.text.as_str() {
-            "bash" | "sh" => argv.iter().skip(1).any(|a| !a.resolvable),
-            "sudo" | "nohup" | "nice" | "timeout" | "env" | "xargs" => true,
-            _ => false,
-        });
+        && argv
+            .first()
+            .is_some_and(|a| match a.text.rsplit('/').next().unwrap_or(&a.text) {
+                "bash" | "sh" => argv.iter().skip(1).any(|a| !a.resolvable),
+                "sudo" | "nohup" | "nice" | "timeout" | "env" | "xargs" => true,
+                _ => false,
+            });
     let dynamic_code_or_destination = argv.first().is_some_and(|head| {
         let name = head.text.rsplit('/').next().unwrap_or(&head.text);
         matches!(
@@ -276,6 +279,7 @@ fn observations_state(
                 | "python2"
                 | "python3"
                 | "perl"
+                | "awk"
                 | "ruby"
                 | "php"
                 | "lua"

@@ -399,6 +399,140 @@ fn literal_scripts_use_the_same_values_and_retain_outer_coverage() {
 }
 
 #[test]
+fn path_spelled_wrappers_cannot_authorize_dynamic_operands() {
+    for name in ["env", "sudo", "nohup", "nice", "timeout", "xargs"] {
+        for head in [format!("/usr/bin/{name}"), format!("./{name}")] {
+            let mut config = policy();
+            config["profiles"][0]["id"] = json!("wrapper");
+            config["profiles"][0]["executables"] = json!([head]);
+            for operand in ["\"$HOME\"", "\"${HOME}/command\""] {
+                let raw = format!("{head} -- {operand}");
+                let output = result(&config, &raw);
+                let command = &output["result"]["commands"][0];
+                assert_eq!(command["verdict"], "ask", "{raw}");
+                assert_eq!(command["classification"], "opaque", "{raw}");
+                assert_eq!(command["match"], "raw", "{raw}");
+                assert_eq!(
+                    command["facts"]["selectedProfiles"],
+                    json!(["wrapper"]),
+                    "{raw}"
+                );
+            }
+        }
+    }
+    // A basename is a blocking check, not a transparent wrapper alias.
+    assert_eq!(verdict(&policy(), "/usr/bin/env ls -- \"$HOME\""), "ask");
+}
+
+#[test]
+fn awk_operand_boundary_does_not_prove_a_data_role() {
+    for head in ["awk", "/usr/bin/awk", "./awk"] {
+        let mut config = policy();
+        config["profiles"][0]["id"] = json!("awk");
+        config["profiles"][0]["executables"] = json!([head]);
+        // The policy really covers ordinary literal arguments for this spelling.
+        assert_eq!(
+            verdict(&config, &format!("{head} -- '{{ print $0 }}' /public")),
+            "allow",
+            "{head}"
+        );
+        for args in ["-- \"$HOME\"", "-- \"${HOME}/program\" /public"] {
+            let raw = format!("{head} {args}");
+            let output = result(&config, &raw);
+            let command = &output["result"]["commands"][0];
+            assert_eq!(command["verdict"], "ask", "{raw}");
+            assert_eq!(command["classification"], "opaque", "{raw}");
+            assert_eq!(command["match"], "raw", "{raw}");
+            assert_eq!(command["facts"]["selectedProfiles"], json!(["awk"]));
+        }
+        // Without a program-role analyzer, a literal program is not a proof
+        // that an unknown later operand is ordinary data either.
+        assert_eq!(
+            verdict(&config, &format!("{head} -- '{{ print $0 }}' \"$HOME\"")),
+            "ask",
+            "{head}"
+        );
+    }
+}
+
+#[test]
+fn dynamic_execution_operands_fail_closed_through_cli() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    struct ConfigFile(std::path::PathBuf);
+    impl Drop for ConfigFile {
+        fn drop(&mut self) {
+            std::fs::remove_file(self.0.join("config.json")).unwrap();
+            std::fs::remove_dir(&self.0).unwrap();
+        }
+    }
+
+    let dir = std::env::temp_dir().join(format!("sw-contextual-roles-{}", std::process::id()));
+    std::fs::create_dir(&dir).unwrap();
+    let file = ConfigFile(dir);
+    let mut config = policy();
+    config["profiles"] = ["/usr/bin/env", "awk", "/usr/bin/awk"]
+        .iter()
+        .enumerate()
+        .map(|(index, head)| {
+            let mut profile = config["profiles"][0].clone();
+            profile["id"] = json!(format!("command-{index}"));
+            profile["executables"] = json!([head]);
+            profile
+        })
+        .collect();
+    std::fs::write(file.0.join("config.json"), config.to_string()).unwrap();
+    let commands = [
+        "/usr/bin/env -- \"$HOME\"",
+        "awk -- \"$HOME\"",
+        "/usr/bin/awk -- \"$HOME\"",
+        "awk -- '{ print $0 }' /public",
+    ];
+    let input = json!({
+        "version":1,"invocation":{"id":"parameter:cli","sessionID":"test"},
+        "action":"shell",
+        "commands":commands.iter().enumerate().map(|(index, raw)| {
+            json!({"index":index,"raw":raw,"cwd":"/repo"})
+        }).collect::<Vec<_>>()
+    });
+    // Only the checker is spawned: submitted shell text is never executed.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_shell-warden"))
+        .arg("--config")
+        .arg(file.0.join("config.json"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.to_string().as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    let envelope: VerdictEnvelope = serde_json::from_slice(&output.stdout).unwrap();
+    envelope
+        .validate_against("parameter:cli", commands.len())
+        .unwrap();
+    let output: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(output["result"]["verdict"], "ask");
+    for (index, raw) in commands.iter().enumerate() {
+        let command = &output["result"]["commands"][index];
+        let (verdict, classification) = if index < 3 {
+            ("ask", "opaque")
+        } else {
+            ("allow", "static")
+        };
+        assert_eq!(command["verdict"], verdict, "{raw}");
+        assert_eq!(command["classification"], classification, "{raw}");
+    }
+}
+
+#[test]
 fn ordinary_argument_grants_do_not_authorize_dynamic_code_operands() {
     for head in [
         "eval",
