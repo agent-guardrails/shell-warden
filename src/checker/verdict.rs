@@ -553,10 +553,13 @@ impl VerdictEnvelope {
         match class {
             EvidenceClass::Parameter => {
                 if !truncated.reasons.iter().any(|r| r == "parameter-expansion")
-                    || truncated
-                        .reasons
-                        .iter()
-                        .any(|r| is_invalid_cause(r) || r == "opaque-expansion")
+                    || truncated.reasons.iter().any(|r| {
+                        is_invalid_cause(r)
+                            || matches!(
+                                r.as_str(),
+                                "opaque-expansion" | "allow-evidence-not-complete"
+                            )
+                    })
                 {
                     return Err(format!(
                         "commands[{position}] incoherent parameter evidence"
@@ -639,10 +642,13 @@ impl VerdictEnvelope {
         match class {
             EvidenceClass::Parameter => {
                 if !full.reasons.iter().any(|r| r == "parameter-expansion")
-                    || full
-                        .reasons
-                        .iter()
-                        .any(|r| is_invalid_cause(r) || r == "opaque-expansion")
+                    || full.reasons.iter().any(|r| {
+                        is_invalid_cause(r)
+                            || matches!(
+                                r.as_str(),
+                                "opaque-expansion" | "allow-evidence-not-complete"
+                            )
+                    })
                 {
                     return Err(format!(
                         "commands[{position}] incoherent parameter evidence"
@@ -755,6 +761,11 @@ impl VerdictEnvelope {
             if !is_sorted_unique(&entry.reasons) {
                 return Err(format!(
                     "commands[{position}] rejected[{entry_position}] reasons not sorted/unique"
+                ));
+            }
+            if entry.reasons.iter().any(|r| !full.reasons.contains(r)) {
+                return Err(format!(
+                    "commands[{position}] rejected[{entry_position}] reasons missing from facts.reasons"
                 ));
             }
             if !matched.contains(entry.rule_id.as_str()) {

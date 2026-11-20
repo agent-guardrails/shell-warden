@@ -192,6 +192,22 @@
       ]
     },
     {
+      "path": "invalid/parameter-allow-evidence-not-complete-truncated.json",
+      "valid": false,
+      "expectedInvocationId": "fixture:parameter",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "invalid/parameter-allow-evidence-not-complete.json",
+      "valid": false,
+      "expectedInvocationId": "fixture:parameter",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
       "path": "invalid/parameter-argv.json",
       "valid": false,
       "expectedInvocationId": "fixture:parameter",
@@ -209,6 +225,22 @@
     },
     {
       "path": "invalid/parameter-no-facts.json",
+      "valid": false,
+      "expectedInvocationId": "fixture:parameter",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "invalid/parameter-rejected-coverage-not-aggregated.json",
+      "valid": false,
+      "expectedInvocationId": "fixture:parameter",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "invalid/parameter-rejected-evidence-not-complete.json",
       "valid": false,
       "expectedInvocationId": "fixture:parameter",
       "positionalIndexes": [
@@ -396,6 +428,14 @@
       "path": "valid/opaque-raw-ask.json",
       "valid": true,
       "expectedInvocationId": "fixture:opaque-ask",
+      "positionalIndexes": [
+        0
+      ]
+    },
+    {
+      "path": "valid/parameter-allow-other-rejected.json",
+      "valid": true,
+      "expectedInvocationId": "fixture:parameter",
       "positionalIndexes": [
         0
       ]

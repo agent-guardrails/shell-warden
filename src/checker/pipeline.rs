@@ -458,6 +458,9 @@ fn evaluate_part_rules(
                         votes.push((rule, rule.action));
                     }
                     Err(codes) => {
+                        for code in &codes {
+                            push_unique(&mut diag.reasons, code.stable_code().to_string());
+                        }
                         diag.rejected.push((
                             rule.id.clone(),
                             codes.iter().map(|c| c.stable_code().to_string()).collect(),

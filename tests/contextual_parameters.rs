@@ -205,7 +205,16 @@ fn unknown_allow_proofs_do_not_veto_an_independent_allow() {
         .as_array_mut()
         .unwrap()
         .push(failed);
-    assert_eq!(verdict(&config, "ls -- \"$HOME\""), "allow");
+    let output = result(&config, "ls -- \"$HOME\"");
+    assert_eq!(output["result"]["verdict"], "allow");
+    let facts = &output["result"]["commands"][0]["facts"];
+    let reasons = facts["reasons"].as_array().unwrap();
+    assert!(reasons.contains(&json!("allow-coverage-missing")));
+    for rejected in facts["rejected"].as_array().unwrap() {
+        for reason in rejected["reasons"].as_array().unwrap() {
+            assert!(reasons.contains(reason), "{rejected}");
+        }
+    }
 }
 
 #[test]
