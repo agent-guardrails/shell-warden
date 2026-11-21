@@ -231,9 +231,10 @@ fn scan_chars(_raw: &str, chars: &[char]) -> Option<ScanResult> {
                 pending_sep = Some(Operator::Semi);
                 i += 1;
             }
-            '#' if cur_text.is_empty() => {
+            '#' if cur_text.is_empty() && !cur_quoted => {
                 // comment: the rest of the input is decoration
                 finish_token!(TokKind::Word);
+                trailing_empty = false;
                 new_segment!(i);
                 i = n;
                 break;

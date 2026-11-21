@@ -229,7 +229,9 @@ pub(super) fn command_verdict(config: &Config, cmd: &Command) -> (CommandVerdict
                 .is_some_and(|head| head.text.rsplit('/').next() == Some("sed"))
                 && prof.analyzer != Some(AnalyzerId::SedV1)
                 && parsed.positionals.iter().any(|a| !a.resolvable);
-            let state = if parsed.invalid_reasons.is_empty() {
+            let state = if matches!(part.state, EvidenceState::Invalid(_)) {
+                part.state
+            } else if parsed.invalid_reasons.is_empty() {
                 if dynamic_option_value
                     || dynamic_declaration_destination
                     || sed_program
