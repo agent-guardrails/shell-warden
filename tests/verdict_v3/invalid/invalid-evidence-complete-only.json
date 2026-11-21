@@ -1,0 +1,22 @@
+{
+  "protocol": "shell-warden.verdict.v3",
+  "result": {
+    "invocationId": "fixture:invalid-evidence-complete-only",
+    "verdict": "ask",
+    "commands": [
+      {
+        "index": 0,
+        "verdict": "ask",
+        "classification": "invalid",
+        "match": "raw",
+        "facts": {
+          "evidence": "invalid",
+          "reasons": [
+            "complete"
+          ],
+          "diagnostics": "truncated-after-decision"
+        }
+      }
+    ]
+  }
+}

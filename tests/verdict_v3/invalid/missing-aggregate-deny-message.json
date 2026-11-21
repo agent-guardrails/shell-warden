@@ -1,0 +1,16 @@
+{
+  "protocol": "shell-warden.verdict.v3",
+  "result": {
+    "invocationId": "fixture:missing-aggregate-deny-message",
+    "verdict": "deny",
+    "commands": [
+      {
+        "index": 0,
+        "verdict": "deny",
+        "ruleId": "policy/deny",
+        "classification": "static",
+        "match": "argv"
+      }
+    ]
+  }
+}

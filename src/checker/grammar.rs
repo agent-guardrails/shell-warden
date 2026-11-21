@@ -1,18 +1,17 @@
-// Rules/config grammar v2 (design/shell-warden-config-v2.md): per-executable
+// Rules/config grammar v3 (spec/shell-warden/12-contextual-parameters.md):
 // command profiles, typed-evidence match objects, reusable redirect policies.
-// Serde types mirror schemas/shell-warden.config.v2.schema.json exactly;
+// Serde types mirror schemas/shell-warden.config.v3.schema.json;
 // `deny_unknown_fields` everywhere = strict validation at parse time.
 //
-// The config-v2 wire grammar declarations live in one contiguous, marked
-// region below; `agent-guardrails/docs` (PR 22) snapshots exactly that region
-// and fails closed on grammar drift. Keep it contiguous and free of helpers.
+// Historical v2 snapshot markers remain below for source navigation only.
+// Active conformance uses the shared v3 configuration vectors and CLI battery.
 //
 // `option` is the umbrella term: arity 0 = flag; arity 1..=4 consumes values.
-// No v1 compatibility: a v2 checker reads v2 only (design §Migration).
+// No retired-version compatibility: the checker reads v3 only.
 
 use serde::{Deserialize, Serialize};
 
-pub const CONFIG_VERSION: u32 = 2;
+pub const CONFIG_VERSION: u32 = 3;
 /// Highest declared option arity (design: "arity zero through four").
 pub const MAX_OPTION_ARITY: u8 = 4;
 
@@ -246,6 +245,7 @@ pub struct TargetKind {
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub enum TargetKindKind {
+    ParameterPath,
     LiteralPath,
     Fd,
 }
@@ -257,6 +257,8 @@ pub enum TargetKindKind {
 pub struct PathEntry {
     pub coordinate: PathCoordinateSelector,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub any: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exact: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub within: Option<String>,
@@ -267,6 +269,7 @@ pub struct PathEntry {
 impl PathEntry {
     pub fn policy(&self) -> PathPolicy {
         PathPolicy {
+            any: self.any,
             exact: self.exact.clone(),
             within: self.within.clone(),
             outside: self.outside.clone(),
@@ -279,6 +282,8 @@ impl PathEntry {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct PathPolicy {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub any: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exact: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -661,7 +666,7 @@ pub struct FactTest {
 /// Deserializes a present optional value and rejects JSON `null`: the
 /// public schema has no nullable selectors — an explicit `null` is not
 /// "absent", it is a wire typo that must fail config parsing, never pass.
-fn present_not_null<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+pub(super) fn present_not_null<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
     T: serde::Deserialize<'de>,
@@ -1761,6 +1766,12 @@ pub enum OverrideMode {
 pub struct Rule {
     pub id: String,
     pub action: VerdictKind,
+    #[serde(
+        default,
+        deserialize_with = "present_not_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub expansions: Option<ExpansionPermissions>,
     #[serde(default)]
     pub message: Option<String>,
     /// Action-sensitive: ordinary predicate set for ask/deny; coverage proof
@@ -1769,6 +1780,18 @@ pub struct Rule {
     /// Allow-only redirect-policy override.
     #[serde(default)]
     pub redirect_policy: Option<RedirectPolicyOverride>,
+}
+
+/// Independent, rule-local read permissions. No configured runtime values.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ExpansionPermissions {
+    #[serde(default)]
+    pub arguments: Vec<String>,
+    #[serde(default)]
+    pub redirect_targets: Vec<String>,
+    #[serde(default)]
+    pub assignment_values: Vec<String>,
 }
 
 /// Non-voting hint: profile-local message for the bare default ask; only
@@ -1829,6 +1852,8 @@ pub struct RedirectMatcher {
 pub enum EvidenceClass {
     #[serde(rename = "complete")]
     Complete,
+    #[serde(rename = "parameter")]
+    Parameter,
     #[serde(rename = "opaque")]
     Opaque,
     #[serde(rename = "invalid")]

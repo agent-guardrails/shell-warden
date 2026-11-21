@@ -1,0 +1,13 @@
+{
+  "cases": [
+    { "raw": "ls -- \"$HOME\"", "expect": "allow" },
+    { "raw": "ls -- \"${HOME}/../other\"", "expect": "allow" },
+    { "raw": "ls \"$HOME\"", "expect": "ask" },
+    { "raw": "ls -- \"$USER\"", "expect": "ask" },
+    { "raw": "ls -- \"$HOME/$USER\"", "expect": "ask" },
+    { "raw": "ls > \"$HOME\"", "expect": "ask" },
+    { "raw": "cat -- \"$HOME\"", "expect": "ask" },
+    { "raw": "cat -- /secret", "expect": "deny" },
+    { "raw": "cat -- /public", "expect": "allow" }
+  ]
+}

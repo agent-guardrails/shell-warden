@@ -23,6 +23,7 @@ pub struct OptionOccurrence {
 
 #[derive(Debug, Clone, Default)]
 pub struct ParsedOptions {
+    pub unbounded_parameter: bool,
     /// Positional arguments: option tokens and every consumed value token are
     /// excluded; everything after the `--` boundary is positional.
     pub positionals: Vec<ArgToken>,
@@ -56,7 +57,10 @@ pub fn parse_options(argv: &[ArgToken], options: &BTreeMap<String, OptionSpec>) 
             i += 1;
             continue;
         }
-        if tok.text == "--" {
+        if tok.parameter.is_some() {
+            out.unbounded_parameter = true;
+        }
+        if tok.resolvable && tok.text == "--" {
             terminated = true;
             out.dashdash = Some(i);
             i += 1;
@@ -92,6 +96,7 @@ pub fn parse_options(argv: &[ArgToken], options: &BTreeMap<String, OptionSpec>) 
                     lookup[idx].0.clone(),
                     counts.entry(idx),
                     vec![ArgToken {
+                        parameter: None,
                         text: value,
                         resolvable: is_plain_literal(&tok.text[eq + 1..]),
                         span: tok.span,
@@ -226,6 +231,7 @@ mod tests {
 
     fn tok(text: &str) -> ArgToken {
         ArgToken {
+            parameter: None,
             text: text.to_string(),
             resolvable: is_plain_literal(text),
             span: (0, 0),

@@ -1,0 +1,44 @@
+{
+  "protocol": "shell-warden.verdict.v3",
+  "result": {
+    "invocationId": "fixture:parameter",
+    "verdict": "ask",
+    "commands": [
+      {
+        "index": 0,
+        "verdict": "ask",
+        "ruleId": "restriction",
+        "classification": "parameter",
+        "match": "expression",
+        "facts": {
+          "evidence": "parameter",
+          "reasons": [
+            "parameter-expansion",
+            "predicate-unknown"
+          ],
+          "selectedProfiles": [
+            "ls"
+          ],
+          "matched": [
+            "allow"
+          ],
+          "qualified": [
+            "allow"
+          ],
+          "rejected": [],
+          "votes": [
+            "allow:allow"
+          ],
+          "uncertain": [
+            {
+              "ruleId": "restriction",
+              "predicates": [
+                "/parts/0/match/paths/any/0"
+              ]
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

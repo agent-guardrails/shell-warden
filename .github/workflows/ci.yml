@@ -79,11 +79,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Checkout config v2 contract fixtures
+      - name: Checkout v3 contract fixtures
         uses: actions/checkout@v4
         with:
           repository: agent-guardrails/docs
-          ref: 9d8641b1711b733190def5d71dce3ea0e4589bba
+          ref: 63d17f20f9ff3108d3dc081bedb76ee3e302bcd0
           path: contract-docs
           persist-credentials: false
       - name: Install Rust toolchain (stable)
@@ -92,11 +92,26 @@ jobs:
           rustup default stable
       - name: Build checker
         run: cargo build --release
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "26"
+      - name: Verify canonical fixture mirrors
+        run: >-
+          node contract-docs/scripts/generate-shell-warden-v3.mjs --check
+          --mirror=${{ github.workspace }}/tests/verdict_v3
+          --config-mirror=${{ github.workspace }}/tests/config_v3
       - name: Run example-policy verdict battery
         env:
           SHELL_WARDEN_BIN: ${{ github.workspace }}/target/release/shell-warden
         run: node examples/configs/verdict-battery.cjs --config examples/configs/shell-warden.example.jsonc --battery examples/configs/example-battery.json
-      - name: Run config v2 release conformance battery
+      - name: Run config v3 release conformance battery
         env:
           SHELL_WARDEN_BIN: ${{ github.workspace }}/target/release/shell-warden
-        run: node tests/config-v2/run.cjs --fixtures contract-docs/schemas/fixtures/shell-warden.config.v2
+        run: node tests/config_v3/run.cjs --fixtures contract-docs/schemas/fixtures/shell-warden.config.v3
+      - name: Run contextual-parameter policy battery
+        env:
+          SHELL_WARDEN_BIN: ${{ github.workspace }}/target/release/shell-warden
+        run: >-
+          node examples/configs/verdict-battery.cjs
+          --config examples/configs/contextual-variables.jsonc
+          --battery examples/configs/contextual-variables-battery.json

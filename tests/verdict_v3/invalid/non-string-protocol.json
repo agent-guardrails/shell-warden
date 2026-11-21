@@ -1,0 +1,15 @@
+{
+  "protocol": 2,
+  "result": {
+    "invocationId": "fixture:non-string-protocol",
+    "verdict": "ask",
+    "commands": [
+      {
+        "index": 0,
+        "verdict": "ask",
+        "classification": "opaque",
+        "match": "raw"
+      }
+    ]
+  }
+}

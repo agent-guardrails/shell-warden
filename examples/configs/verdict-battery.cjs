@@ -31,8 +31,10 @@ function checkerBin() {
 
 function runCase(cfg, { raw }) {
   const letter = { version: 1, invocation: { id: "battery", sessionID: "battery" }, action: "shell", commands: [{ index: 0, cwd: process.cwd(), raw }] }
-  // verdict v2 only (ADR-0023): the checker emits exactly {protocol, result}
-  return JSON.parse(execFileSync(checkerBin(), ["--config", cfg], { encoding: "utf8", input: JSON.stringify(letter), timeout: 15_000 })).result
+  // One active response contract; a battery must not silently test an old binary.
+  const envelope = JSON.parse(execFileSync(checkerBin(), ["--config", cfg], { encoding: "utf8", input: JSON.stringify(letter), timeout: 15_000 }))
+  if (envelope.protocol !== "shell-warden.verdict.v3") throw new Error("expected verdict v3")
+  return envelope.result
 }
 
 const { config, battery } = parseArgs(process.argv)

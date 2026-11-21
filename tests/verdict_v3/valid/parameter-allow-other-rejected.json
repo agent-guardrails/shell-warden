@@ -1,0 +1,45 @@
+{
+  "protocol": "shell-warden.verdict.v3",
+  "result": {
+    "invocationId": "fixture:parameter",
+    "verdict": "allow",
+    "commands": [
+      {
+        "index": 0,
+        "verdict": "allow",
+        "ruleId": "allow",
+        "classification": "parameter",
+        "match": "expression",
+        "facts": {
+          "evidence": "parameter",
+          "reasons": [
+            "allow-coverage-missing",
+            "parameter-expansion"
+          ],
+          "selectedProfiles": [
+            "ls"
+          ],
+          "matched": [
+            "allow",
+            "other"
+          ],
+          "qualified": [
+            "allow"
+          ],
+          "rejected": [
+            {
+              "ruleId": "other",
+              "reasons": [
+                "allow-coverage-missing"
+              ]
+            }
+          ],
+          "votes": [
+            "allow:allow"
+          ],
+          "uncertain": []
+        }
+      }
+    ]
+  }
+}

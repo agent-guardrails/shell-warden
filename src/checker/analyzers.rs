@@ -112,14 +112,14 @@ pub fn fact_value_type(analyzer_id: &str, name: &str) -> Option<FactValueType> {
 /// positional operand words come from profile option parsing.
 pub fn analyze(
     analyzer: AnalyzerId,
-    head: &str,
+    _head: &str,
     positionals: &[ArgToken],
     canonical_occurred: &[String],
 ) -> Vec<FactObs> {
     match analyzer {
         AnalyzerId::GenericV1 | AnalyzerId::XargsV1 => Vec::new(),
-        AnalyzerId::SedV1 => sed_v1(head, positionals, canonical_occurred),
-        AnalyzerId::ExportV1 => export_v1(head, positionals),
+        AnalyzerId::SedV1 => sed_v1(positionals, canonical_occurred),
+        AnalyzerId::ExportV1 => export_v1(positionals),
     }
 }
 
@@ -129,10 +129,7 @@ pub fn analyze(
 ///                      | "readOnly"  (`sed` reads its operand files and
 ///                        writes stdout; `-n` and `-E` are read-only options)
 ///   programForm        = "expression" | "file" | "positional"
-fn sed_v1(head: &str, positionals: &[ArgToken], canonical_occurred: &[String]) -> Vec<FactObs> {
-    if head != "sed" {
-        return Vec::new();
-    }
+fn sed_v1(positionals: &[ArgToken], canonical_occurred: &[String]) -> Vec<FactObs> {
     let mut facts = Vec::new();
     let in_place = canonical_occurred.iter().any(|c| c == "inPlace");
     facts.push(FactObs {
@@ -166,10 +163,7 @@ fn sed_v1(head: &str, positionals: &[ArgToken], canonical_occurred: &[String]) -
 /// export-v1: closed assignment facts — every operand word names an
 /// environment variable that becomes visible to executed children.
 ///   assignment = NAME
-fn export_v1(head: &str, positionals: &[ArgToken]) -> Vec<FactObs> {
-    if head != "export" {
-        return Vec::new();
-    }
+fn export_v1(positionals: &[ArgToken]) -> Vec<FactObs> {
     positionals
         .iter()
         .filter(|t| t.resolvable && is_identifier_operand(&t.text))
@@ -208,6 +202,7 @@ mod tests {
     fn args(list: &[&str]) -> Vec<ArgToken> {
         list.iter()
             .map(|s| ArgToken {
+                parameter: None,
                 text: (*s).to_string(),
                 resolvable: true,
                 span: (0, 0),

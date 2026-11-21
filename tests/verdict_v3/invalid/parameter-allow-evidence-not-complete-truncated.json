@@ -1,0 +1,24 @@
+{
+  "protocol": "shell-warden.verdict.v3",
+  "result": {
+    "invocationId": "fixture:parameter",
+    "verdict": "allow",
+    "commands": [
+      {
+        "index": 0,
+        "verdict": "allow",
+        "ruleId": "allow",
+        "classification": "parameter",
+        "match": "expression",
+        "facts": {
+          "evidence": "parameter",
+          "reasons": [
+            "allow-evidence-not-complete",
+            "parameter-expansion"
+          ],
+          "diagnostics": "truncated-after-decision"
+        }
+      }
+    ]
+  }
+}

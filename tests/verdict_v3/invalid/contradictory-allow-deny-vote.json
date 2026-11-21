@@ -1,0 +1,34 @@
+{
+  "protocol": "shell-warden.verdict.v3",
+  "result": {
+    "invocationId": "fixture:contradictory-allow-deny-vote",
+    "verdict": "allow",
+    "commands": [
+      {
+        "index": 0,
+        "verdict": "allow",
+        "ruleId": "policy/deny",
+        "classification": "static",
+        "match": "argv",
+        "facts": {
+          "evidence": "complete",
+          "reasons": [
+            "complete"
+          ],
+          "selectedProfiles": [
+            "base"
+          ],
+          "matched": [
+            "policy/deny"
+          ],
+          "qualified": [],
+          "rejected": [],
+          "votes": [
+            "deny:policy/deny"
+          ],
+          "uncertain": []
+        }
+      }
+    ]
+  }
+}
