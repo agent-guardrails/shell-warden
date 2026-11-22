@@ -52,7 +52,7 @@ fn extract_raw(
         // can still identify the executable, but never recurse past the cap.
         let scanned = parse::scan(raw);
         for seg in &scanned.segments {
-            let (assigns, mut argv, redirects, _) = segment_observations(seg);
+            let (assigns, mut argv, redirects) = segment_observations(seg);
             retain_overflow_marker(seg, &mut argv, &redirects);
             let part_relation = if scanned.malformed || seg.heredoc {
                 relation
@@ -89,7 +89,7 @@ fn extract_raw(
             continue;
         }
         let seg_relation = segment_relation(seg, relation);
-        let (assigns, argv, redirects, _) = segment_observations(seg);
+        let (assigns, argv, redirects) = segment_observations(seg);
         let state = observations_state(&assigns, &argv, &redirects);
         let ordinal = next_ordinal(graph, seg_relation, parent);
         // Record the owner first so every executable child has a real parent
@@ -145,20 +145,14 @@ fn segment_relation(seg: &parse::Segment, inherited: Relation) -> Relation {
     }
 }
 
-fn segment_observations(
-    seg: &parse::Segment,
-) -> (Vec<EnvAssign>, Vec<ArgToken>, Vec<RedirectObs>, bool) {
+fn segment_observations(seg: &parse::Segment) -> (Vec<EnvAssign>, Vec<ArgToken>, Vec<RedirectObs>) {
     let mut assigns: Vec<EnvAssign> = Vec::new();
     let mut argv: Vec<ArgToken> = Vec::new();
-    let mut unresolvable = false;
     let mut declaration_head = false;
     for tok in seg.items.iter().filter_map(|it| match it {
         parse::Item::Tok(t) if t.kind == TokKind::Word => Some(t),
         _ => None,
     }) {
-        if !tok.resolvable {
-            unresolvable = true;
-        }
         let destination = tok
             .source
             .split_once('=')
@@ -224,9 +218,7 @@ fn segment_observations(
             ordinal: index as u32 + 1,
         })
         .collect();
-    unresolvable |= redirects.iter().any(|redirect| !redirect.target_resolvable);
-
-    (assigns, argv, redirects, unresolvable)
+    (assigns, argv, redirects)
 }
 
 fn observations_state(
@@ -286,10 +278,10 @@ fn observations_state(
                 | "bun"
         ) && argv.iter().skip(1).any(|a| !a.resolvable)
     });
-    // Assignments left in argv follow a bare operand (or an unsupported
-    // declaration spelling). They must not qualify through argument grants.
+    // Remaining declaration words containing `=` include append assignments
+    // and other unsupported forms. They cannot use ordinary argument grants.
     let unmodeled_declaration = argv.first().is_some_and(|head| head.text == "export")
-        && argv.iter().skip(1).any(|arg| is_assignment(&arg.text));
+        && argv.iter().skip(1).any(|arg| arg.text.contains('='));
     if opaque || wrapper || dynamic_code_or_destination || unmodeled_declaration {
         EvidenceState::Opaque(reason::OPAQUE_EXPANSION)
     } else if parameter {
@@ -334,14 +326,10 @@ fn split_heredoc_like(
     // deny/ask still match the typed classification / raw text.
     let mut assigns: Vec<EnvAssign> = Vec::new();
     let mut argv: Vec<ArgToken> = Vec::new();
-    let mut unresolvable = false;
     for tok in seg.items.iter().filter_map(|it| match it {
         parse::Item::Tok(t) if t.kind == TokKind::Word => Some(t),
         _ => None,
     }) {
-        if !tok.resolvable {
-            unresolvable = true;
-        }
         if argv.is_empty() && assigns.is_empty() && is_assignment(&tok.text) {
             let name = tok.text[..tok.text.find('=').unwrap_or(0)].to_string();
             assigns.push(EnvAssign {
@@ -363,7 +351,6 @@ fn split_heredoc_like(
         });
     }
     let state = EvidenceState::Invalid(reason::UNSUPPORTED_SYNTAX);
-    let _ = unresolvable;
     let (part_id, _) = push_part(
         seg.raw.trim().to_string(),
         relation,
@@ -635,15 +622,14 @@ fn unwrap_transparent(
 
 fn unwrap_nice(part: Part, part_id: usize, depth: usize, graph: &mut CommandEvidence) {
     let mut rest: Vec<ArgToken> = part.argv[1..].to_vec();
+    let mut transparent = true;
     if rest.first().map(|w| w.text.as_str()) == Some("-n") {
-        if rest
-            .get(1)
-            .is_none_or(|priority| !priority.resolvable || priority.text.parse::<i64>().is_err())
-        {
+        let Some(priority) = rest.get(1) else {
             mark_opaque(part_id, reason::OPAQUE_EXPANSION, graph);
             return;
-        }
-        rest.drain(..2.min(rest.len()));
+        };
+        transparent = priority.resolvable && priority.text.parse::<i64>().is_ok();
+        rest.drain(..2);
     } else if rest
         .first()
         .map(|w| w.text.starts_with('-'))
@@ -656,7 +642,7 @@ fn unwrap_nice(part: Part, part_id: usize, depth: usize, graph: &mut CommandEvid
         mark_opaque(part_id, "nice without command", graph);
         return;
     }
-    emit_wrapped(&part, part_id, rest, true, depth, graph);
+    emit_wrapped(&part, part_id, rest, transparent, depth, graph);
 }
 
 fn unwrap_timeout(part: Part, part_id: usize, depth: usize, graph: &mut CommandEvidence) {

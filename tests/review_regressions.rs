@@ -147,6 +147,29 @@ fn export_assignments_after_bare_operands_are_opaque_not_argument_grants() {
 }
 
 #[test]
+fn export_append_assignments_cannot_use_ordinary_argument_coverage() {
+    let config = policy();
+    for raw in [
+        "export A=$HOME PATH+=/untrusted",
+        "export A=$HOME B PATH+=/untrusted",
+        "export A=$HOME -- PATH+=/untrusted",
+        "export PATH+=/untrusted",
+        "export \"PATH+=/untrusted\"",
+        "export A=$HOME A+=/suffix",
+        "export \"PATH[0]+=/untrusted\"",
+    ] {
+        let output = result(&config, raw);
+        let command = &output["result"]["commands"][0];
+        assert_eq!(command["verdict"], "ask", "{raw}");
+        assert_eq!(command["classification"], "opaque", "{raw}");
+    }
+    assert_eq!(
+        result(&config, "export A=$HOME C=/trusted")["result"]["verdict"],
+        "allow"
+    );
+}
+
+#[test]
 fn empty_quotes_start_a_word_before_a_hash_and_keep_redirect_substitutions() {
     let example = include_str!("../examples/configs/shell-warden.example.jsonc");
     for quotes in ["''", "\"\""] {
@@ -267,6 +290,32 @@ fn unsupported_env_assignments_keep_known_children_without_allowing_wrappers() {
 }
 
 #[test]
+fn unsupported_nice_priority_keeps_known_children_without_allowing_wrappers() {
+    let config = policy();
+    for raw in [
+        "nice -n \"$HOME\" git push --force origin main",
+        "nice -n $HOME git push --force origin main",
+        "nice -n not-a-number git push --force origin main",
+        "nice -n \"$HOME\" git push --force origin main 2>&-",
+    ] {
+        assert_eq!(result(&config, raw)["result"]["verdict"], "deny", "{raw}");
+    }
+    for raw in [
+        "nice -n \"$HOME\" git status",
+        "nice -n not-a-number git status",
+        "nice -n \"$HOME\" \"$CMD\" git push --force origin main",
+        "nice -n \"$HOME\"",
+    ] {
+        assert_eq!(result(&config, raw)["result"]["verdict"], "ask", "{raw}");
+        assert!(!extract(raw).collapsed.contains(&0), "{raw}");
+    }
+    assert_eq!(
+        result(&config, "nice -n 0 git status")["result"]["verdict"],
+        "allow"
+    );
+}
+
+#[test]
 fn recursive_sibling_ordinals_are_assigned_inside_extraction() {
     for raw in [
         "sh -c 'git status; git status'",
@@ -304,6 +353,9 @@ fn real_cli_preserves_children_and_invalid_precedence_in_full_review_cases() {
             "deny",
         ),
         ("export A=$HOME B PATH=/untrusted".to_string(), "ask"),
+        ("export A=$HOME PATH+=/untrusted".to_string(), "ask"),
+        ("export A=$HOME B PATH+=/untrusted".to_string(), "ask"),
+        ("export A=$HOME -- PATH+=/untrusted".to_string(), "ask"),
         (
             "sh -c 'git push --force origin main' 2>&-".to_string(),
             "deny",
@@ -313,6 +365,11 @@ fn real_cli_preserves_children_and_invalid_precedence_in_full_review_cases() {
             "env CACHE=\"$HOME\" git push --force origin main".to_string(),
             "deny",
         ),
+        (
+            "nice -n \"$HOME\" git push --force origin main".to_string(),
+            "deny",
+        ),
+        ("nice -n \"$HOME\" git status".to_string(), "ask"),
         ("git status".to_string(), "allow"),
         ("export A=$HOME C=one B".to_string(), "allow"),
     ];
