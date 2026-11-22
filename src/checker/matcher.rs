@@ -271,38 +271,37 @@ pub fn predicate_holds(m: &grammar::Match, f: &PartFacts) -> bool {
 use super::predicate::Predicate;
 
 pub fn predicate_result(m: &grammar::Match, f: &PartFacts) -> Predicate {
-    let mut result = Predicate::Match;
-    if let Some(cls) = m.classification {
-        result = result.and(Predicate::known(cls == state_class(f.part.state)));
+    if m.classification
+        .is_some_and(|cls| cls != state_class(f.part.state))
+    {
+        return Predicate::NoMatch;
     }
+    let mut result = Predicate::Match;
     if let Some(raw) = &m.raw {
-        result = result.and(Predicate::known(glob(&f.part.raw, raw)));
+        result = result.and_then(|| Predicate::known(glob(&f.part.raw, raw)));
     }
     if let Some(a) = &m.arguments {
-        result = result.and(arguments_result(a, f.positionals));
+        result = result.and_then(|| arguments_result(a, f.positionals));
     }
     if let Some(o) = &m.options {
-        result = result.and(options_result(o, f));
+        result = result.and_then(|| options_result(o, f));
     }
     if let Some(e) = &m.environment {
-        result = result.and(environment_result(e, &f.part.assigns, f.regexes));
+        result = result.and_then(|| environment_result(e, &f.part.assigns, f.regexes));
     }
     if let Some(r) = &m.redirects {
-        result = result.and(Predicate::known(redirects_holds(r, &f.part.redirects)));
+        result = result.and_then(|| Predicate::known(redirects_holds(r, &f.part.redirects)));
     }
     if let Some(p) = &m.paths {
-        result = result.and(paths_result(p, f.path_coords, f.cwd));
+        result = result.and_then(|| paths_result(p, f.path_coords, f.cwd));
     }
     if let Some(fm) = &m.facts {
-        result = result.and(Predicate::known(facts_matcher_holds(
-            fm,
-            &f.part.facts,
-            f.regexes,
-            f.cwd,
-        )));
+        result = result.and_then(|| {
+            Predicate::known(facts_matcher_holds(fm, &f.part.facts, f.regexes, f.cwd))
+        });
     }
     if let Some(np) = &m.nested_parts {
-        result = result.and(Predicate::known(nested_matcher_holds(np, f.nested)));
+        result = result.and_then(|| Predicate::known(nested_matcher_holds(np, f.nested)));
     }
     result
 }
@@ -322,27 +321,25 @@ fn arguments_result(a: &grammar::ArgumentsMatcher, positionals: &[ArgToken]) -> 
     for (kind, expected) in [("exact", &a.exact), ("prefix", &a.prefix)] {
         if let Some(expected) = expected {
             if positionals.len() < expected.len() {
-                result = result.and(Predicate::NoMatch);
+                return Predicate::NoMatch;
             } else {
-                result = result.and(Predicate::all(
-                    expected
-                        .iter()
-                        .zip(positionals)
-                        .enumerate()
-                        .map(|(i, (e, t))| {
+                result = result.and_then(|| {
+                    Predicate::all(expected.iter().zip(positionals).enumerate().map(
+                        |(i, (e, t))| {
                             if t.resolvable {
                                 Predicate::known(e == &t.text)
                             } else {
                                 Predicate::unknown(format!("/arguments/{kind}/{i}"))
                             }
-                        }),
-                ));
+                        },
+                    ))
+                });
             }
         }
     }
     if let Some(globs) = &a.contains_any {
-        result = result.and(Predicate::any(globs.iter().enumerate().flat_map(
-            |(i, g)| {
+        result = result.and_then(|| {
+            Predicate::any(globs.iter().enumerate().flat_map(|(i, g)| {
                 positionals.iter().map(move |t| {
                     if t.resolvable {
                         Predicate::known(glob(&t.text, g))
@@ -350,8 +347,8 @@ fn arguments_result(a: &grammar::ArgumentsMatcher, positionals: &[ArgToken]) -> 
                         Predicate::unknown(format!("/arguments/containsAny/{i}"))
                     }
                 })
-            },
-        )));
+            }))
+        });
     }
     result
 }
@@ -359,41 +356,41 @@ fn arguments_result(a: &grammar::ArgumentsMatcher, positionals: &[ArgToken]) -> 
 fn options_result(o: &grammar::OptionsMatcher, f: &PartFacts) -> Predicate {
     let mut result = Predicate::known(o.none != Some(true) || f.canonical.is_empty());
     if let Some(ids) = &o.present_all {
-        result = result.and(Predicate::known(
-            ids.iter().all(|id| f.canonical.contains_key(id)),
-        ));
+        result =
+            result.and_then(|| Predicate::known(ids.iter().all(|id| f.canonical.contains_key(id))));
     }
     if let Some(ids) = &o.present_any {
-        result = result.and(Predicate::known(
-            ids.iter().any(|id| f.canonical.contains_key(id)),
-        ));
+        result =
+            result.and_then(|| Predicate::known(ids.iter().any(|id| f.canonical.contains_key(id))));
     }
     if let Some(ids) = &o.absent_all {
-        result = result.and(Predicate::known(
-            ids.iter().all(|id| !f.canonical.contains_key(id)),
-        ));
+        result = result
+            .and_then(|| Predicate::known(ids.iter().all(|id| !f.canonical.contains_key(id))));
     }
     if let Some(values) = &o.values {
-        for (id, selector) in values {
-            let coordinate = format!(
-                "/options/values/{}",
-                id.replace('~', "~0").replace('/', "~1")
-            );
-            let value = f.canonical.get(id).map_or(Predicate::NoMatch, |occs| {
-                Predicate::any(occs.iter().flat_map(|occ| {
-                    occ.values.iter().map(|(v, known)| {
-                        if matches!(selector, TokenSelector::Str(StringValueSelector::Any)) {
-                            Predicate::Match
-                        } else if *known {
-                            Predicate::known(token_value_holds(selector, v, true, f.regexes, f.cwd))
-                        } else {
-                            Predicate::unknown(coordinate.clone())
-                        }
-                    })
-                }))
-            });
-            result = result.and(value);
-        }
+        result = result.and_then(|| {
+            Predicate::all(values.iter().map(|(id, selector)| {
+                let coordinate = format!(
+                    "/options/values/{}",
+                    id.replace('~', "~0").replace('/', "~1")
+                );
+                f.canonical.get(id).map_or(Predicate::NoMatch, |occs| {
+                    Predicate::any(occs.iter().flat_map(|occ| {
+                        occ.values.iter().map(|(v, known)| {
+                            if matches!(selector, TokenSelector::Str(StringValueSelector::Any)) {
+                                Predicate::Match
+                            } else if *known {
+                                Predicate::known(token_value_holds(
+                                    selector, v, true, f.regexes, f.cwd,
+                                ))
+                            } else {
+                                Predicate::unknown(coordinate.clone())
+                            }
+                        })
+                    }))
+                })
+            }))
+        });
     }
     result
 }
@@ -455,7 +452,7 @@ fn environment_result(
                 && test.occurrence.is_none_or(|o| o.selects(a.ordinal))
                 && test.prefix.is_none_or(|prefix| prefix == a.prefix),
         );
-        let value = match &test.value {
+        structure.and_then(|| match &test.value {
             None | Some(StringValueSelector::Any) => Predicate::Match,
             Some(selector) if a.resolvable => Predicate::known(string_selector_matches(
                 selector,
@@ -463,27 +460,28 @@ fn environment_result(
                 regexes,
             )),
             Some(_) => Predicate::unknown(coordinate),
-        };
-        structure.and(value)
+        })
     };
     let mut result = Predicate::known(e.none != Some(true) || assigns.is_empty());
     if let Some(any) = &e.any {
-        result = result.and(Predicate::any(any.iter().enumerate().flat_map(
-            |(i, test)| {
+        result = result.and_then(|| {
+            Predicate::any(any.iter().enumerate().flat_map(|(i, test)| {
                 assigns
                     .iter()
                     .map(move |a| entry(test, a, format!("/environment/any/{i}/value")))
-            },
-        )));
+            }))
+        });
     }
     if let Some(all) = &e.all {
-        result = result.and(Predicate::all(assigns.iter().map(|a| {
-            Predicate::any(
-                all.iter()
-                    .enumerate()
-                    .map(|(i, test)| entry(test, a, format!("/environment/all/{i}/value"))),
-            )
-        })));
+        result = result.and_then(|| {
+            Predicate::all(assigns.iter().map(|a| {
+                Predicate::any(
+                    all.iter()
+                        .enumerate()
+                        .map(|(i, test)| entry(test, a, format!("/environment/all/{i}/value"))),
+                )
+            }))
+        });
     }
     result
 }
@@ -610,30 +608,36 @@ pub fn paths_matcher_holds(
 
 fn paths_result(p: &grammar::PathsMatcher, coords: &[PathCoordinateObs], cwd: &str) -> Predicate {
     let entry = |e: &grammar::PathEntry, c: &PathCoordinateObs, coordinate: String| {
-        Predicate::known(coordinate_matches(&e.coordinate, &c.source)).and(if e.any == Some(true) {
-            Predicate::Match
-        } else if c.resolvable {
-            Predicate::known(path_matches_policy(&c.path, &e.policy(), cwd))
-        } else {
-            Predicate::unknown(coordinate)
+        Predicate::known(coordinate_matches(&e.coordinate, &c.source)).and_then(|| {
+            if e.any == Some(true) {
+                Predicate::Match
+            } else if c.resolvable {
+                Predicate::known(path_matches_policy(&c.path, &e.policy(), cwd))
+            } else {
+                Predicate::unknown(coordinate)
+            }
         })
     };
     let mut result = Predicate::known(p.none != Some(true) || coords.is_empty());
     if let Some(any) = &p.any {
-        result = result.and(Predicate::any(any.iter().enumerate().flat_map(|(i, e)| {
-            coords
-                .iter()
-                .map(move |c| entry(e, c, format!("/paths/any/{i}")))
-        })));
+        result = result.and_then(|| {
+            Predicate::any(any.iter().enumerate().flat_map(|(i, e)| {
+                coords
+                    .iter()
+                    .map(move |c| entry(e, c, format!("/paths/any/{i}")))
+            }))
+        });
     }
     if let Some(all) = &p.all {
-        result = result.and(Predicate::all(coords.iter().map(|c| {
-            Predicate::any(
-                all.iter()
-                    .enumerate()
-                    .map(|(i, e)| entry(e, c, format!("/paths/all/{i}"))),
-            )
-        })));
+        result = result.and_then(|| {
+            Predicate::all(coords.iter().map(|c| {
+                Predicate::any(
+                    all.iter()
+                        .enumerate()
+                        .map(|(i, e)| entry(e, c, format!("/paths/all/{i}"))),
+                )
+            }))
+        });
     }
     result
 }
@@ -1385,6 +1389,108 @@ fn redirect_coordinate_matches(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn sequential_dimensions_continue_after_unknown_until_known_no_match() {
+        let graph = crate::checker::split::extract(
+            "A=$HOME C=/public echo -a \"$HOME\" -- \"$HOME\" /public",
+        );
+        let part = &graph.parts[0];
+        let regexes = grammar::RegexCache::default();
+        let coords = [
+            PathCoordinateObs {
+                source: PathSourceTag::Argument { index: 0 },
+                path: part.argv[4].text.clone(),
+                resolvable: false,
+            },
+            PathCoordinateObs {
+                source: PathSourceTag::Argument { index: 1 },
+                path: "/public".into(),
+                resolvable: true,
+            },
+        ];
+        let facts = PartFacts {
+            parameter_boundary: true,
+            part,
+            profile_id: Some("echo"),
+            positionals: &part.argv[4..],
+            canonical: std::collections::BTreeMap::from([(
+                "a".into(),
+                vec![OptionOccurrenceView {
+                    ordinal: 1,
+                    values: vec![(part.argv[2].text.clone(), false)],
+                }],
+            )]),
+            path_coords: &coords,
+            nested: &[],
+            cwd: "/repo",
+            regexes: &regexes,
+        };
+        let unknown: grammar::Match = serde_json::from_value(json!({
+            "arguments":{"prefix":["/secret"]}
+        }))
+        .unwrap();
+        assert!(matches!(
+            predicate_result(&unknown, &facts),
+            Predicate::Unknown(_)
+        ));
+        for mut tail in [
+            json!({"options":{"presentAll":["missing"]}}),
+            json!({"environment":{"any":[{"name":"missing"}]}}),
+            json!({"paths":{"any":[{"coordinate":{"argument":{"index":9}},"within":"/secret"}]}}),
+        ] {
+            tail["arguments"] = json!({"prefix":["/secret"]});
+            let matcher: grammar::Match = serde_json::from_value(tail).unwrap();
+            assert_eq!(predicate_result(&matcher, &facts), Predicate::NoMatch);
+        }
+
+        let options: grammar::OptionsMatcher = serde_json::from_value(json!({
+            "values":{"a":{"oneOf":["/secret"]}}
+        }))
+        .unwrap();
+        assert!(matches!(
+            options_result(&options, &facts),
+            Predicate::Unknown(_)
+        ));
+        let options: grammar::OptionsMatcher = serde_json::from_value(json!({
+            "values":{"a":{"oneOf":["/secret"]},"b":{"oneOf":["/secret"]}}
+        }))
+        .unwrap();
+        assert_eq!(options_result(&options, &facts), Predicate::NoMatch);
+
+        let environment: grammar::EnvironmentMatcher = serde_json::from_value(json!({
+            "any":[{"name":"A","value":{"oneOf":["/secret"]}}]
+        }))
+        .unwrap();
+        assert!(matches!(
+            environment_result(&environment, &part.assigns, &regexes),
+            Predicate::Unknown(_)
+        ));
+        let environment: grammar::EnvironmentMatcher = serde_json::from_value(json!({
+            "any":[{"name":"A","value":{"oneOf":["/secret"]}}],
+            "all":[{"name":"C","value":{"any":true}}]
+        }))
+        .unwrap();
+        assert_eq!(
+            environment_result(&environment, &part.assigns, &regexes),
+            Predicate::NoMatch
+        );
+
+        let paths: grammar::PathsMatcher = serde_json::from_value(json!({
+            "any":[{"coordinate":{"argument":{"index":0}},"within":"/secret"}]
+        }))
+        .unwrap();
+        assert!(matches!(
+            paths_result(&paths, &coords, "/repo"),
+            Predicate::Unknown(_)
+        ));
+        let paths: grammar::PathsMatcher = serde_json::from_value(json!({
+            "any":[{"coordinate":{"argument":{"index":0}},"within":"/secret"}],
+            "all":[{"coordinate":{"argument":{"index":1}},"within":"/secret"}]
+        }))
+        .unwrap();
+        assert_eq!(paths_result(&paths, &coords, "/repo"), Predicate::NoMatch);
+    }
 
     #[test]
     fn glob_basics() {

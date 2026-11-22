@@ -33,6 +33,15 @@ impl Predicate {
         }
     }
 
+    /// Evaluate the next conjunct only while it can affect the complete proof.
+    /// Unknown must continue: a later NoMatch can still settle the rule.
+    pub fn and_then(self, other: impl FnOnce() -> Self) -> Self {
+        match self {
+            Self::NoMatch => Self::NoMatch,
+            value => value.and(other()),
+        }
+    }
+
     pub fn or(self, other: Self) -> Self {
         match (self, other) {
             (Self::Match, _) | (_, Self::Match) => Self::Match,
@@ -80,6 +89,21 @@ impl Predicate {
 #[cfg(test)]
 mod tests {
     use super::Predicate as P;
+
+    #[test]
+    fn lazy_conjunction_skips_no_match_but_continues_after_unknown() {
+        assert_eq!(
+            P::NoMatch.and_then(|| panic!("a settled conjunction must not evaluate its tail")),
+            P::NoMatch
+        );
+        let unknown = P::unknown("/first".into());
+        assert_eq!(unknown.clone().and_then(|| P::NoMatch), P::NoMatch);
+        assert_eq!(unknown.clone().and_then(|| P::Match), unknown);
+        assert_eq!(
+            unknown.and_then(|| P::unknown("/second".into())),
+            P::Unknown(vec!["/first".into(), "/second".into()])
+        );
+    }
 
     #[test]
     fn all_and_any_stop_evaluating_after_a_known_decisive_result() {
