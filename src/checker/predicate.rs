@@ -55,17 +55,94 @@ impl Predicate {
     }
 
     pub fn all(values: impl IntoIterator<Item = Self>) -> Self {
-        values.into_iter().fold(Self::Match, Self::and)
+        let mut result = Self::Match;
+        for value in values {
+            result = result.and(value);
+            if matches!(result, Self::NoMatch) {
+                break;
+            }
+        }
+        result
     }
 
     pub fn any(values: impl IntoIterator<Item = Self>) -> Self {
-        values.into_iter().fold(Self::NoMatch, Self::or)
+        let mut result = Self::NoMatch;
+        for value in values {
+            result = result.or(value);
+            if matches!(result, Self::Match) {
+                break;
+            }
+        }
+        result
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::Predicate as P;
+
+    #[test]
+    fn all_and_any_stop_evaluating_after_a_known_decisive_result() {
+        use std::cell::Cell;
+        let evaluated = Cell::new(0);
+        let values = (0..64).flat_map(|pattern| {
+            let evaluated = &evaluated;
+            (0..1000).map(move |token| {
+                evaluated.set(evaluated.get() + 1);
+                P::known(pattern == 0 && token == 0)
+            })
+        });
+        assert_eq!(P::any(values), P::Match);
+        assert_eq!(evaluated.get(), 1);
+
+        evaluated.set(0);
+        let values = (0..64).flat_map(|pattern| {
+            let evaluated = &evaluated;
+            (0..1000).map(move |token| {
+                evaluated.set(evaluated.get() + 1);
+                P::known(pattern != 0 || token != 0)
+            })
+        });
+        assert_eq!(P::all(values), P::NoMatch);
+        assert_eq!(evaluated.get(), 1);
+    }
+
+    #[test]
+    fn unknown_keeps_evaluating_until_a_later_decisive_result() {
+        use std::cell::Cell;
+        let evaluated = Cell::new(0);
+        let values = [P::unknown("/first".into()), P::Match, P::NoMatch]
+            .into_iter()
+            .inspect(|_| evaluated.set(evaluated.get() + 1));
+        assert_eq!(P::any(values), P::Match);
+        assert_eq!(evaluated.get(), 2);
+        evaluated.set(0);
+        let values = [P::unknown("/first".into()), P::NoMatch, P::Match]
+            .into_iter()
+            .inspect(|_| evaluated.set(evaluated.get() + 1));
+        assert_eq!(P::all(values), P::NoMatch);
+        assert_eq!(evaluated.get(), 2);
+    }
+
+    #[test]
+    fn unresolved_unknowns_still_collect_all_sorted_unique_coordinates() {
+        for actual in [
+            P::all([
+                P::unknown("/z".into()),
+                P::Match,
+                P::unknown("/a".into()),
+                P::unknown("/z".into()),
+            ]),
+            P::any([
+                P::unknown("/z".into()),
+                P::NoMatch,
+                P::unknown("/a".into()),
+                P::unknown("/z".into()),
+            ]),
+        ] {
+            assert_eq!(actual, P::Unknown(vec!["/a".into(), "/z".into()]));
+        }
+    }
 
     #[test]
     fn unknown_composes_without_boolean_shortcuts() {
