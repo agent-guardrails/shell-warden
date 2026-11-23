@@ -8,9 +8,9 @@ no long-lived process.
 
 - **Parser**: `src/checker/` — shell-structure parser + recursive executable-part
   extraction, closed relation enum
-  (`chain`/`pipeline`/`wrapper`/`commandSubstitution`/`analyzerCommand`), and
-  typed evidence states (`complete`/`opaque`/`invalid`).
-- **Policy**: config **v2** — monotonic command profiles (per-executable
+  (`chain`/`pipeline`/`wrapper`/`command-substitution`/`analyzer-command`), and
+  typed evidence states (`complete`/`parameter`/`opaque`/`invalid`).
+- **Policy**: config **v3** — command profiles (per-executable
   option grammar + typed-evidence rules). An `allow` is a full coverage proof;
   every emitted vote reduces by the fixed lattice `deny > ask > allow`. See the
   accepted design `agent-guardrails/docs/design/shell-warden-config-v2.md` and
@@ -18,7 +18,7 @@ no long-lived process.
 
 - **Examples & policy tooling**: `examples/configs/` —
   `shell-warden.example.jsonc` (reference policy, exercised by the golden
-  tests), `policy-builder.cjs` (build a v2 policy from composable helpers —
+  tests), `policy-builder.cjs` (build a v3 policy from composable helpers —
   run `node policy-builder.cjs policy.jsonc`), `verdict-battery.cjs`
   (`node verdict-battery.cjs --config POLICY --battery BATTERY` — spawn-based
   verdict battery; `SHELL_WARDEN_BIN` selects the checker), and
@@ -30,8 +30,8 @@ no long-lived process.
 ```
 shell-warden [--config FILE]...
 # letter JSON (schemas/shell-warden.letter.v1.schema.json) on stdin,
-# verdict v2 envelope (schemas/shell-warden.verdict.v2.schema.json) on stdout:
-# {"protocol":"shell-warden.verdict.v2","result":{...}} — ADR-0023, v2 only
+# verdict v3 envelope (schemas/shell-warden.verdict.v3.schema.json) on stdout:
+# {"protocol":"shell-warden.verdict.v3","result":{...}} — ADR-0026, v3 only
 # exit: 0 verdict written; 1 usage failure; 2 config invalid
 ```
 
@@ -42,7 +42,7 @@ shell-warden [--config FILE]...
   `shell-warden --config /policies/git.jsonc --config /policies/rust.jsonc`.
   Explicit files suppress the default config path; there is no implicit project
   discovery. Argument order preserves profile order, not override precedence.
-  Every file must be a complete, independently valid v2 policy. Duplicate
+  Every file must be a complete, independently valid v3 policy. Duplicate
   canonical paths (including symlinks), profile IDs, or executable spellings
   reject the set. Defaults must match, and shared redirect-policy names require
   identical definitions. Rules and fallback hints stay profile-local; cross-file
@@ -59,6 +59,26 @@ shell-warden [--config FILE]...
 
 `shell-warden-serve` (binary kept as reference, never shipped) is the retired
 JSON-RPC orchestrator; `warden-test-tool.exe`-style helpers are test-only.
+
+## Contextual variable permissions
+
+`expansions` on an allow rule independently permits variable names in `arguments`,
+`redirectTargets`, and `assignmentValues`. Omitted lists grant nothing. Supported
+words have one leading simple reference and a literal suffix. Arguments require a
+literal `--` boundary and value-independent coverage. Assignment destinations,
+every redirect occurrence, tracked unresolved paths, facts, and nested parts still
+require coverage.
+
+This authorizes **any runtime value**, not a verified HOME or path confinement.
+Unknown applicable ask/deny comparisons establish an ask floor; an unprovable
+allow proof does not veto another qualifying allow. The checker never reads HOME.
+
+See [the opt-in example](https://github.com/agent-guardrails/shell-warden/blob/main/examples/configs/contextual-variables.jsonc)
+and [the v3 contract](https://github.com/agent-guardrails/docs/blob/main/spec/shell-warden/12-contextual-parameters.md).
+The existing reference policy and builder remain literal-only unless explicitly
+changed. Upgrade checker and hook together: retired versions fail closed, with no
+fallback. A `complete` classification filter remains literal-only; omit it or use
+`parameter` when configuring the new gates and coverage.
 
 ## Tests
 

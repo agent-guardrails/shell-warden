@@ -1,0 +1,63 @@
+{
+  // Explicitly permits references for ANY runtime HOME value, not confinement
+  // to a verified home directory. The checker never reads HOME.
+  "version": 3,
+  "defaults": { "action": "ask", "redirectPolicy": "none" },
+  "redirectPolicies": {
+    "none": { "redirects": { "none": true }, "paths": { "none": true } }
+  },
+  "profiles": [
+    {
+      "id": "ls",
+      "executables": ["ls"],
+      "options": {},
+      "analyzer": "generic-v1",
+      "pathSources": [{ "argument": { "index": 0, "remainder": true } }],
+      "rules": [{
+        "id": "ls/allow-home-reference",
+        "action": "allow",
+        "expansions": { "arguments": ["HOME"] },
+        "match": {
+          "arguments": { "prefix": [], "remainder": { "each": { "any": true } } },
+          "options": { "none": true },
+          "environment": { "none": true },
+          "paths": { "all": [{ "coordinate": { "argument": { "index": 0, "remainder": true } }, "any": true }] },
+          "facts": { "none": true },
+          "nestedParts": { "none": true }
+        }
+      }]
+    },
+    {
+      "id": "cat",
+      "executables": ["cat"],
+      "options": {},
+      "analyzer": "generic-v1",
+      "pathSources": [{ "argument": { "index": 0, "remainder": true } }],
+      "rules": [
+        {
+          "id": "cat/allow-home-reference",
+          "action": "allow",
+          "expansions": { "arguments": ["HOME"] },
+          "match": {
+            "arguments": { "prefix": [], "remainder": { "each": { "any": true } } },
+            "options": { "none": true },
+            "environment": { "none": true },
+            "paths": { "all": [{ "coordinate": { "argument": { "index": 0, "remainder": true } }, "any": true }] },
+            "facts": { "none": true },
+            "nestedParts": { "none": true }
+          }
+        },
+        {
+          // For "$HOME", this predicate is unknown, not false. It therefore
+          // blocks automatic allow without claiming a matched deny.
+          "id": "cat/restrict-secret",
+          "action": "deny",
+          "message": "Restricted path.",
+          "match": {
+            "paths": { "any": [{ "coordinate": { "argument": { "index": 0, "remainder": true } }, "within": "/secret" }] }
+          }
+        }
+      ]
+    }
+  ]
+}

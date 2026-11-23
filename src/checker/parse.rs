@@ -13,6 +13,7 @@
 // A literal regex `$` inside quotes, or `\$`, is literal.
 
 use super::grammar::RedirectOp;
+use super::parameter::{self, ParameterForm, ParameterWord};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokKind {
@@ -36,6 +37,9 @@ pub enum Quoting {
 #[derive(Debug, Clone)]
 pub struct Tok {
     pub kind: TokKind,
+    /// Exact word syntax before quote removal or expansion replacement.
+    /// Parameter recognition must never reconstruct this from decoded text.
+    pub source: String,
     /// Decoded text (quotes resolved). Unresolvable tokens keep the raw
     /// textual form for diagnostics; decision logic must consult `resolvable`.
     pub text: String,
@@ -47,6 +51,33 @@ pub struct Tok {
     /// backticks, process substitution) — split recursively.
     pub subtexts: Vec<(String, Span)>,
     pub span: Span,
+}
+
+impl Tok {
+    /// Supported FD operands are literal unsigned decimal descriptors. Bash
+    /// `>&` can interpret signed numbers as filenames instead. Preserve the
+    /// existing numeric range; closing/moving descriptors remain unsupported.
+    pub fn is_fd_operand(&self) -> bool {
+        self.resolvable
+            && self.text.bytes().all(|byte| byte.is_ascii_digit())
+            && self.text.parse::<i32>().is_ok()
+    }
+
+    /// A supported argument/redirect candidate. This is syntactic evidence,
+    /// not an allow permission; the effective value is still unknown.
+    pub fn parameter(&self) -> Option<ParameterWord> {
+        let parameter = parameter::parse(&self.source)?;
+        (parameter.form == ParameterForm::DoubleQuoted).then_some(parameter)
+    }
+
+    /// A syntactically literal destination and supported value expression.
+    /// The caller must separately establish prefix/declaration assignment
+    /// semantics; an ordinary argument containing '=' is not an assignment.
+    pub fn assignment_parameter(&self) -> Option<(&str, ParameterWord)> {
+        let (name, value) = self.source.split_once('=')?;
+        parameter::is_name(name).then_some(())?;
+        Some((name, parameter::parse(value)?))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,19 +165,25 @@ fn scan_chars(_raw: &str, chars: &[char]) -> Option<ScanResult> {
 
     let mut cur_text = String::new();
     let mut cur_start: Option<usize> = None;
+    let mut cur_source_start: Option<usize> = None;
+    let mut cur_quoted = false;
     let mut cur_resolvable = true;
     let mut cur_quoting = Quoting::None;
     let mut cur_sub: Vec<(String, Span)> = Vec::new();
     let mut trailing_empty = false; // last op chain saw a redirect target
+    let mut i = 0usize;
 
     macro_rules! finish_token {
         ($kind:expr) => {
-            if !cur_text.is_empty() {
+            if !cur_text.is_empty() || cur_quoted {
                 // Spans are diagnostic bookkeeping only: end = decode length
                 // from the token start (never security-relevant).
                 let end = cur_start.unwrap_or(0) + cur_text.len().max(1);
                 seg_items.push(Item::Tok(Tok {
                     kind: $kind,
+                    source: chars[cur_source_start.unwrap_or(0)..i.min(n)]
+                        .iter()
+                        .collect(),
                     text: std::mem::take(&mut cur_text),
                     resolvable: cur_resolvable,
                     quoting: cur_quoting,
@@ -157,6 +194,8 @@ fn scan_chars(_raw: &str, chars: &[char]) -> Option<ScanResult> {
                 cur_quoting = Quoting::None;
                 cur_start = None;
             }
+            cur_source_start = None;
+            cur_quoted = false;
         };
     }
 
@@ -175,9 +214,13 @@ fn scan_chars(_raw: &str, chars: &[char]) -> Option<ScanResult> {
         }};
     }
 
-    let mut i = 0usize;
     while i < n {
         let c = chars[i];
+        // Keep source aligned with the word scanner: other whitespace is
+        // literal word content, not a separator that may be skipped.
+        if cur_source_start.is_none() && !matches!(c, ' ' | '\t' | '\r' | '\n') {
+            cur_source_start = Some(i);
+        }
         match c {
             ' ' | '\t' | '\r' => {
                 finish_token!(TokKind::Word);
@@ -190,14 +233,16 @@ fn scan_chars(_raw: &str, chars: &[char]) -> Option<ScanResult> {
                 pending_sep = Some(Operator::Semi);
                 i += 1;
             }
-            '#' if cur_text.is_empty() => {
+            '#' if cur_text.is_empty() && !cur_quoted => {
                 // comment: the rest of the input is decoration
                 finish_token!(TokKind::Word);
+                trailing_empty = false;
                 new_segment!(i);
                 i = n;
                 break;
             }
             '\'' => {
+                cur_quoted = true;
                 cur_quoting = Quoting::Single;
                 cur_start.get_or_insert(i);
                 match (i + 1..n).find(|&j| chars[j] == '\'') {
@@ -217,6 +262,7 @@ fn scan_chars(_raw: &str, chars: &[char]) -> Option<ScanResult> {
                 }
             }
             '"' => {
+                cur_quoted = true;
                 cur_quoting = Quoting::Double;
                 cur_start.get_or_insert(i);
                 let mut j = i + 1;
@@ -226,7 +272,12 @@ fn scan_chars(_raw: &str, chars: &[char]) -> Option<ScanResult> {
                 while j < n {
                     let ch = chars[j];
                     if escaped {
-                        tail.push(unescape(ch));
+                        if ch != '\n' {
+                            if !matches!(ch, '$' | '`' | '"' | '\\') {
+                                tail.push('\\');
+                            }
+                            tail.push(ch);
+                        }
                         escaped = false;
                         j += 1;
                         continue;
@@ -273,7 +324,9 @@ fn scan_chars(_raw: &str, chars: &[char]) -> Option<ScanResult> {
             '\\' if i + 1 < n => {
                 cur_start.get_or_insert(i);
                 cur_quoting = Quoting::Escaped;
-                cur_text.push(unescape(chars[i + 1]));
+                if chars[i + 1] != '\n' {
+                    cur_text.push(chars[i + 1]);
+                }
                 i += 2;
             }
             '\\' => {
@@ -312,7 +365,11 @@ fn scan_chars(_raw: &str, chars: &[char]) -> Option<ScanResult> {
                 cur_resolvable = false;
                 let close = find_balanced(chars, i + 1, '(', ')');
                 cur_sub.push((
-                    chars[i + 2..close].iter().collect::<String>(),
+                    chars
+                        .get(i + 2..close)
+                        .unwrap_or_default()
+                        .iter()
+                        .collect::<String>(),
                     (i, close + 1),
                 ));
                 cur_text.push('\u{fffd}');
@@ -324,7 +381,11 @@ fn scan_chars(_raw: &str, chars: &[char]) -> Option<ScanResult> {
                 cur_resolvable = false;
                 let close = find_balanced(chars, i + 1, '(', ')');
                 cur_sub.push((
-                    chars[i + 2..close].iter().collect::<String>(),
+                    chars
+                        .get(i + 2..close)
+                        .unwrap_or_default()
+                        .iter()
+                        .collect::<String>(),
                     (i, close + 1),
                 ));
                 cur_text.push('\u{fffd}');
@@ -399,9 +460,17 @@ fn scan_chars(_raw: &str, chars: &[char]) -> Option<ScanResult> {
                 // possibly FD-prefixed redirect (`2>`, `2>>`, `1<`): a pure
                 // digit pending token belongs to the operator, not argv.
                 let mut source_fd: Option<u32> = None;
-                if !cur_text.is_empty() && cur_text.chars().all(|ch| ch.is_ascii_digit()) {
+                if !cur_text.is_empty()
+                    && chars[cur_source_start.unwrap_or(i)..i]
+                        .iter()
+                        .collect::<String>()
+                        .replace("\\\n", "")
+                        .chars()
+                        .all(|ch| ch.is_ascii_digit())
+                {
                     source_fd = cur_text.parse::<u32>().ok();
                     cur_text.clear();
+                    cur_source_start = None;
                     cur_resolvable = true;
                     cur_sub.clear();
                     cur_start = None;
@@ -441,7 +510,7 @@ fn scan_chars(_raw: &str, chars: &[char]) -> Option<ScanResult> {
                                 other => other,
                             };
                             let (tok, next) = read_target(chars, i);
-                            let digits = tok.as_ref().map(|t| t.text.parse::<i32>().is_ok());
+                            let digits = tok.as_ref().map(Tok::is_fd_operand);
                             match (dup, digits) {
                                 (RedirectOp::DupOut | RedirectOp::DupIn, Some(true)) => {
                                     let t = tok.unwrap();
@@ -512,20 +581,12 @@ fn scan_chars(_raw: &str, chars: &[char]) -> Option<ScanResult> {
 fn dummy_target(n: usize) -> Tok {
     Tok {
         kind: TokKind::RedirectTarget,
+        source: String::new(),
         text: String::new(),
         resolvable: false,
         quoting: Quoting::None,
         subtexts: Vec::new(),
         span: (n, n),
-    }
-}
-
-fn unescape(c: char) -> char {
-    match c {
-        'n' => '\n',
-        't' => '\t',
-        'r' => '\r',
-        other => other,
     }
 }
 
@@ -553,6 +614,7 @@ fn capture_expand(
     if first == '(' {
         if chars.get(start + 2) == Some(&'(') {
             let close = find_balanced(chars, start + 1, '(', ')');
+            capture_executable_subtexts(chars, (start + 3, close), subtexts);
             return (
                 Some(chars[start..=close].iter().collect::<String>()),
                 close + 1,
@@ -560,7 +622,11 @@ fn capture_expand(
         }
         let close = find_balanced(chars, start + 1, '(', ')');
         subtexts.push((
-            chars[start + 2..close].iter().collect::<String>(),
+            chars
+                .get(start + 2..close)
+                .unwrap_or_default()
+                .iter()
+                .collect::<String>(),
             (start, close + 1),
         ));
         return (
@@ -584,8 +650,15 @@ fn capture_expand(
         }
         return (Some(chars[start..end].iter().collect::<String>()), end);
     }
-    // bare $: opaque noise
-    (Some("$".to_string()), (start + 2).min(n))
+    // Positional/special parameters consume their next character. A literal
+    // dollar must not swallow a closing quote or command delimiter.
+    let next = if first.is_ascii_digit() || matches!(first, '?' | '$' | '#' | '@' | '*' | '-' | '!')
+    {
+        start + 2
+    } else {
+        start + 1
+    };
+    (Some("$".to_string()), next.min(n))
 }
 
 fn capture_executable_subtexts(chars: &[char], range: Span, subtexts: &mut Vec<(String, Span)>) {
@@ -601,7 +674,11 @@ fn capture_executable_subtexts(chars: &[char], range: Span, subtexts: &mut Vec<(
             '<' | '>' if chars.get(index + 1) == Some(&'(') => {
                 let close = find_balanced(chars, index + 1, '(', ')');
                 subtexts.push((
-                    chars[index + 2..close].iter().collect::<String>(),
+                    chars
+                        .get(index + 2..close)
+                        .unwrap_or_default()
+                        .iter()
+                        .collect::<String>(),
                     (index, close + 1),
                 ));
                 index = (close + 1).min(end);
@@ -670,103 +747,300 @@ fn read_target(chars: &[char], i: usize) -> (Option<Tok>, usize) {
         j += 1;
     }
     let text_start = j;
-    let mut text = String::new();
-    let mut resolvable = true;
-    let mut quoting = Quoting::None;
-    let mut subtexts: Vec<(String, Span)> = Vec::new();
-    let mut sub_believable = false;
+    // Find the source boundary, then use the ordinary word scanner. Maintaining
+    // a second quote/expansion decoder here loses escaped quotes and can turn
+    // a double-quoted expansion into an apparently literal redirect path.
     while j < n {
         let c = chars[j];
-        if c == ' '
-            || c == '\t'
-            || c == '\n'
-            || c == ';'
-            || c == '|'
-            || c == '&'
-            || c == '<'
-            || c == '>'
-            || c == '('
-            || c == ')'
-        {
-            break;
-        }
-        if c == '\\' && j + 1 < n {
-            text.push(unescape(chars[j + 1]));
-            quoting = Quoting::Escaped;
-            j += 2;
-            continue;
-        }
-        if c == '\'' || c == '"' {
-            match (j + 1..n).find(|&k| chars[k] == c) {
-                Some(end) => {
-                    text.extend(chars[j + 1..end].iter());
-                    if !matches!(quoting, Quoting::Escaped) {
-                        quoting = if c == '\'' {
-                            Quoting::Single
-                        } else {
-                            Quoting::Double
-                        };
+        match c {
+            '\\' => j = (j + 2).min(n),
+            '\'' => {
+                j = (j + 1..n)
+                    .find(|&k| chars[k] == '\'')
+                    .map_or(n, |end| end + 1);
+            }
+            '"' => {
+                j += 1;
+                while j < n {
+                    match chars[j] {
+                        '\\' => j = (j + 2).min(n),
+                        '"' => {
+                            j += 1;
+                            break;
+                        }
+                        '$' | '`' => {
+                            let (_, next) = capture_expand(chars, j, &mut Vec::new());
+                            j = next.min(n);
+                        }
+                        _ => j += 1,
                     }
-                    sub_believable = false;
-                    j = end + 1;
-                    continue;
-                }
-                None => {
-                    resolvable = false;
-                    text.extend(chars[j..].iter());
-                    j = n;
-                    break;
                 }
             }
+            '$' | '`' => {
+                let (_, next) = capture_expand(chars, j, &mut Vec::new());
+                j = next.min(n);
+            }
+            '<' | '>' if chars.get(j + 1) == Some(&'(') => {
+                j = (find_balanced(chars, j + 1, '(', ')') + 1).min(n);
+            }
+            ' ' | '\t' | '\r' | '\n' | ';' | '|' | '&' | '<' | '>' | '(' | ')' => break,
+            _ => j += 1,
         }
-        if c == '$' || c == '`' {
-            resolvable = false;
-            let (_inner, next) = capture_expand(chars, j, &mut subtexts);
-            text.push('\u{fffd}');
-            sub_believable = true;
-            j = next;
-            continue;
-        }
-        if c == '<' && chars.get(j + 1) == Some(&'(') {
-            resolvable = false;
-            let close = find_balanced(chars, j + 1, '(', ')');
-            subtexts.push((
-                chars[j + 2..close.min(n.saturating_sub(1))]
-                    .iter()
-                    .collect::<String>(),
-                (j, close + 1),
-            ));
-            let _ = sub_believable;
-            text.push('\u{fffd}');
-            j = close + 1;
-            continue;
-        }
-        if matches!(c, '*' | '?' | '[' | '~' | '{') {
-            resolvable = false;
-        }
-        text.push(c);
-        j += 1;
     }
-    if text.is_empty() {
-        (None, j)
-    } else {
-        (
-            Some(Tok {
-                kind: TokKind::RedirectTarget,
-                text,
-                resolvable,
-                quoting,
-                subtexts,
-                span: (text_start, j),
-            }),
-            j,
-        )
-    }
+    let source: String = chars[text_start..j].iter().collect();
+    let token = scan_chars(&source, &chars[text_start..j]).and_then(|mut result| {
+        if result.malformed || result.segments.len() != 1 {
+            return None;
+        }
+        let mut segment = result.segments.pop()?;
+        if !segment.redirects.is_empty() || segment.items.len() != 1 {
+            return None;
+        }
+        match segment.items.pop()? {
+            Item::Tok(mut token) => {
+                token.kind = TokKind::RedirectTarget;
+                token.span = (text_start, j);
+                for (_, span) in &mut token.subtexts {
+                    span.0 += text_start;
+                    span.1 += text_start;
+                }
+                Some(token)
+            }
+        }
+    });
+    (token, j)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn word(raw: &str) -> Tok {
+        let result = scan(raw);
+        assert!(!result.malformed, "{raw}");
+        assert_eq!(result.segments.len(), 1, "{raw}");
+        assert_eq!(result.segments[0].items.len(), 1, "{raw}");
+        match &result.segments[0].items[0] {
+            Item::Tok(token) => token.clone(),
+        }
+    }
+
+    #[test]
+    fn source_keeps_non_separator_whitespace_at_the_start_of_a_word() {
+        for leading in [
+            '\u{a0}', '\u{2003}', '\u{2028}', '\u{202f}', '\u{3000}', '\u{b}', '\u{c}',
+        ] {
+            for assignment in ["CACHE=/tmp", "CACHE=$HOME", "CACHE=\"$HOME\""] {
+                let source = format!("{leading}{assignment}");
+                let token = word(&source);
+                assert_eq!(token.source, source);
+                assert!(token.text.starts_with(leading), "{source:?}");
+                assert!(token.assignment_parameter().is_none(), "{source:?}");
+            }
+        }
+        for separator in [' ', '\t', '\r', '\n'] {
+            let result = scan(&format!("{separator}CACHE=$HOME"));
+            let token = result
+                .segments
+                .iter()
+                .flat_map(|segment| &segment.items)
+                .map(|item| match item {
+                    Item::Tok(token) => token,
+                })
+                .next()
+                .unwrap();
+            assert_eq!(token.source, "CACHE=$HOME");
+            assert_eq!(token.assignment_parameter().unwrap().0, "CACHE");
+        }
+    }
+
+    #[test]
+    fn literal_dollar_does_not_consume_a_quote_or_delimiter() {
+        for source in ["$\"", "$;", "$ ", "$\n", "$>"] {
+            let chars: Vec<_> = source.chars().collect();
+            let (_, next) = capture_expand(&chars, 0, &mut Vec::new());
+            assert_eq!(next, 1, "{source}");
+        }
+        for source in ["$?", "$$", "$1", "$@", "$#", "$*", "$-", "$!"] {
+            let chars: Vec<_> = source.chars().collect();
+            let (_, next) = capture_expand(&chars, 0, &mut Vec::new());
+            assert_eq!(next, 2, "{source}");
+        }
+    }
+
+    #[test]
+    fn parameter_candidates_use_original_word_syntax() {
+        for source in [
+            "\"$HOME\"",
+            "\"${HOME}/cache\"",
+            "\"$HOME/space here\"",
+            "\"$HOME/../*\"",
+            r#""$HOME/\$USER""#,
+            "\"$HOME/日本語\"",
+        ] {
+            let token = word(source);
+            assert_eq!(token.source, source);
+            assert!(token.parameter().is_some(), "{source}");
+            // Recognition is not permission and does not invent literal argv.
+            assert!(!token.resolvable, "{source}");
+        }
+    }
+
+    #[test]
+    fn literal_escapes_use_shell_not_c_string_semantics() {
+        for (source, expected) in [
+            (r#""\n\t\r\q""#, r"\n\t\r\q"),
+            (r"\n\t\r", "ntr"),
+            (r#""\$HOME""#, "$HOME"),
+            ("\"a\\\nb\"", "ab"),
+            ("a\\\nb", "ab"),
+        ] {
+            let token = word(source);
+            assert_eq!(token.text, expected, "{source}");
+            assert!(token.resolvable, "{source}");
+            assert_eq!(token.parameter(), None, "{source}");
+        }
+        assert!(scan("\\\n").segments.is_empty());
+        let result = scan("echo 2\\\n>out");
+        assert_eq!(result.segments[0].items.len(), 1);
+        assert_eq!(result.segments[0].redirects[0].source_fd, Some(2));
+    }
+
+    #[test]
+    fn incomplete_substitutions_never_panic_or_qualify_as_parameters() {
+        for raw in ["$(", "<(", ">(", "\"$HOME/$(", "\"$HOME/<("] {
+            let result = scan(raw);
+            for segment in result.segments {
+                for item in segment.items {
+                    let Item::Tok(token) = item;
+                    assert_eq!(token.parameter(), None, "{raw}");
+                    assert!(!token.resolvable, "{raw}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn literal_or_unsupported_words_do_not_acquire_parameter_evidence() {
+        for source in [
+            "'$HOME/cache'",
+            r#""\$HOME/cache""#,
+            "$HOME/cache",
+            "\"$HOME/$USER\"",
+            "\"$HOME/$(touch marker)\"",
+            "\"${HOME:-/tmp}\"",
+            "\"$HOME\"\"/cache\"",
+            "prefix\"$HOME\"",
+        ] {
+            let token = word(source);
+            assert_eq!(token.source, source);
+            assert_eq!(token.parameter(), None, "{source}");
+        }
+    }
+
+    #[test]
+    fn assignment_candidates_keep_the_literal_destination_separate() {
+        for source in ["CACHE=$HOME/cache", "CACHE=\"${HOME}/cache\""] {
+            let token = word(source);
+            assert_eq!(token.source, source);
+            assert_eq!(token.parameter(), None);
+            let (destination, value) = token.assignment_parameter().unwrap();
+            assert_eq!(destination, "CACHE");
+            assert_eq!(value.name, "HOME");
+            assert_eq!(value.suffix, "/cache");
+            assert!(!token.resolvable);
+        }
+        for source in [
+            "'CACHE'=\"$HOME/cache\"",
+            "CACHE\\=\"$HOME/cache\"",
+            "2CACHE=$HOME/cache",
+            "CACHE=\"$HOME/$USER\"",
+        ] {
+            assert_eq!(word(source).assignment_parameter(), None, "{source}");
+        }
+    }
+
+    #[test]
+    fn word_source_is_preserved_across_quotes_unicode_and_separators() {
+        let result = scan("echo 日本語 \"$HOME/a b\";echo '${HOME}' > \"${HOME}/out\"");
+        let sources: Vec<_> = result
+            .segments
+            .iter()
+            .flat_map(|segment| &segment.items)
+            .map(|item| match item {
+                Item::Tok(token) => token.source.as_str(),
+            })
+            .collect();
+        assert_eq!(
+            sources,
+            ["echo", "日本語", "\"$HOME/a b\"", "echo", "'${HOME}'"]
+        );
+        assert_eq!(
+            result.segments[1].redirects[0].target.source,
+            "\"${HOME}/out\""
+        );
+    }
+
+    #[test]
+    fn redirect_targets_share_argument_quote_and_expansion_scanning() {
+        for source in [
+            "\"$HOME/out\"",
+            "\"$HOME/a b\"",
+            r#""$HOME/\"quoted\"""#,
+            r#""$HOME/\$USER""#,
+            "\"${HOME}/日本語\"",
+        ] {
+            let result = scan(&format!("echo > {source}"));
+            let target = &result.segments[0].redirects[0].target;
+            assert_eq!(target.source, source);
+            assert!(target.parameter().is_some(), "{source}");
+            assert!(!target.resolvable, "{source}");
+        }
+        for source in ["'$HOME/out'", r#""\$HOME/out""#] {
+            let result = scan(&format!("echo > {source}"));
+            let target = &result.segments[0].redirects[0].target;
+            assert_eq!(target.source, source);
+            assert_eq!(target.parameter(), None);
+            assert!(target.resolvable, "{source}");
+        }
+    }
+
+    #[test]
+    fn empty_literal_words_remain_observed_tokens() {
+        for source in ["\"\"", "''"] {
+            let token = word(source);
+            assert_eq!(token.source, source);
+            assert_eq!(token.text, "");
+            assert!(token.resolvable);
+            assert_eq!(token.parameter(), None);
+        }
+        let result = scan("echo 2>out");
+        assert_eq!(result.segments[0].items.len(), 1);
+        assert_eq!(result.segments[0].redirects[0].source_fd, Some(2));
+        for source in ["echo \"2\">out", "echo '2'>out", "echo \\2>out"] {
+            let result = scan(source);
+            assert_eq!(result.segments[0].items.len(), 2, "{source}");
+            assert_eq!(result.segments[0].redirects[0].source_fd, None, "{source}");
+        }
+    }
+
+    #[test]
+    fn redirect_substitutions_are_captured_not_hidden_by_a_parameter_prefix() {
+        for source in [
+            "\"$HOME/$(touch marker)\"",
+            "\"${HOME:-$(touch marker)}\"",
+            "\"$HOME/`touch marker`\"",
+            "\"$HOME/$((1 + $(touch marker)))\"",
+        ] {
+            let result = scan(&format!("echo > {source}"));
+            let target = &result.segments[0].redirects[0].target;
+            assert_eq!(target.source, source);
+            assert_eq!(target.parameter(), None);
+            assert!(!target.resolvable);
+            assert_eq!(target.subtexts.len(), 1, "{source}");
+            assert_eq!(target.subtexts[0].0, "touch marker", "{source}");
+        }
+    }
 
     fn executable_subtexts(raw: &str) -> Vec<String> {
         scan(raw)

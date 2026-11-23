@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Shell-warden config v2 policy builder — builds a policies JSON document from
+// Shell-warden config v3 policy builder — builds a policies JSON document from
 // composable helpers and profile factories. usage:
 //   node policy-builder.mjs [out.jsonc]
 // See design/shell-warden-config-v2.md in agent-guardrails/docs for the coverage
@@ -59,7 +59,7 @@ const subProfile = (exe, subs, options, coverage) => {
 const readers = ["ls", "cat", "head", "tail", "grep", "rg", "pwd", "which", "wc", "sort", "uniq", "cut", "diff", "jq", "yq", "file", "stat", "strings", "base64", "md5", "shasum", "column", "du", "df", "tree"]
 
 const config = {
-  version: 2,
+  version: 3,
   defaults: {
     action: "ask",
     message: "command not pre-approved by shell-warden — ask the human",

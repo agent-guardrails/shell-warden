@@ -1,4 +1,5 @@
-// Config loader + semantic validation (06 §6.1–6.3 mirrored onto the v2
+// Config loader + semantic validation (06 §6.1–6.3 plus the v3 additions in
+// 12-contextual-parameters.md, retaining the original
 // design, design/shell-warden-config-v2.md §Draft closed schema outline and
 // validation): strict, fail-closed. Invalid ⇒ error (bin exits 2 with the
 // message on stderr) — never fall back to defaults.
@@ -276,6 +277,7 @@ pub fn load_str(text: &str) -> ConfigResult {
         strip_jsonc(text).map_err(|e| format!("config invalid: JSONC syntax error: {e}"))?;
     let value =
         duplicate_free_value(&stripped).map_err(|e| format!("config invalid: JSON error: {e}"))?;
+    reject_nulls(&value, "")?;
     let limit = raw_limits_bytes(&value);
     if text.len() > limit as usize {
         return Err(format!(
@@ -287,6 +289,29 @@ pub fn load_str(text: &str) -> ConfigResult {
         serde_json::from_value(value).map_err(|e| format!("config invalid: schema: {e}"))?;
     let config = validate(raw).map_err(|e| format!("config invalid: {e}"))?;
     Ok(config)
+}
+
+fn reject_nulls(value: &Value, path: &str) -> Result<(), String> {
+    match value {
+        Value::Null => {
+            return Err(format!(
+                "config invalid: schema: null is not allowed at {path}"
+            ));
+        }
+        Value::Array(values) => {
+            for (index, value) in values.iter().enumerate() {
+                reject_nulls(value, &format!("{path}/{index}"))?;
+            }
+        }
+        Value::Object(values) => {
+            for (key, value) in values {
+                let key = key.replace('~', "~0").replace('/', "~1");
+                reject_nulls(value, &format!("{path}/{key}"))?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 /// Build a `Value` from raw JSON text, rejecting duplicate object keys at any
@@ -1032,6 +1057,29 @@ fn validate_profile(
     // ── rules ──
     let mut seen_rule: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for rule in &profile.rules {
+        if let Some(expansions) = &rule.expansions {
+            if rule.action != VerdictKind::Allow {
+                return Err("expansions are allow-only".to_string());
+            }
+            for names in [
+                &expansions.arguments,
+                &expansions.redirect_targets,
+                &expansions.assignment_values,
+            ] {
+                if names.len() > MAX_SELECTOR_ALTERNATIVES {
+                    return Err("expansion names exceed the selector count limit".to_string());
+                }
+                let mut seen = std::collections::BTreeSet::new();
+                for name in names {
+                    if name.len() > 128 || !super::parameter::is_name(name) || !seen.insert(name) {
+                        return Err(
+                            "expansion names must be unique portable variable identifiers"
+                                .to_string(),
+                        );
+                    }
+                }
+            }
+        }
         if rule.id.is_empty() || rule.id.len() > 128 {
             return Err(format!("rule id \"{}\" out of bounds", rule.id));
         }
@@ -1117,7 +1165,8 @@ fn validate_redirect_coverage(c: &RedirectCoverage) -> Result<(), String> {
         // closed pairing: input/truncate/append carry literal-path targets;
         // duplication carries FD targets
         match (e.operator, e.target.kind) {
-            (RedirectOp::DupOut | RedirectOp::DupIn, TargetKindKind::Fd)
+            (RedirectOp::Out | RedirectOp::AppendOut, TargetKindKind::ParameterPath)
+            | (RedirectOp::DupOut | RedirectOp::DupIn, TargetKindKind::Fd)
             | (
                 RedirectOp::In | RedirectOp::Out | RedirectOp::AppendOut,
                 TargetKindKind::LiteralPath,
@@ -1159,9 +1208,14 @@ fn validate_redirect_path_coverage(c: &PathCoverage) -> Result<(), String> {
 /// `AbsoluteLexicalPath` byte cap (4096) — a non-normalized root would
 /// silently widen coverage.
 fn validate_path_policy(p: &PathPolicy) -> Result<(), String> {
-    let set = p.exact.is_some() as u8 + p.within.is_some() as u8 + p.outside.is_some() as u8;
-    if set != 1 {
-        return Err("path policy must select exactly one of exact/within/outside".to_string());
+    let set = p.exact.is_some() as u8
+        + p.within.is_some() as u8
+        + p.outside.is_some() as u8
+        + p.any.is_some() as u8;
+    if set != 1 || p.any == Some(false) {
+        return Err(
+            "path policy must select exactly one of any:true/exact/within/outside".to_string(),
+        );
     }
     for root in ["exact", "within", "outside"] {
         let val = match root {
@@ -1363,8 +1417,12 @@ fn validate_allow_match(
     if m.redirects.is_some() {
         return Err("match.redirects is invalid for allow: redirect coverage comes from the effective redirect policy".to_string());
     }
-    if !matches!(m.classification, Some(EvidenceClass::Complete)) {
-        return Err("allow requires classification: \"complete\"".to_string());
+    if m.classification
+        .is_some_and(|c| !matches!(c, EvidenceClass::Complete | EvidenceClass::Parameter))
+    {
+        return Err(
+            "allow classification may only select complete or parameter evidence".to_string(),
+        );
     }
     // arguments: exactly one of exact | (prefix && remainder), no containsAny
     let Some(args) = &m.arguments else {
@@ -1802,7 +1860,7 @@ mod tests {
     #[test]
     fn duplicate_remainder_keys_never_collapse() {
         const CFG: &str = r#"{
-  "version": 2,
+  "version": 3,
   "defaults": { "action": "ask" },
   "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
   "profiles": [{ "id": "git", "executables": ["git"], "options": {}, "rules": [{
@@ -1824,7 +1882,7 @@ mod tests {
     #[test]
     fn duplicate_none_keys_rejected() {
         const CFG: &str = r#"{
-  "version": 2,
+  "version": 3,
   "defaults": { "action": "ask" },
   "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
   "profiles": [{ "id": "git", "executables": ["git"], "options": {}, "rules": [{
@@ -1847,7 +1905,7 @@ mod tests {
     fn duplicate_map_keys_rejected_in_both_orders() {
         let permissive_then_restrictive = load_str(
             r#"{
-  "version": 2,
+  "version": 3,
   "defaults": { "action": "ask", "redirectPolicy": "p" },
   "redirectPolicies": {
     "p": { "redirects": { "none": true }, "paths": { "none": true } },
@@ -1858,7 +1916,7 @@ mod tests {
         );
         let restrictive_then_permissive = load_str(
             r#"{
-  "version": 2,
+  "version": 3,
   "defaults": { "action": "ask", "redirectPolicy": "p" },
   "redirectPolicies": {
     "p": { "redirects": { "none": true }, "paths": { "all": [{ "coordinate": { "redirect": { "operator": ">", "sourceFd": "default", "occurrence": "all" } }, "within": "/repo/safe" }] } },
@@ -1884,13 +1942,13 @@ mod tests {
     #[test]
     fn duplicate_top_level_and_struct_keys_rejected() {
         let Err(dup_version) =
-            load_str(r#"{ "version": 2, "version": 2, "defaults": { "action": "ask" } }"#)
+            load_str(r#"{ "version": 3, "version": 3, "defaults": { "action": "ask" } }"#)
         else {
             panic!("duplicate top-level key must reject");
         };
         assert!(dup_version.contains("config invalid"), "{dup_version}");
         let Err(dup_defaults) = load_str(
-            r#"{ "version": 2, "defaults": { "action": "ask" }, "defaults": { "action": "ask" } }"#,
+            r#"{ "version": 3, "defaults": { "action": "ask" }, "defaults": { "action": "ask" } }"#,
         ) else {
             panic!("duplicate struct key must reject");
         };
@@ -1905,7 +1963,7 @@ mod tests {
     /// tests/pipeline_tests.rs).
     #[test]
     fn trailing_json_after_first_value_rejected() {
-        const VALID: &str = r#"{ "version": 2, "defaults": { "action": "ask", "redirectPolicy": "no-redirects" }, "redirectPolicies": {}, "profiles": [] }"#;
+        const VALID: &str = r#"{ "version": 3, "defaults": { "action": "ask", "redirectPolicy": "no-redirects" }, "redirectPolicies": {}, "profiles": [] }"#;
         for (name, suffix) in [
             ("trailing second object", r#" {"x":1}"#),
             ("trailing scalar", " 42"),
@@ -1923,7 +1981,7 @@ mod tests {
         assert!(load_str(VALID).is_ok());
     }
 
-    /// Schema-required config-v2 root fields and `defaults` members must
+    /// Schema-required configuration root fields and `defaults` members must
     /// deserialize through the parse boundary (issue 44): omission is a
     /// schema error — "config invalid" — never a synthesized fail-open
     /// default. Only the genuinely optional `limits` root field and the
@@ -1932,7 +1990,7 @@ mod tests {
     fn required_config_fields_reject_omission_at_the_parse_boundary() {
         assert!(
             load_str(
-                r#"{ "version": 2, "defaults": { "action": "ask", "redirectPolicy": "no-redirects" }, "redirectPolicies": {}, "profiles": [] }"#,
+                r#"{ "version": 3, "defaults": { "action": "ask", "redirectPolicy": "no-redirects" }, "redirectPolicies": {}, "profiles": [] }"#,
             )
             .is_ok(),
             "the control with every required field present must load"
@@ -1940,27 +1998,27 @@ mod tests {
         for (name, config, missing) in [
             (
                 "omitted defaults",
-                r#"{ "version": 2, "redirectPolicies": {}, "profiles": [] }"#,
+                r#"{ "version": 3, "redirectPolicies": {}, "profiles": [] }"#,
                 "defaults",
             ),
             (
                 "omitted redirectPolicies",
-                r#"{ "version": 2, "defaults": { "action": "ask", "redirectPolicy": "no-redirects" }, "profiles": [] }"#,
+                r#"{ "version": 3, "defaults": { "action": "ask", "redirectPolicy": "no-redirects" }, "profiles": [] }"#,
                 "redirectPolicies",
             ),
             (
                 "omitted profiles",
-                r#"{ "version": 2, "defaults": { "action": "ask", "redirectPolicy": "no-redirects" }, "redirectPolicies": {} }"#,
+                r#"{ "version": 3, "defaults": { "action": "ask", "redirectPolicy": "no-redirects" }, "redirectPolicies": {} }"#,
                 "profiles",
             ),
             (
                 "omitted defaults.action",
-                r#"{ "version": 2, "defaults": { "redirectPolicy": "no-redirects" }, "redirectPolicies": {}, "profiles": [] }"#,
+                r#"{ "version": 3, "defaults": { "redirectPolicy": "no-redirects" }, "redirectPolicies": {}, "profiles": [] }"#,
                 "action",
             ),
             (
                 "omitted defaults.redirectPolicy",
-                r#"{ "version": 2, "defaults": { "action": "ask" }, "redirectPolicies": {}, "profiles": [] }"#,
+                r#"{ "version": 3, "defaults": { "action": "ask" }, "redirectPolicies": {}, "profiles": [] }"#,
                 "redirectPolicy",
             ),
             ("empty config", "{}", "version"),
@@ -1979,14 +2037,14 @@ mod tests {
         // `defaults.message`
         assert!(
             load_str(
-                r#"{ "version": 2, "defaults": { "action": "ask", "redirectPolicy": "no-redirects" }, "redirectPolicies": {}, "profiles": [] }"#,
+                r#"{ "version": 3, "defaults": { "action": "ask", "redirectPolicy": "no-redirects" }, "redirectPolicies": {}, "profiles": [] }"#,
             )
             .is_ok(),
             "absent limits keeps the engine-cap defaults"
         );
         assert!(
             load_str(
-                r#"{ "version": 2, "defaults": { "action": "ask", "redirectPolicy": "no-redirects", "message": "m" }, "redirectPolicies": {}, "profiles": [] }"#,
+                r#"{ "version": 3, "defaults": { "action": "ask", "redirectPolicy": "no-redirects", "message": "m" }, "redirectPolicies": {}, "profiles": [] }"#,
             )
             .is_ok(),
             "defaults.message stays optional"
@@ -2000,11 +2058,11 @@ mod tests {
         };
         assert!(e.contains("config invalid"), "{e}");
         let Err(e) = load_str(
-            r#"{ "version": 3, "defaults": { "action": "ask", "redirectPolicy": "no-redirects" }, "redirectPolicies": {}, "profiles": [] }"#,
+            r#"{ "version": 4, "defaults": { "action": "ask", "redirectPolicy": "no-redirects" }, "redirectPolicies": {}, "profiles": [] }"#,
         ) else {
             panic!("wrong version must reject");
         };
-        assert!(e.contains("version must be 2"), "{e}");
+        assert!(e.contains("version must be 3"), "{e}");
     }
 
     // ── Fixed option arity + option-value selectors (issue 32) ──────────────
@@ -2048,7 +2106,7 @@ mod tests {
         let blob = cargo_profile(name_spec, rename_spec, options_json);
         format!(
             r#"{{
-  "version": 2,
+  "version": 3,
   "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
   "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
   "profiles": [{blob}]
@@ -2077,7 +2135,7 @@ mod tests {
     fn sed_fact_config_facts(facts: &str) -> String {
         format!(
             r#"{{
-  "version": 2,
+  "version": 3,
   "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
   "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
   "profiles": [{{
@@ -2121,7 +2179,7 @@ mod tests {
     fn nested_probe_config(nested: &str) -> String {
         format!(
             r#"{{
-  "version": 2,
+  "version": 3,
   "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
   "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
   "profiles": [{{
@@ -2227,7 +2285,7 @@ mod tests {
     #[test]
     fn nested_part_test_requires_at_least_one_selector() {
         let ask_deny = r#"{
-  "version": 2,
+  "version": 3,
   "defaults": { "action": "ask", "redirectPolicy": "no-redirects" },
   "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
   "profiles": [{
@@ -2500,7 +2558,7 @@ mod tests {
         );
         // the same rule guards redirect-policy path roots
         let Err(err) = load_str(
-            r#"{ "version": 2,
+            r#"{ "version": 3,
   "defaults": { "action": "ask", "redirectPolicy": "no-redirects" },
   "redirectPolicies": { "p": { "redirects": { "all": [{ "sourceFd": "default", "operator": ">", "occurrence": "all", "target": { "kind": "literalPath" } }] },
     "paths": { "all": [{ "coordinate": { "redirect": { "operator": ">", "sourceFd": "default", "occurrence": "all" } }, "within": "/tmp//x" }] } } },
@@ -2520,7 +2578,7 @@ mod tests {
         let base = |option_lines: &str, ordinal: u32| {
             format!(
                 r#"{{
-  "version": 2,
+  "version": 3,
   "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
   "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
   "profiles": [{{
@@ -2564,7 +2622,7 @@ mod tests {
         let rule_config = |coordinate: &str| {
             format!(
                 r#"{{
-  "version": 2,
+  "version": 3,
   "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
   "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
   "profiles": [{{
@@ -2613,7 +2671,7 @@ mod tests {
         // the same closure applies to an allow rule's paths entries
         let allow_config = format!(
             r#"{{
-  "version": 2,
+  "version": 3,
   "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
   "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
   "profiles": [{{
@@ -2651,7 +2709,7 @@ mod tests {
     #[test]
     fn zero_occurrence_selector_rejected() {
         // ...in a pathSources optionValue coordinate
-        let bad_source = r#"{ "version": 2,
+        let bad_source = r#"{ "version": 3,
   "defaults": { "action": "ask", "redirectPolicy": "no-redirects" },
   "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
   "profiles": [{ "id": "cargo", "executables": ["cargo"],
@@ -2661,7 +2719,7 @@ mod tests {
         expect_invalid("optionValue occurrence 0", bad_source, "1-based");
         // ...in a redirect policy entry's occurrence (the untagged redirect
         // coverage arm reports a generic union failure, still fail-closed)
-        let bad_redirect = r#"{ "version": 2,
+        let bad_redirect = r#"{ "version": 3,
   "defaults": { "action": "ask", "redirectPolicy": "no-redirects" },
   "redirectPolicies": { "p": { "redirects": { "all": [{ "sourceFd": "default", "operator": ">", "occurrence": 0, "target": { "kind": "literalPath" } }] },
     "paths": { "all": [{ "coordinate": { "redirect": { "operator": ">", "sourceFd": "default", "occurrence": "all" } }, "within": "/tmp" }] } } },
@@ -2673,7 +2731,7 @@ mod tests {
         );
         // ...in an ask/deny RedirectTest's occurrence (match.redirects arm,
         // the same fail-closed parse rejection as every other occurrence arm)
-        let bad_test = r#"{ "version": 2,
+        let bad_test = r#"{ "version": 3,
   "defaults": { "action": "ask", "redirectPolicy": "no-redirects" },
   "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
   "profiles": [{ "id": "git", "executables": ["git"], "rules": [
@@ -2691,7 +2749,7 @@ mod tests {
         let rule = |occurrence: &str| {
             format!(
                 r#"{{
-  "version": 2,
+  "version": 3,
   "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
   "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
   "profiles": [{{ "id": "git", "executables": ["git"], "rules": [
@@ -2727,7 +2785,7 @@ mod tests {
                 .unwrap_or_default();
             format!(
                 r#"{{
-  "version": 2,
+  "version": 3,
   "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
   "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
   "profiles": [{{
@@ -2802,7 +2860,7 @@ mod tests {
             };
             format!(
                 r#"{{
-  "version": 2,
+  "version": 3,
   "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
   "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
   "profiles": [{{
@@ -2843,7 +2901,7 @@ mod tests {
         let source_config = |env_coordinate: &str| {
             format!(
                 r#"{{
-  "version": 2,
+  "version": 3,
   "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
   "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
   "profiles": [{{
@@ -2878,7 +2936,7 @@ mod tests {
         let alias_config = |alias_literal: &str| {
             format!(
                 r#"{{
-  "version": 2,
+  "version": 3,
   "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
   "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
   "profiles": [{{
@@ -2924,7 +2982,7 @@ mod tests {
         let arity_config = |arity: u32| {
             format!(
                 r#"{{
-  "version": 2,
+  "version": 3,
   "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
   "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
   "profiles": [{{
@@ -2963,7 +3021,7 @@ mod tests {
     fn path_policy_config(arm: &str, root: &str) -> String {
         format!(
             r#"{{
-  "version": 2,
+  "version": 3,
   "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
   "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
   "profiles": [{{
@@ -3238,7 +3296,7 @@ mod tests {
     #[test]
     fn sed_compatibility_table_rejects_unknown_option() {
         let bad = r#"{
-  "version": 2,
+  "version": 3,
   "defaults": { "action": "ask", "redirectPolicy": "no-redirects" },
   "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
   "profiles": [{
@@ -3252,7 +3310,7 @@ mod tests {
         expect_invalid("non-modeled sed option", bad, "compatibility table");
         // the read-only table entries themselves are recognized canonical ids
         let good = r#"{
-  "version": 2,
+  "version": 3,
   "defaults": { "action": "ask", "redirectPolicy": "no-redirects" },
   "redirectPolicies": { "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } } },
   "profiles": [{
@@ -3280,7 +3338,7 @@ mod tests {
     fn sed_fact_coordinate_config(coordinate: &str, paths: &str) -> String {
         format!(
             r#"{{
-  "version": 2,
+  "version": 3,
   "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
   "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
   "profiles": [{{
@@ -3380,7 +3438,7 @@ mod tests {
     fn sed_fact_config_environment(env: &str) -> String {
         format!(
             r#"{{
-  "version": 2,
+  "version": 3,
   "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
   "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
   "profiles": [{{
@@ -3464,7 +3522,7 @@ mod tests {
         let deny_config = |env: &str| {
             format!(
                 r#"{{
-  "version": 2,
+  "version": 3,
   "defaults": {{ "action": "ask", "redirectPolicy": "no-redirects" }},
   "redirectPolicies": {{ "no-redirects": {{ "redirects": {{ "none": true }}, "paths": {{ "none": true }} }} }},
   "profiles": [{{

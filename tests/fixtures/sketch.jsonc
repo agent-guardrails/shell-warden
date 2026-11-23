@@ -1,7 +1,7 @@
 {
   // Example shell-warden config v2 (design/shell-warden-config-v2.md):
   // monotonic command profiles; allow is a typed-evidence coverage proof.
-  "version": 2,
+  "version": 3,
   "defaults": {
     "action": "ask",
     "message": "No approved command profile matched.",

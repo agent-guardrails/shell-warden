@@ -1,0 +1,112 @@
+{
+  "fixtures": [
+    {
+      "path": "valid/argument-home.json",
+      "valid": true
+    },
+    {
+      "path": "valid/empty-contexts.json",
+      "valid": true
+    },
+    {
+      "path": "valid/no-grant.json",
+      "valid": true
+    },
+    {
+      "path": "valid/independent-contexts.json",
+      "valid": true
+    },
+    {
+      "path": "valid/classifier-parameter.json",
+      "valid": true
+    },
+    {
+      "path": "valid/classifier-complete.json",
+      "valid": true
+    },
+    {
+      "path": "valid/selector-count-boundary.json",
+      "valid": true
+    },
+    {
+      "path": "invalid/retired-v2.json",
+      "valid": false
+    },
+    {
+      "path": "invalid/duplicate-name.json",
+      "valid": false
+    },
+    {
+      "path": "invalid/wildcard.json",
+      "valid": false
+    },
+    {
+      "path": "invalid/non-identifier.json",
+      "valid": false
+    },
+    {
+      "path": "invalid/unicode-identifier.json",
+      "valid": false
+    },
+    {
+      "path": "invalid/name-over-bound.json",
+      "valid": false
+    },
+    {
+      "path": "invalid/selector-over-bound.json",
+      "valid": false
+    },
+    {
+      "path": "invalid/configured-runtime-value.json",
+      "valid": false
+    },
+    {
+      "path": "invalid/unknown-context.json",
+      "valid": false
+    },
+    {
+      "path": "invalid/null-grants.json",
+      "valid": false
+    },
+    {
+      "path": "invalid/null-classification.json",
+      "valid": false
+    },
+    {
+      "path": "invalid/ask-grant.json",
+      "valid": false
+    },
+    {
+      "path": "invalid/deny-grant.json",
+      "valid": false
+    },
+    {
+      "path": "invalid/path-any-false.json",
+      "valid": false
+    },
+    {
+      "path": "invalid/mixed-path-selectors.json",
+      "valid": false
+    },
+    {
+      "path": "invalid/null-path-any.json",
+      "valid": false
+    },
+    {
+      "path": "valid/parameter-redirect-write.json",
+      "valid": true
+    },
+    {
+      "path": "valid/parameter-redirect-append.json",
+      "valid": true
+    },
+    {
+      "path": "invalid/parameter-redirect-input.json",
+      "valid": false
+    },
+    {
+      "path": "invalid/parameter-redirect-fd.json",
+      "valid": false
+    }
+  ]
+}

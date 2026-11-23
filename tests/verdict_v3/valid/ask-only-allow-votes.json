@@ -1,0 +1,35 @@
+{
+  "protocol": "shell-warden.verdict.v3",
+  "result": {
+    "invocationId": "fixture:ask-only-allow-votes",
+    "verdict": "ask",
+    "commands": [
+      {
+        "index": 0,
+        "verdict": "ask",
+        "classification": "static",
+        "match": "argv",
+        "facts": {
+          "evidence": "complete",
+          "reasons": [
+            "complete"
+          ],
+          "selectedProfiles": [
+            "base"
+          ],
+          "matched": [
+            "policy/allow"
+          ],
+          "qualified": [
+            "policy/allow"
+          ],
+          "rejected": [],
+          "votes": [
+            "allow:policy/allow"
+          ],
+          "uncertain": []
+        }
+      }
+    ]
+  }
+}

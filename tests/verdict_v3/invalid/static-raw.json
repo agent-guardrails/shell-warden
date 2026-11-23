@@ -1,0 +1,15 @@
+{
+  "protocol": "shell-warden.verdict.v3",
+  "result": {
+    "invocationId": "fixture:static-raw",
+    "verdict": "ask",
+    "commands": [
+      {
+        "index": 0,
+        "verdict": "ask",
+        "classification": "static",
+        "match": "raw"
+      }
+    ]
+  }
+}

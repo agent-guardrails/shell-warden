@@ -27,7 +27,7 @@ fn run() -> i32 {
             "--help" | "-h" => {
                 println!(
                     "Usage: shell-warden [--config FILE]...\n\
-                     Read a letter from stdin and write a verdict v2 envelope.\n\n\
+                     Read a letter from stdin and write a {protocol} envelope.\n\n\
                      --config FILE  Repeat to assemble disjoint profiles in argument order.\n\
                                     No override precedence: conflicting profiles/executables fail.\n\
                                     Defaults must match; shared redirect policies must be identical.\n\
@@ -36,7 +36,8 @@ fn run() -> i32 {
                                     Explicit files suppress the XDG/HOME default config path.\n\
                                     Any invalid file rejects the whole set (exit 2, empty stdout).\n\
                      --version      Print version.\n\
-                     --help, -h     Print help."
+                     --help, -h     Print help.",
+                    protocol = checker::verdict::PROTOCOL,
                 );
                 return 0;
             }
@@ -95,14 +96,14 @@ fn run() -> i32 {
         }
     };
 
-    // verdict out, exactly one JSON value then EOF (02 §2.7): the closed v2
+    // verdict out, exactly one JSON value then EOF (02 §2.7): the closed v3
     // envelope, self-validated per 08 §8.9 before any byte reaches stdout.
     // A serialization or validation failure is a checker anomaly — exit 1,
     // stdout stays empty (fail closed; the hook degrades via onCheckerError).
     let verdict = checker::pipeline::evaluate(&config, &letter);
     let envelope = checker::verdict::VerdictEnvelope::new(verdict);
     if let Err(e) = envelope.validate_against(&letter.invocation.id, letter.commands.len()) {
-        eprintln!("verdict v2 self-validation failed: {e}");
+        eprintln!("{} self-validation failed: {e}", checker::verdict::PROTOCOL);
         return 1;
     }
     let out = match envelope.to_wire() {

@@ -2,7 +2,7 @@
   // Example shell-warden policy, config v2 (design/shell-warden-config-v2.md):
   // per-executable profiles; allow is a typing-evidence coverage proof.
   // spawn example: shell-warden --config <this file> (letter on stdin).
-  "version": 2,
+  "version": 3,
   "defaults": {
     "action": "ask",
     "message": "No approved command profile matched.",
