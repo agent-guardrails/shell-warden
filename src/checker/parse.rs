@@ -216,7 +216,9 @@ fn scan_chars(_raw: &str, chars: &[char]) -> Option<ScanResult> {
 
     while i < n {
         let c = chars[i];
-        if cur_source_start.is_none() && !c.is_whitespace() {
+        // Keep source aligned with the word scanner: other whitespace is
+        // literal word content, not a separator that may be skipped.
+        if cur_source_start.is_none() && !matches!(c, ' ' | '\t' | '\r' | '\n') {
             cur_source_start = Some(i);
         }
         match c {
@@ -820,6 +822,35 @@ mod tests {
         assert_eq!(result.segments[0].items.len(), 1, "{raw}");
         match &result.segments[0].items[0] {
             Item::Tok(token) => token.clone(),
+        }
+    }
+
+    #[test]
+    fn source_keeps_non_separator_whitespace_at_the_start_of_a_word() {
+        for leading in [
+            '\u{a0}', '\u{2003}', '\u{2028}', '\u{202f}', '\u{3000}', '\u{b}', '\u{c}',
+        ] {
+            for assignment in ["CACHE=/tmp", "CACHE=$HOME", "CACHE=\"$HOME\""] {
+                let source = format!("{leading}{assignment}");
+                let token = word(&source);
+                assert_eq!(token.source, source);
+                assert!(token.text.starts_with(leading), "{source:?}");
+                assert!(token.assignment_parameter().is_none(), "{source:?}");
+            }
+        }
+        for separator in [' ', '\t', '\r', '\n'] {
+            let result = scan(&format!("{separator}CACHE=$HOME"));
+            let token = result
+                .segments
+                .iter()
+                .flat_map(|segment| &segment.items)
+                .map(|item| match item {
+                    Item::Tok(token) => token,
+                })
+                .next()
+                .unwrap();
+            assert_eq!(token.source, "CACHE=$HOME");
+            assert_eq!(token.assignment_parameter().unwrap().0, "CACHE");
         }
     }
 
