@@ -169,8 +169,8 @@ pub(super) fn command_verdict(config: &Config, cmd: &Command) -> (CommandVerdict
     if graph.overflow {
         // evidence-items cap: no rule runs, no allow ever wins; everything
         // reduces to ask on non-complete evidence (fail-closed)
-        for i in 0..graph.parts.len() {
-            if dead_part(&graph.parts[i]) {
+        for (i, part) in graph.parts.iter().enumerate() {
+            if dead_part(part) {
                 continue;
             }
             reduced.insert(
