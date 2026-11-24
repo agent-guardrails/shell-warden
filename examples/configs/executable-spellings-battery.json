@@ -1,0 +1,19 @@
+{
+  "cases": [
+    { "raw": "tool --help", "expect": "allow" },
+    { "raw": "/opt/tools/tool --help", "expect": "allow" },
+    { "raw": "'/opt/tools/tool' --help", "expect": "allow" },
+    { "raw": "/tmp/tool --help", "expect": "ask" },
+    { "raw": "./tool --help", "expect": "ask" },
+    { "raw": "/opt/tools/./tool --help", "expect": "ask" },
+    { "raw": "tool dangerous", "expect": "deny" },
+    { "raw": "/opt/tools/tool dangerous", "expect": "deny" },
+    { "raw": "sh -c 'tool --help'", "expect": "allow" },
+    { "raw": "/bin/sh -c '/opt/tools/tool --help'", "expect": "allow" },
+    { "raw": "/tmp/sh -c 'tool --help'", "expect": "ask" },
+    { "raw": "/tmp/sh -c 'tool dangerous'", "expect": "deny" },
+    { "raw": "sudo tool --help", "expect": "ask" },
+    { "raw": "/bin/sh -c 'tool --help' > /tmp/output", "expect": "ask" },
+    { "raw": "X=1 /bin/sh -c 'tool --help'", "expect": "ask" }
+  ]
+}

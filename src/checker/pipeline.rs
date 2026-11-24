@@ -125,9 +125,6 @@ pub(super) fn command_verdict(config: &Config, cmd: &Command) -> (CommandVerdict
     // analyzer facts (only for parts selecting a profile with an analyzer)
     if !graph.overflow {
         for (part, pi) in graph.parts.iter_mut().zip(selections.iter()) {
-            if graph.collapsed.contains(&part.id) {
-                continue;
-            }
             let Some(pi) = *pi else { continue };
             let prof = &config.profiles()[pi];
             let Some(analyzer) = prof.analyzer else {
@@ -173,7 +170,7 @@ pub(super) fn command_verdict(config: &Config, cmd: &Command) -> (CommandVerdict
         // evidence-items cap: no rule runs, no allow ever wins; everything
         // reduces to ask on non-complete evidence (fail-closed)
         for i in 0..graph.parts.len() {
-            if dead_part(&graph.parts[i]) || graph.collapsed.contains(&i) {
+            if dead_part(&graph.parts[i]) {
                 continue;
             }
             reduced.insert(
@@ -186,10 +183,7 @@ pub(super) fn command_verdict(config: &Config, cmd: &Command) -> (CommandVerdict
             outcomes.push((i, PartOutcome::default_ask()));
         }
     } else {
-        for (part, pi) in graph.parts.iter().zip(selections.iter()) {
-            if graph.collapsed.contains(&part.id) {
-                continue;
-            }
+        for pi in &selections {
             if let Some(pi) = *pi {
                 diag.selected_profiles
                     .push(config.profiles()[pi].id.clone());
@@ -197,7 +191,7 @@ pub(super) fn command_verdict(config: &Config, cmd: &Command) -> (CommandVerdict
         }
         for i in (0..graph.parts.len()).rev() {
             let part = &graph.parts[i];
-            if dead_part(part) || graph.collapsed.contains(&i) {
+            if dead_part(part) {
                 continue;
             }
             let Some(pi) = selections[i] else {
@@ -226,7 +220,7 @@ pub(super) fn command_verdict(config: &Config, cmd: &Command) -> (CommandVerdict
             let unmodeled_sed_operand = graph.parts[i]
                 .argv
                 .first()
-                .is_some_and(|head| head.text.rsplit('/').next() == Some("sed"))
+                .is_some_and(|head| super::executable::basename(&head.text) == Some("sed"))
                 && prof.analyzer != Some(AnalyzerId::SedV1)
                 && parsed.positionals.iter().any(|a| !a.resolvable);
             let state = if matches!(part.state, EvidenceState::Invalid(_)) {
@@ -301,7 +295,7 @@ pub(super) fn command_verdict(config: &Config, cmd: &Command) -> (CommandVerdict
     // opaque → opaque/raw, invalid → invalid/raw. Invalid dominates opaque,
     // which dominates complete (08 §8.6). A graph with no participating part
     // but recorded graph reasons (e.g. the empty-command cause) is invalid.
-    let participating = |i: usize| !graph.collapsed.contains(&i) && !dead_part(&graph.parts[i]);
+    let participating = |i: usize| !dead_part(&graph.parts[i]);
     let has_invalid = graph.overflow
         || graph
             .parts
@@ -731,7 +725,7 @@ fn relabel_xargs_children(config: &Config, graph: &mut CommandGraph) {
         if part
             .argv
             .first()
-            .map(|t| t.text.as_str() == "xargs" && t.resolvable)
+            .map(|t| t.resolvable && super::executable::basename(&t.text) == Some("xargs"))
             .unwrap_or(false)
         {
             targets.push(i);
@@ -760,7 +754,7 @@ fn nested_results(
         .parts
         .iter()
         .filter(|c| c.parent == Some(i))
-        .filter(|c| !dead_part(c) && !graph.collapsed.contains(&c.id))
+        .filter(|c| !dead_part(c))
         .map(|c| {
             let profile_id = selections
                 .get(c.id)

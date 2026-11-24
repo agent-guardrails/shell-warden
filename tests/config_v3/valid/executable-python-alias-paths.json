@@ -1,0 +1,29 @@
+{
+  "version": 3,
+  "defaults": {
+    "action": "ask",
+    "redirectPolicy": "none"
+  },
+  "redirectPolicies": {
+    "none": {
+      "redirects": {
+        "none": true
+      },
+      "paths": {
+        "none": true
+      }
+    }
+  },
+  "profiles": [
+    {
+      "id": "enrollment",
+      "executables": [
+        "/opt/python",
+        "/usr/bin/python3"
+      ],
+      "options": {},
+      "analyzer": "generic-v1",
+      "rules": []
+    }
+  ]
+}

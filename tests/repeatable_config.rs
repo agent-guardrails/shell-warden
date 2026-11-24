@@ -125,6 +125,60 @@ fn conflict(files: &Files, a: &Value, b: &Value, expected: &str) {
 }
 
 #[test]
+fn explicit_installation_spellings_cli_selection_conflicts_and_atomic_failures() {
+    // https://github.com/agent-guardrails/shell-warden/issues/73
+    let f = Files::new();
+    let mut p = profile("arbitrary-id", "tool");
+    p["executables"] = json!(["tool", "/opt/tool", "/home/user/tool"]);
+    p["rules"].as_array_mut().unwrap().push(json!({
+        "id": "typed-deny", "action": "deny",
+        "match": {"arguments": {"containsAny": ["danger"]}}
+    }));
+    let a = policy(vec![p]);
+    let b = policy(vec![profile("other-installation", "/other/tool")]);
+    let first = f.write("first.json", &a);
+    let second = f.write("second.json", &b);
+    for paths in [[&first, &second], [&second, &first]] {
+        for (raw, expected) in [
+            ("tool", "allow"),
+            ("/opt/tool", "allow"),
+            ("'/home/user/tool'", "allow"),
+            ("/other/tool", "allow"),
+            ("/tmp/tool", "ask"),
+            ("./tool", "ask"),
+            ("/opt/./tool", "ask"),
+            ("tool danger", "deny"),
+            ("/opt/tool danger", "deny"),
+        ] {
+            let mut command = f.cli();
+            command
+                .arg("--config")
+                .arg(paths[0])
+                .arg("--config")
+                .arg(paths[1]);
+            let v = verdict(invoke(command, raw));
+            assert_eq!(v["result"]["verdict"], expected, "{raw}: {v}");
+        }
+    }
+    conflict(
+        &f,
+        &a,
+        &policy(vec![profile("duplicate", "/opt/tool")]),
+        "executable",
+    );
+    for spelling in ["./tool", "/opt//tool", "/opt/../tool", "/tool/", "to\nol"] {
+        let invalid = policy(vec![profile("bad", spelling)]);
+        let bad = f.write("invalid.json", &invalid);
+        for paths in [[&first, &bad], [&bad, &first]] {
+            assert!(
+                config_error(f.cli(), &[paths[0], paths[1]])
+                    .contains("invalid executable spelling")
+            );
+        }
+    }
+}
+
+#[test]
 fn disjoint_profiles_work_in_both_orders_and_keep_local_rule_and_hint_ids() {
     let f = Files::new();
     let first_policy = policy(vec![profile("first", "first")]);

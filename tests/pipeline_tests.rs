@@ -1158,7 +1158,7 @@ fn invalid_classification_rule_denies_command_substitution_depth_33() {
 }
 
 #[test]
-fn depth_limit_sudo_32_preserves_allow() {
+fn depth_limit_sudo_32_requires_parent_profiles() {
     // Given
     let raw = repeated_sudo_wrappers(32, "git status");
 
@@ -1166,7 +1166,8 @@ fn depth_limit_sudo_32_preserves_allow() {
     let verdict = run(SKETCH, &raw);
 
     // Then
-    assert_eq!(verdict.verdict, VerdictKind::Allow);
+    assert_eq!(verdict.verdict, VerdictKind::Ask);
+    assert_eq!(run_facts(&verdict)["evidence"], "complete");
 }
 
 #[test]
@@ -1182,7 +1183,7 @@ fn depth_limit_sudo_33_is_invalid_raw_ask() {
 }
 
 #[test]
-fn depth_limit_timeout_32_preserves_allow() {
+fn depth_limit_timeout_32_requires_parent_profiles() {
     // Given
     let raw = repeated_timeout_wrappers(32, "git status");
 
@@ -1190,7 +1191,8 @@ fn depth_limit_timeout_32_preserves_allow() {
     let verdict = run(SKETCH, &raw);
 
     // Then
-    assert_eq!(verdict.verdict, VerdictKind::Allow);
+    assert_eq!(verdict.verdict, VerdictKind::Ask);
+    assert_eq!(run_facts(&verdict)["evidence"], "complete");
 }
 
 #[test]
@@ -1287,9 +1289,9 @@ fn command_substitution_children_reduce() {
 }
 
 #[test]
-fn sudo_unwraps_to_child_profile() {
+fn sudo_child_allow_does_not_authorize_parent() {
     let v = run(SKETCH, "sudo git status");
-    assert_eq!(v.verdict, VerdictKind::Allow);
+    assert_eq!(v.verdict, VerdictKind::Ask);
 }
 
 // ── Monotonicity + order-independence properties ────────────────────────────

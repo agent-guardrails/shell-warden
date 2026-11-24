@@ -57,10 +57,8 @@ impl Config {
     }
 }
 
-/// Implementation-owned, versioned lexical alias catalog (design §Selected
-/// architecture): a multi-spelling `executables` list equals one complete
-/// entry; the equivalence asserts identical option grammar + analyzer
-/// behavior — NOT resolved binary identity. Singleton lists need no entry.
+/// Complete different-name basename groups. Same-name installation spellings
+/// need no catalog entry; neither case asserts resolved binary identity.
 pub const LEXICAL_ALIAS_CATALOG: &[&[&str]] = &[&["node", "nodejs"], &["python", "python3"]];
 
 // ── Path helpers (v1 carry-over) ────────────────────────────────────────────
@@ -422,8 +420,11 @@ fn strip_jsonc(text: &str) -> Result<String, String> {
             } else if c == b'"' {
                 in_string = false;
             }
-            out.push(c as char);
-            i += 1;
+            // Preserve decoded UTF-8 spellings byte-for-byte; casting each
+            // byte to char corrupts literal Unicode inside JSON strings.
+            let ch = text[i..].chars().next().ok_or("invalid utf-8")?;
+            out.push(ch);
+            i += ch.len_utf8();
             continue;
         }
         match c {
@@ -914,31 +915,55 @@ fn validate_profile(
             profile.id
         ));
     }
-    if profile.executables.len() > 1 {
+    let mut basenames = std::collections::BTreeSet::new();
+    for spelling in &profile.executables {
+        let Some(name) = super::executable::basename(spelling) else {
+            let preview: String = spelling.escape_debug().take(128).collect();
+            return Err(format!(
+                "profile \"{}\": invalid executable spelling \"{preview}\": expected a bare name \
+                 or normalized absolute POSIX path, at most 4096 UTF-8 bytes, without ASCII controls",
+                profile.id
+            ));
+        };
+        // export models a shell builtin, never an external executable path,
+        // even when a profile requests generic analysis.
+        if name == "export" && spelling != "export" {
+            return Err(format!(
+                "profile \"{}\": export is a bare-only builtin",
+                profile.id
+            ));
+        }
+        let compatible = match profile.analyzer {
+            None | Some(AnalyzerId::GenericV1) => true,
+            Some(AnalyzerId::SedV1) => name == "sed",
+            Some(AnalyzerId::XargsV1) => name == "xargs",
+            Some(AnalyzerId::ExportV1) => spelling == "export",
+        };
+        if !compatible {
+            return Err(format!(
+                "profile \"{}\": executable basename \"{name}\" is incompatible with analyzer {}",
+                profile.id,
+                profile.analyzer.unwrap().id()
+            ));
+        }
+        basenames.insert(name);
+    }
+    if basenames.len() > 1 {
         let in_catalog = LEXICAL_ALIAS_CATALOG.iter().any(|entry| {
-            let mut e: Vec<&str> = entry.to_vec();
-            e.sort_unstable();
-            e.as_slice()
-                == uniq
-                    .iter()
-                    .map(|s| s.as_str())
-                    .collect::<Vec<_>>()
-                    .as_slice()
+            entry
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+                == basenames
         });
         if !in_catalog {
             return Err(format!(
-                "profile \"{}\": multi-spelling executables {:?} must equal one lexical alias catalog entry",
-                profile.id, profile.executables
+                "profile \"{}\": executable basenames must be a singleton or equal one lexical alias catalog entry",
+                profile.id
             ));
         }
     }
     for alias in &profile.executables {
-        if alias.is_empty() {
-            return Err(format!(
-                "profile \"{}\": empty executable alias",
-                profile.id
-            ));
-        }
         if let Some(other) = seen_exec.get(alias) {
             return Err(format!(
                 "profile \"{}\": executable alias \"{alias}\" already owned by profile \"{other}\"",

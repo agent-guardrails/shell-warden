@@ -1,0 +1,28 @@
+{
+  "version": 3,
+  "defaults": {
+    "action": "ask",
+    "redirectPolicy": "none"
+  },
+  "redirectPolicies": {
+    "none": {
+      "redirects": {
+        "none": true
+      },
+      "paths": {
+        "none": true
+      }
+    }
+  },
+  "profiles": [
+    {
+      "id": "enrollment",
+      "executables": [
+        "tool"
+      ],
+      "options": {},
+      "analyzer": "xargs-v1",
+      "rules": []
+    }
+  ]
+}
