@@ -1,6 +1,27 @@
 # Release notes
 
-## Unreleased — executable spellings and wrapper coverage
+## 0.6.0 — configuration and verdict v3
+
+Release tracking: https://github.com/agent-guardrails/shell-warden/issues/78
+Companion hook: https://github.com/agent-guardrails/opencode-shell-warden-hook/releases/tag/v0.4.0
+
+### Coordinated upgrade required
+
+- **Breaking:** only configuration `version: 3` and
+  `shell-warden.verdict.v3` are supported. Upgrade checker and hook together;
+  older configurations are rejected and mixed verdict versions fail closed.
+- Contextual parameter permissions independently authorize named variables in
+  arguments, redirect targets, and assignment values. They authorize any runtime
+  value, not a verified path or environment value; complete coverage is still
+  required. Review `complete` and `opaque` classification restrictions when
+  migrating. See https://github.com/agent-guardrails/docs/blob/main/spec/shell-warden/12-contextual-parameters.md.
+- Repeated `--config` assembles independently valid, disjoint policies without
+  override precedence. Conflicts reject the entire set; limits use minima.
+- Parsing and matching fixes preserve nested executable evidence, invalid
+  classifications, source whitespace, export fact order, deny dominance, and
+  decisive three-valued predicate results.
+
+### Executable spellings and wrapper coverage
 
 Tracking: https://github.com/agent-guardrails/shell-warden/issues/73
 Contract synchronization: https://github.com/agent-guardrails/docs/issues/51
@@ -32,6 +53,21 @@ shipped on main under ADR 0026. It preserves dynamic-code blocking, restrictive
 uncertainty floors, and unsupported wrapper forms, including `env` assignments
 and extra shell operands. Historical v2 artifacts remain unchanged.
 
-Engine and normative schema/spec/fixture changes are coordinated; neither side
-alone completes the rollout. No configuration-version or verdict-envelope change
-is introduced. The checker never executes the represented commands.
+The executable-spelling change itself does not introduce another configuration
+version or verdict envelope beyond v3. The checker never executes the represented
+commands.
+
+### Open follow-up work
+
+This release contains merged mainline changes only. It does not include the
+unmerged Bash startup/script-file work
+(https://github.com/agent-guardrails/shell-warden/issues/74), output-budget fixes
+(https://github.com/agent-guardrails/shell-warden/issues/59 and
+https://github.com/agent-guardrails/shell-warden/issues/60), diagnostic vocabulary
+work (https://github.com/agent-guardrails/shell-warden/issues/61), or the earlier
+predicate/ordinal follow-ups
+(https://github.com/agent-guardrails/shell-warden/issues/53,
+https://github.com/agent-guardrails/shell-warden/issues/54, and
+https://github.com/agent-guardrails/shell-warden/issues/55).
+These open reports are not claims that each historical reproducer still affects
+v3. Explicit script-file support is not advertised by this release.

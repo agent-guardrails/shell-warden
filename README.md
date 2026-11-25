@@ -27,6 +27,20 @@ no long-lived process.
 
 ## Usage
 
+### Install and upgrade 0.6.0
+
+Download the archive for your platform and `checksums.txt` from
+[v0.6.0](https://github.com/agent-guardrails/shell-warden/releases/tag/v0.6.0).
+Verify its SHA-256 against that file before extracting the top-level
+`shell-warden` binary. Archives cover macOS/Linux, arm64/amd64.
+
+Pair this release with
+[@agent-guardrails/opencode-shell-warden-hook 0.4.0](https://github.com/agent-guardrails/opencode-shell-warden-hook/releases/tag/v0.4.0).
+Migrate policies to configuration v3 and review the
+[breaking changes](CHANGELOG.md) before activating either component. There is no
+automatic migration or v1/v2 compatibility mode. A Homebrew tap may still select
+an older release; verify its version rather than assuming it installs this pair.
+
 ```
 shell-warden [--config FILE]...
 # letter JSON (schemas/shell-warden.letter.v1.schema.json) on stdin,
