@@ -83,7 +83,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: agent-guardrails/docs
-          ref: 63d17f20f9ff3108d3dc081bedb76ee3e302bcd0
+          ref: 144d9c2c51cdcd9634c2d6bf0bb04c2f963ce0ec
           path: contract-docs
           persist-credentials: false
       - name: Install Rust toolchain (stable)
@@ -100,10 +100,22 @@ jobs:
           node contract-docs/scripts/generate-shell-warden-v3.mjs --check
           --mirror=${{ github.workspace }}/tests/verdict_v3
           --config-mirror=${{ github.workspace }}/tests/config_v3
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Verify active structural grammar snapshot
+        run: >-
+          python3 contract-docs/scripts/check-shell-warden-config-v2-drift.py
+          --grammar-file src/checker/grammar.rs
+          --snapshot contract-docs/schemas/shell-warden.config.v3.grammar.snapshot
       - name: Run example-policy verdict battery
         env:
           SHELL_WARDEN_BIN: ${{ github.workspace }}/target/release/shell-warden
         run: node examples/configs/verdict-battery.cjs --config examples/configs/shell-warden.example.jsonc --battery examples/configs/example-battery.json
+      - name: Run executable-spelling and wrapper battery
+        env:
+          SHELL_WARDEN_BIN: ${{ github.workspace }}/target/release/shell-warden
+        run: node examples/configs/verdict-battery.cjs --config examples/configs/executable-spellings.jsonc --battery examples/configs/executable-spellings-battery.json
       - name: Run config v3 release conformance battery
         env:
           SHELL_WARDEN_BIN: ${{ github.workspace }}/target/release/shell-warden

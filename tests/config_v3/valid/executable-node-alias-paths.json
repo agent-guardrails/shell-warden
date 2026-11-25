@@ -1,0 +1,30 @@
+{
+  "version": 3,
+  "defaults": {
+    "action": "ask",
+    "redirectPolicy": "none"
+  },
+  "redirectPolicies": {
+    "none": {
+      "redirects": {
+        "none": true
+      },
+      "paths": {
+        "none": true
+      }
+    }
+  },
+  "profiles": [
+    {
+      "id": "enrollment",
+      "executables": [
+        "node",
+        "/opt/node",
+        "/usr/bin/nodejs"
+      ],
+      "options": {},
+      "analyzer": "generic-v1",
+      "rules": []
+    }
+  ]
+}

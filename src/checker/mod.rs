@@ -1,6 +1,7 @@
 pub mod analyzers;
 pub mod config;
 pub mod evidence;
+pub mod executable;
 pub mod grammar;
 pub mod letter;
 pub mod matcher;

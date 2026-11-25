@@ -86,8 +86,8 @@ const config = {
     "no-redirects": { redirects: { none: true }, paths: { none: true } },
   },
   profiles: [
-    // readers: one profile per executable (v2 hard rule: a multi-exe profile
-    // list must equal an implementation-owned alias catalog)
+    // Readers have unrelated basenames and therefore separate profiles.
+    // Each profile may also explicitly enroll normalized same-name paths.
     ...readers.map((exe) =>
       profile("r-" + exe, [exe], {
         long: { aliases: ["-l", "-la", "-lah", "-lh", "-lt", "-lr"], arity: 0 },

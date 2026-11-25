@@ -80,6 +80,19 @@ changed. Upgrade checker and hook together: retired versions fail closed, with n
 fallback. A `complete` classification filter remains literal-only; omit it or use
 `parameter` when configuring the new gates and coverage.
 
+## Executable spellings and wrappers
+
+Executable lists enroll exact decoded head spellings, for example
+`["tool", "/opt/tools/tool"]`, never every path with that basename.
+Bare names are optional. Different-name lists must form one complete catalog
+group (`node`/`nodejs` or `python`/`python3`). Relative/irregular configured
+spellings and incompatible specialized analyzers are configuration errors.
+Every executable wrapper now needs its own profile and full coverage as well
+as an independently permitted child. Raw predicates retain original source;
+review them when adding a spelling rather than assuming typed-deny equivalence.
+See [`examples/configs/executable-spellings.jsonc`](examples/configs/executable-spellings.jsonc)
+and [`CHANGELOG.md`](CHANGELOG.md) for the breaking contract changes.
+
 ## Tests
 
 `cargo test` runs unit + scenario-golden suites; `cargo fmt --check` and

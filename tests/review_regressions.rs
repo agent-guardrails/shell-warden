@@ -205,7 +205,6 @@ fn invalid_shell_wrappers_keep_invalid_owners_and_known_script_children() {
         assert_eq!(command["classification"], "invalid", "{raw}");
         let graph = extract(&raw);
         assert!(matches!(graph.parts[0].state, EvidenceState::Invalid(_)));
-        assert!(!graph.collapsed.contains(&0));
         assert!(
             graph.parts.iter().any(|part| {
                 part.parent == Some(0) && part.argv.first().is_some_and(|head| head.text == "git")
@@ -281,7 +280,10 @@ fn unsupported_env_assignments_keep_known_children_without_allowing_wrappers() {
     }
     let raw = "env CACHE=\"$HOME\" git status";
     assert_eq!(result(&config, raw)["result"]["verdict"], "ask");
-    assert!(extract(raw).collapsed.is_empty());
+    assert!(matches!(
+        extract(raw).parts[0].state,
+        shell_warden::checker::evidence::EvidenceState::Opaque(_)
+    ));
     let raw = "env \"$HOME\" git push --force origin main";
     assert_eq!(result(&config, raw)["result"]["verdict"], "ask");
     assert!(!extract(raw).parts.iter().any(|part| {
@@ -307,11 +309,17 @@ fn unsupported_nice_priority_keeps_known_children_without_allowing_wrappers() {
         "nice -n \"$HOME\"",
     ] {
         assert_eq!(result(&config, raw)["result"]["verdict"], "ask", "{raw}");
-        assert!(!extract(raw).collapsed.contains(&0), "{raw}");
+        assert!(
+            matches!(
+                extract(raw).parts[0].state,
+                shell_warden::checker::evidence::EvidenceState::Opaque(_)
+            ),
+            "{raw}"
+        );
     }
     assert_eq!(
         result(&config, "nice -n 0 git status")["result"]["verdict"],
-        "allow"
+        "ask"
     );
 }
 

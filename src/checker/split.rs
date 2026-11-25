@@ -6,7 +6,7 @@
 // The closed relation enum (grammar::Relation):
 //   chain — operator-bounded executable segments;
 //   pipeline — segment following `|`;
-//   wrapper — transparent interpreter unwrap (bash/sh -c, sudo, nohup, nice,
+//   wrapper — retained interpreter and command children (bash/sh -c, sudo, nohup, nice,
 //             timeout, env);
 //   commandSubstitution — inner text of `$(…)`, backticks and process
 //             substitution, split recursively;
@@ -27,14 +27,12 @@ pub fn extract(raw: &str) -> CommandEvidence {
             parts: Vec::new(),
             reasons: vec![reason::EMPTY_COMMAND],
             overflow: false,
-            collapsed: Vec::new(),
         };
     }
     let mut graph = CommandEvidence {
         parts: Vec::new(),
         reasons: Vec::new(),
         overflow: false,
-        collapsed: Vec::new(),
     };
     extract_raw(raw, 0, Relation::Chain, None, &mut graph);
     graph
@@ -129,7 +127,7 @@ fn extract_raw(
             );
         }
 
-        // wrapper unwrap turns transparent interpreters into child parts
+        // Extract command operands while retaining the participating parent.
         let part = graph.parts[part_id].clone();
         unwrap_wrapper(part, part_id, depth, graph);
     }
@@ -241,41 +239,42 @@ fn observations_state(
         || assigns.iter().any(|a| a.parameter.is_some())
         || redirects.iter().any(|r| r.parameter.is_some());
     // Unknown wrapper/interpreter operands are not ordinary positional values.
-    // Basenames only broaden this blocking check, not transparent unwrapping.
+    // Structural names never select profiles or grant parameter permissions.
     let wrapper = parameter
         && argv
             .first()
-            .is_some_and(|a| match a.text.rsplit('/').next().unwrap_or(&a.text) {
-                "bash" | "sh" => argv.iter().skip(1).any(|a| !a.resolvable),
-                "sudo" | "nohup" | "nice" | "timeout" | "env" | "xargs" => true,
+            .is_some_and(|a| match super::executable::basename(&a.text) {
+                Some("bash" | "sh") => argv.iter().skip(1).any(|a| !a.resolvable),
+                Some("sudo" | "nohup" | "nice" | "timeout" | "env" | "xargs") => true,
                 _ => false,
             });
     let dynamic_code_or_destination = argv.first().is_some_and(|head| {
-        let name = head.text.rsplit('/').next().unwrap_or(&head.text);
+        let name = super::executable::basename(&head.text);
         matches!(
             name,
-            "export"
-                | "eval"
-                | "exec"
-                | "command"
-                | "builtin"
-                | "source"
-                | "."
-                | "bash"
-                | "sh"
-                | "node"
-                | "nodejs"
-                | "python"
-                | "python2"
-                | "python3"
-                | "perl"
-                | "awk"
-                | "ruby"
-                | "php"
-                | "lua"
-                | "Rscript"
-                | "deno"
-                | "bun"
+            Some(
+                "export"
+                    | "eval"
+                    | "exec"
+                    | "command"
+                    | "builtin"
+                    | "source"
+                    | "bash"
+                    | "sh"
+                    | "node"
+                    | "nodejs"
+                    | "python"
+                    | "python2"
+                    | "python3"
+                    | "perl"
+                    | "awk"
+                    | "ruby"
+                    | "php"
+                    | "lua"
+                    | "Rscript"
+                    | "deno"
+                    | "bun"
+            )
         ) && argv.iter().skip(1).any(|a| !a.resolvable)
     });
     // Remaining declaration words containing `=` include append assignments
@@ -395,7 +394,7 @@ fn push_part(
         state,
         dashdash,
     });
-    if !truncated && state.stable_code() != reason::OPAQUE_EXPANSION {
+    if !truncated && !matches!(state, EvidenceState::Opaque(_)) {
         graph.reasons.push(state.stable_code());
     }
     (id, truncated)
@@ -438,20 +437,21 @@ fn mark_opaque(part_id: usize, cause: &'static str, graph: &mut CommandEvidence)
 }
 
 /// Wrapper interpretations unwrap into child parts (relation `wrapper`).
-/// `xargs` keeps its operand as an opaque child (stdiн-appended args are
+/// `xargs` keeps its operand as an opaque child (stdin-appended args are
 /// unconstrained); the xargs-v1 analyzer re-exposes it as analyzerCommand.
 fn unwrap_wrapper(part: Part, part_id: usize, depth: usize, graph: &mut CommandEvidence) {
-    let head = part
-        .argv
-        .first()
-        .filter(|a| a.resolvable)
-        .map(|a| a.text.clone());
+    let head = part.argv.first().and_then(|a| {
+        a.resolvable
+            .then(|| super::executable::basename(&a.text))
+            .flatten()
+            .map(str::to_owned)
+    });
     if matches!(head.as_deref(), Some("bash" | "sh")) {
         unwrap_bash(part, part_id, depth, graph);
         return;
     }
     match head.as_deref() {
-        Some("sudo") => unwrap_transparent(
+        Some("sudo") => unwrap_prefix(
             part,
             part_id,
             depth,
@@ -459,7 +459,7 @@ fn unwrap_wrapper(part: Part, part_id: usize, depth: usize, graph: &mut CommandE
             reason::OPAQUE_EXPANSION,
             "sudo without command",
         ),
-        Some("nohup") => unwrap_transparent(
+        Some("nohup") => unwrap_prefix(
             part,
             part_id,
             depth,
@@ -479,7 +479,7 @@ fn emit_wrapped(
     part: &Part,
     part_id: usize,
     rest: Vec<ArgToken>,
-    transparent: bool,
+    supported: bool,
     depth: usize,
     graph: &mut CommandEvidence,
 ) {
@@ -501,9 +501,7 @@ fn emit_wrapped(
         state_at_depth(child_depth, state),
         graph,
     );
-    if transparent && part.state == EvidenceState::Complete {
-        collapse(part_id, graph);
-    } else {
+    if !supported || part.state != EvidenceState::Complete {
         mark_opaque(part_id, reason::OPAQUE_EXPANSION, graph);
     }
     if child_depth <= MAX_SPLIT_DEPTH {
@@ -560,24 +558,21 @@ fn unwrap_bash(part: Part, part_id: usize, depth: usize, graph: &mut CommandEvid
         mark_opaque(part_id, reason::OPAQUE_EXPANSION, graph);
         return;
     }
-    // Only the fixed `shell -c literal-script` form is transparent. Other
+    // Only the fixed `shell -c literal-script` form is supported. Other
     // operands are not inner argv: in particular $0/$1 extras must never
     // manufacture a required option (e.g. --dry-run) in a child command.
-    let transparent = pos == 1 && part.argv.len() == 3 && part.state.can_allow();
+    let supported = pos == 1 && part.argv.len() == 3 && part.state.can_allow();
     let operand = operand.text.clone();
-    if transparent {
-        collapse(part_id, graph);
-    } else {
+    if !supported {
         mark_opaque(part_id, reason::OPAQUE_EXPANSION, graph);
     }
     let start = graph.parts.len();
     extract_raw(&operand, depth + 1, Relation::Wrapper, Some(part_id), graph);
     if graph.parts.len() == start {
-        graph.collapsed.retain(|id| *id != part_id);
         mark_opaque(part_id, reason::OPAQUE_EXPANSION, graph);
     }
     // Outer assignments and redirects affect every executable descendant.
-    // Keep them as coverage obligations instead of losing them on collapse.
+    // Keep them as coverage obligations on both parents and descendants.
     for child in &mut graph.parts[start..] {
         let mut assigns = part.assigns.clone();
         assigns.append(&mut child.assigns);
@@ -600,7 +595,7 @@ fn unwrap_bash(part: Part, part_id: usize, depth: usize, graph: &mut CommandEvid
     }
 }
 
-fn unwrap_transparent(
+fn unwrap_prefix(
     part: Part,
     part_id: usize,
     depth: usize,
@@ -622,13 +617,13 @@ fn unwrap_transparent(
 
 fn unwrap_nice(part: Part, part_id: usize, depth: usize, graph: &mut CommandEvidence) {
     let mut rest: Vec<ArgToken> = part.argv[1..].to_vec();
-    let mut transparent = true;
+    let mut supported = true;
     if rest.first().map(|w| w.text.as_str()) == Some("-n") {
         let Some(priority) = rest.get(1) else {
             mark_opaque(part_id, reason::OPAQUE_EXPANSION, graph);
             return;
         };
-        transparent = priority.resolvable && priority.text.parse::<i64>().is_ok();
+        supported = priority.resolvable && priority.text.parse::<i64>().is_ok();
         rest.drain(..2);
     } else if rest
         .first()
@@ -642,7 +637,7 @@ fn unwrap_nice(part: Part, part_id: usize, depth: usize, graph: &mut CommandEvid
         mark_opaque(part_id, "nice without command", graph);
         return;
     }
-    emit_wrapped(&part, part_id, rest, transparent, depth, graph);
+    emit_wrapped(&part, part_id, rest, supported, depth, graph);
 }
 
 fn unwrap_timeout(part: Part, part_id: usize, depth: usize, graph: &mut CommandEvidence) {
@@ -732,14 +727,6 @@ fn unwrap_xargs(part: Part, part_id: usize, depth: usize, graph: &mut CommandEvi
         );
     }
     mark_opaque(part_id, "xargs executes from stdin", graph);
-}
-
-/// Mark a wrapper part as unwrapped into its children: it keeps no votes of
-/// its own (the child parts carry the execution semantics).
-fn collapse(part_id: usize, graph: &mut CommandEvidence) {
-    if !graph.collapsed.contains(&part_id) {
-        graph.collapsed.push(part_id);
-    }
 }
 
 fn is_duration(w: &str) -> bool {

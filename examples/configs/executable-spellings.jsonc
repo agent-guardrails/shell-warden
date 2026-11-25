@@ -1,0 +1,69 @@
+// https://github.com/agent-guardrails/shell-warden/issues/73
+// Explicit spellings, not trusted-directory or basename enrollment.
+// Raw predicates remain source-sensitive; use typed predicates for shared denies.
+{
+  "version": 3,
+  "defaults": { "action": "ask", "redirectPolicy": "no-redirects" },
+  "redirectPolicies": {
+    "no-redirects": { "redirects": { "none": true }, "paths": { "none": true } }
+  },
+  "profiles": [
+    {
+      "id": "tool-installations",
+      "executables": ["tool", "/opt/tools/tool"],
+      "options": { "help": { "aliases": ["--help"], "arity": 0 } },
+      "rules": [
+        {
+          "id": "tool/deny-dangerous",
+          "action": "deny",
+          "message": "Use the approved help invocation instead.",
+          "match": { "arguments": { "containsAny": ["dangerous"] } }
+        },
+        {
+          "id": "tool/help",
+          "action": "allow",
+          "match": {
+            "classification": "complete",
+            "arguments": { "exact": [] },
+            "options": { "allowed": [{ "option": "help", "required": true, "repeatable": false }] },
+            "environment": { "none": true },
+            "paths": { "none": true },
+            "facts": { "none": true },
+            "nestedParts": { "none": true }
+          }
+        }
+      ]
+    },
+    {
+      "id": "shell-parent",
+      "executables": ["sh", "/bin/sh"],
+      "options": { "command": { "aliases": ["-c"], "arity": 1 } },
+      "analyzer": "generic-v1",
+      "rules": [
+        {
+          "id": "shell/help-child",
+          "action": "allow",
+          "match": {
+            "classification": "complete",
+            "arguments": { "exact": [] },
+            "options": {
+              "allowed": [{
+                "option": "command", "required": true, "repeatable": false,
+                "values": { "each": { "oneOf": ["tool --help", "/opt/tools/tool --help"] } }
+              }]
+            },
+            "environment": { "none": true },
+            "paths": { "none": true },
+            "facts": { "none": true },
+            "nestedParts": {
+              "all": [{
+                "relation": "wrapper", "occurrence": "all", "profile": "tool-installations",
+                "classification": "complete", "verdict": "allow"
+              }]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

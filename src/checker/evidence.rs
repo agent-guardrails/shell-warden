@@ -146,10 +146,6 @@ pub struct CommandEvidence {
     pub reasons: Vec<&'static str>,
     /// True when the evidence-item cap blocked further collection.
     pub overflow: bool,
-    /// Parts transparently unwrapped into wrapper children (the wrapper's
-    /// own argv was re-evaluated as the child part); they carry no
-    /// independent execution and no votes of their own.
-    pub collapsed: Vec<usize>,
 }
 
 impl CommandEvidence {
@@ -159,7 +155,6 @@ impl CommandEvidence {
             parts: Vec::new(),
             reasons: Vec::new(),
             overflow: false,
-            collapsed: Vec::new(),
         }
     }
 }

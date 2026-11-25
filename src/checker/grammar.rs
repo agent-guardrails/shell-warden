@@ -727,6 +727,33 @@ pub struct NestedPartTest {
 /// `profileId | "none"`).
 pub const NESTED_PROFILE_NONE: &str = "none";
 
+/// Per-executable profile; included in the structural drift gate alongside
+/// option grammars. Executable spelling semantics are validated separately.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct Profile {
+    pub id: String,
+    /// Exact decoded head spellings: bare names or normalized absolute POSIX
+    /// paths. Distinct basenames form a singleton or one complete catalog group.
+    pub executables: Vec<String>,
+    /// Canonical option ID → aliases + arity (+inline form permission).
+    #[serde(default)]
+    pub options: std::collections::BTreeMap<String, OptionSpec>,
+    /// Profiles declare which evidence coordinates may be treated as paths.
+    #[serde(default)]
+    pub path_sources: Vec<PathCoordinateSelector>,
+    /// Effective redirect-policy override.
+    #[serde(default)]
+    pub redirect_policy: Option<RedirectPolicyOverride>,
+    /// Optional built-in analyzer (closed catalog; never config-loaded).
+    #[serde(default)]
+    pub analyzer: Option<AnalyzerId>,
+    pub rules: Vec<Rule>,
+    /// Non-voting, profile-local messages for the bare default ask.
+    #[serde(default)]
+    pub fallback_hints: Vec<Hint>,
+}
+
 // shell-warden-config-v2-grammar: end
 
 // Canonical one-level wire forms. A derived Serde enum representation would
@@ -1683,34 +1710,6 @@ fn reject_flag_items(ast: &regex_syntax::ast::Ast) -> Result<(), ()> {
 }
 
 // ── Profiles ────────────────────────────────────────────────────────────────
-
-/// Per-executable command profile (design §Selected architecture): owns the
-/// complete lexical grammar + policy for one executable.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct Profile {
-    pub id: String,
-    /// Literal executable aliases (lexical selection; last token of the argv
-    /// head-free form). Singleton always valid; multi-spelling requires an
-    /// implementation-owned lexical-alias-catalog entry.
-    pub executables: Vec<String>,
-    /// Canonical option ID → aliases + arity (+inline form permission).
-    #[serde(default)]
-    pub options: std::collections::BTreeMap<String, OptionSpec>,
-    /// Profiles declare which evidence coordinates may be treated as paths.
-    #[serde(default)]
-    pub path_sources: Vec<PathCoordinateSelector>,
-    /// Effective redirect-policy override (design §Reusable redirect policies).
-    #[serde(default)]
-    pub redirect_policy: Option<RedirectPolicyOverride>,
-    /// Optional built-in analyzer (closed catalog; never config-loaded).
-    #[serde(default)]
-    pub analyzer: Option<AnalyzerId>,
-    pub rules: Vec<Rule>,
-    /// Non-voting, profile-local messages for the bare default ask.
-    #[serde(default)]
-    pub fallback_hints: Vec<Hint>,
-}
 
 /// Built-in analyzer catalog (closed; versioned evidence producers, design
 /// §Profiles, option grammars, and analyzers). They never emit verdicts.

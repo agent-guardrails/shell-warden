@@ -1,0 +1,29 @@
+{
+  "version": 3,
+  "defaults": {
+    "action": "ask",
+    "redirectPolicy": "none"
+  },
+  "redirectPolicies": {
+    "none": {
+      "redirects": {
+        "none": true
+      },
+      "paths": {
+        "none": true
+      }
+    }
+  },
+  "profiles": [
+    {
+      "id": "enrollment",
+      "executables": [
+        "export",
+        "/opt/export"
+      ],
+      "options": {},
+      "analyzer": "export-v1",
+      "rules": []
+    }
+  ]
+}

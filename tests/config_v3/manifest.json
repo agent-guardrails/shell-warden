@@ -107,6 +107,142 @@
     {
       "path": "invalid/parameter-redirect-fd.json",
       "valid": false
+    },
+    {
+      "path": "valid/executable-same-name-paths.json",
+      "valid": true
+    },
+    {
+      "path": "valid/executable-paths-only.json",
+      "valid": true
+    },
+    {
+      "path": "valid/executable-node-alias-paths.json",
+      "valid": true
+    },
+    {
+      "path": "valid/executable-python-alias-paths.json",
+      "valid": true
+    },
+    {
+      "path": "valid/executable-literal-unicode-spaces.json",
+      "valid": true
+    },
+    {
+      "path": "valid/executable-literal-wildcards.json",
+      "valid": true
+    },
+    {
+      "path": "valid/executable-literal-backslashes.json",
+      "valid": true
+    },
+    {
+      "path": "valid/executable-absolute-sed.json",
+      "valid": true
+    },
+    {
+      "path": "valid/executable-absolute-xargs.json",
+      "valid": true
+    },
+    {
+      "path": "valid/executable-bare-export.json",
+      "valid": true
+    },
+    {
+      "path": "invalid/executable-empty-list.json",
+      "valid": false
+    },
+    {
+      "path": "invalid/executable-empty-spelling.json",
+      "valid": false
+    },
+    {
+      "path": "invalid/executable-relative-head.json",
+      "valid": false
+    },
+    {
+      "path": "invalid/executable-relative-directory.json",
+      "valid": false
+    },
+    {
+      "path": "invalid/executable-root-only.json",
+      "valid": false
+    },
+    {
+      "path": "invalid/executable-bare-dot.json",
+      "valid": false
+    },
+    {
+      "path": "invalid/executable-empty-component.json",
+      "valid": false
+    },
+    {
+      "path": "invalid/executable-dot-component.json",
+      "valid": false
+    },
+    {
+      "path": "invalid/executable-parent-component.json",
+      "valid": false
+    },
+    {
+      "path": "invalid/executable-trailing-slash.json",
+      "valid": false
+    },
+    {
+      "path": "invalid/executable-ascii-control.json",
+      "valid": false
+    },
+    {
+      "path": "invalid/executable-terminal-newline.json",
+      "valid": false
+    },
+    {
+      "path": "invalid/executable-duplicate-spelling.json",
+      "valid": false
+    },
+    {
+      "path": "invalid/executable-unrelated-basenames.json",
+      "valid": false,
+      "schemaValid": true
+    },
+    {
+      "path": "invalid/executable-union-alias-groups.json",
+      "valid": false,
+      "schemaValid": true
+    },
+    {
+      "path": "invalid/executable-incompatible-sed.json",
+      "valid": false,
+      "schemaValid": true
+    },
+    {
+      "path": "invalid/executable-incompatible-xargs.json",
+      "valid": false,
+      "schemaValid": true
+    },
+    {
+      "path": "invalid/executable-incompatible-export.json",
+      "valid": false,
+      "schemaValid": true
+    },
+    {
+      "path": "invalid/executable-path-export-generic.json",
+      "valid": false,
+      "schemaValid": true
+    },
+    {
+      "path": "invalid/executable-path-export-specialized.json",
+      "valid": false,
+      "schemaValid": true
+    },
+    {
+      "path": "valid/executable-utf8-byte-boundary.json",
+      "valid": true
+    },
+    {
+      "path": "invalid/executable-utf8-byte-overflow.json",
+      "valid": false,
+      "schemaValid": true
     }
   ]
 }

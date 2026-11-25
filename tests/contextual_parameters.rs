@@ -34,7 +34,9 @@ fn result(config: &Value, raw: &str) -> Value {
     });
     let letter = Letter::from_bytes(input.to_string().as_bytes()).unwrap();
     let verdict = VerdictEnvelope::new(evaluate(&config, &letter));
-    verdict.validate_against("parameter:test", 1).unwrap();
+    verdict
+        .validate_against("parameter:test", 1)
+        .unwrap_or_else(|error| panic!("{raw}: {error}; {verdict:?}"));
     serde_json::from_slice(&verdict.to_wire().unwrap()).unwrap()
 }
 
@@ -355,25 +357,71 @@ fn declarations_keep_destination_kind_and_fact_coverage() {
 
 #[test]
 fn literal_scripts_use_the_same_values_and_retain_outer_coverage() {
-    assert_eq!(verdict(&policy(), "bash -c 'ls -- \"$HOME\"'"), "allow");
+    fn with_shell_parent(mut config: Value) -> Value {
+        let mut parent = config["profiles"][0].clone();
+        parent["id"] = json!("shell");
+        parent["executables"] = json!(["bash", "/bin/bash"]);
+        parent["options"] = json!({"script":{"aliases":["-c"],"arity":1}});
+        parent["pathSources"] = json!([]);
+        parent["rules"][0]["id"] = json!("shell-allow");
+        parent["rules"][0]["match"]["arguments"] = json!({"exact":[]});
+        parent["rules"][0]["match"]["options"] = json!({"allowed":[{
+            "option":"script","required":true,"repeatable":false,"values":{"each":{"any":true}}
+        }]});
+        parent["rules"][0]["match"]["paths"] = json!({"none":true});
+        parent["rules"][0]["match"]["nestedParts"] = json!({"all":
+            (["complete", "parameter"].map(|classification| json!({
+                "relation":"wrapper","profile":"ls","classification":classification,
+                "verdict":"allow","occurrence":"all"
+            })))
+        });
+        config["profiles"].as_array_mut().unwrap().push(parent);
+        config
+    }
+    for head in ["bash", "/bin/bash"] {
+        let raw = format!("{head} -c 'ls -- \"$HOME\"'");
+        assert_eq!(verdict(&policy(), &raw), "ask");
+        let config = with_shell_parent(policy());
+        assert_eq!(verdict(&config, &raw), "allow");
+        let mut missing_child_grant = config.clone();
+        missing_child_grant["profiles"][0]["rules"][0]["expansions"] = json!({});
+        assert_eq!(verdict(&missing_child_grant, &raw), "ask");
+        let assignment = format!("CACHE=$HOME {head} -c 'ls'");
+        let config = with_shell_parent(with_assignments());
+        assert_eq!(verdict(&config, &assignment), "allow");
+        for profile in [0, 1] {
+            let mut missing_grant = config.clone();
+            missing_grant["profiles"][profile]["rules"][0]["expansions"] = json!({});
+            assert_eq!(verdict(&missing_grant, &assignment), "ask");
+        }
+    }
     assert_eq!(
-        verdict(&policy(), "CACHE=/public bash -c 'ls -- \"$HOME\"'"),
+        verdict(
+            &with_shell_parent(policy()),
+            "CACHE=/public bash -c 'ls -- \"$HOME\"'"
+        ),
         "ask"
     );
     assert_eq!(
         verdict(
-            &with_assignments(),
+            &with_shell_parent(with_assignments()),
             "CACHE=/public bash -c 'ls -- \"$HOME\"'"
         ),
         "allow"
     );
     assert_eq!(
-        verdict(&with_assignments(), "CACHE=$HOME bash -c 'ls'"),
+        verdict(
+            &with_shell_parent(with_assignments()),
+            "CACHE=$HOME bash -c 'ls'"
+        ),
         "allow"
     );
     assert_eq!(verdict(&policy(), "bash -c 'ls' > \"$HOME\""), "ask");
     assert_eq!(
-        verdict(&with_redirects(), "bash -c 'ls' > \"$HOME\""),
+        verdict(
+            &with_shell_parent(with_redirects()),
+            "bash -c 'ls' > \"$HOME\""
+        ),
         "allow"
     );
     for raw in [
@@ -383,7 +431,7 @@ fn literal_scripts_use_the_same_values_and_retain_outer_coverage() {
         "bash -c 'PATH=/untrusted; ls -- \"$HOME\"'",
         "ls -- \"$HOME\"; missing",
     ] {
-        assert_eq!(verdict(&policy(), raw), "ask", "{raw}");
+        assert_eq!(verdict(&with_shell_parent(policy()), raw), "ask", "{raw}");
     }
     let mut config = policy();
     config["profiles"][0]["rules"]
@@ -410,7 +458,7 @@ fn literal_scripts_use_the_same_values_and_retain_outer_coverage() {
 #[test]
 fn path_spelled_wrappers_cannot_authorize_dynamic_operands() {
     for name in ["env", "sudo", "nohup", "nice", "timeout", "xargs"] {
-        for head in [format!("/usr/bin/{name}"), format!("./{name}")] {
+        for head in [name.to_string(), format!("/usr/bin/{name}")] {
             let mut config = policy();
             config["profiles"][0]["id"] = json!("wrapper");
             config["profiles"][0]["executables"] = json!([head]);
@@ -429,13 +477,13 @@ fn path_spelled_wrappers_cannot_authorize_dynamic_operands() {
             }
         }
     }
-    // A basename is a blocking check, not a transparent wrapper alias.
+    // Structural recognition never enrolls an unlisted parent.
     assert_eq!(verdict(&policy(), "/usr/bin/env ls -- \"$HOME\""), "ask");
 }
 
 #[test]
 fn awk_operand_boundary_does_not_prove_a_data_role() {
-    for head in ["awk", "/usr/bin/awk", "./awk"] {
+    for head in ["awk", "/usr/bin/awk"] {
         let mut config = policy();
         config["profiles"][0]["id"] = json!("awk");
         config["profiles"][0]["executables"] = json!([head]);
@@ -481,21 +529,29 @@ fn dynamic_execution_operands_fail_closed_through_cli() {
     std::fs::create_dir(&dir).unwrap();
     let file = ConfigFile(dir);
     let mut config = policy();
-    config["profiles"] = ["/usr/bin/env", "awk", "/usr/bin/awk"]
-        .iter()
-        .enumerate()
-        .map(|(index, head)| {
-            let mut profile = config["profiles"][0].clone();
-            profile["id"] = json!(format!("command-{index}"));
-            profile["executables"] = json!([head]);
-            profile
-        })
-        .collect();
+    config["profiles"] = [
+        "/usr/bin/env",
+        "awk",
+        "/usr/bin/awk",
+        "xargs",
+        "/usr/bin/xargs",
+    ]
+    .iter()
+    .enumerate()
+    .map(|(index, head)| {
+        let mut profile = config["profiles"][0].clone();
+        profile["id"] = json!(format!("command-{index}"));
+        profile["executables"] = json!([head]);
+        profile
+    })
+    .collect();
     std::fs::write(file.0.join("config.json"), config.to_string()).unwrap();
     let commands = [
         "/usr/bin/env -- \"$HOME\"",
         "awk -- \"$HOME\"",
         "/usr/bin/awk -- \"$HOME\"",
+        "xargs -- \"$HOME\"",
+        "/usr/bin/xargs -- \"$HOME\"",
         "awk -- '{ print $0 }' /public",
     ];
     let input = json!({
@@ -531,7 +587,7 @@ fn dynamic_execution_operands_fail_closed_through_cli() {
     assert_eq!(output["result"]["verdict"], "ask");
     for (index, raw) in commands.iter().enumerate() {
         let command = &output["result"]["commands"][index];
-        let (verdict, classification) = if index < 3 {
+        let (verdict, classification) = if index + 1 < commands.len() {
             ("ask", "opaque")
         } else {
             ("allow", "static")
@@ -549,7 +605,6 @@ fn ordinary_argument_grants_do_not_authorize_dynamic_code_operands() {
         "command",
         "builtin",
         "source",
-        ".",
         "node",
         "python3",
         "/bin/bash",
@@ -574,6 +629,21 @@ fn ordinary_argument_grants_do_not_authorize_dynamic_code_operands() {
     ]});
     assert_eq!(verdict(&config, "sed -- \"$HOME\""), "ask");
     assert_eq!(verdict(&config, "sed -- s/a/b/ \"$HOME\""), "allow");
+}
+
+#[test]
+fn irregular_execution_heads_cannot_be_enrolled_or_use_parameter_grants() {
+    for head in [".", "./awk", "./env", "./bash", "/opt/../bin/bash"] {
+        let mut config = policy();
+        config["profiles"][0]["executables"] = json!([head]);
+        assert!(load_str(&config.to_string()).is_err(), "{head}");
+        let output = result(&policy(), &format!("{head} -- \"$HOME\""));
+        let command = &output["result"]["commands"][0];
+        assert_eq!(command["verdict"], "ask", "{head}");
+        assert_eq!(command["classification"], "parameter", "{head}");
+        assert_eq!(command["match"], "expression", "{head}");
+        assert_eq!(command["facts"]["selectedProfiles"], json!([]), "{head}");
+    }
 }
 
 #[test]

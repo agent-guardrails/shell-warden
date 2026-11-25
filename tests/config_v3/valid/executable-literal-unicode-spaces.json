@@ -1,0 +1,29 @@
+{
+  "version": 3,
+  "defaults": {
+    "action": "ask",
+    "redirectPolicy": "none"
+  },
+  "redirectPolicies": {
+    "none": {
+      "redirects": {
+        "none": true
+      },
+      "paths": {
+        "none": true
+      }
+    }
+  },
+  "profiles": [
+    {
+      "id": "enrollment",
+      "executables": [
+        "工具",
+        "/a b/工具"
+      ],
+      "options": {},
+      "analyzer": "generic-v1",
+      "rules": []
+    }
+  ]
+}
