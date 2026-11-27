@@ -77,11 +77,19 @@ JSON-RPC orchestrator; `warden-test-tool.exe`-style helpers are test-only.
 ## Contextual variable permissions
 
 `expansions` on an allow rule independently permits variable names in `arguments`,
-`redirectTargets`, and `assignmentValues`. Omitted lists grant nothing. Supported
+`optionValues`, `redirectTargets`, and `assignmentValues`. Omitted lists grant nothing. Supported
 words have one leading simple reference and a literal suffix. Arguments require a
 literal `--` boundary and value-independent coverage. Assignment destinations,
 every redirect occurrence, tracked unresolved paths, facts, and nested parts still
 require coverage.
+
+An explicit `expansions: {"optionValues": ["HOME"]}` permits supported wholly
+double-quoted option values, for example `--config "$HOME/config.yaml"` or
+`--config="${HOME}/config.yaml"`. The profile must declare the option's alias
+and fixed arity; inline syntax additionally requires arity one and `inline: true`.
+Every parameter value still needs `{"any": true}` coverage in `values.each` or
+its `values.byPosition` slot. Argument grants do not cover options. Code-bearing
+options and unsupported wrapper operands remain outside these grants.
 
 This authorizes **any runtime value**, not a verified HOME or path confinement.
 Unknown applicable ask/deny comparisons establish an ask floor; an unprovable

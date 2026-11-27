@@ -150,6 +150,7 @@ pub(super) fn command_verdict(config: &Config, cmd: &Command) -> (CommandVerdict
                         .map(|assign| ArgToken {
                             text: assign.name.clone(),
                             parameter: None,
+                            inline_parameter: None,
                             resolvable: true,
                             span: assign.span,
                         });
@@ -205,10 +206,24 @@ pub(super) fn command_verdict(config: &Config, cmd: &Command) -> (CommandVerdict
             let prof = &config.profiles()[pi];
             let pos: Vec<ArgToken> = part.argv.clone();
             let parsed = parse_options(argv_for_options(&pos), &prof.options);
-            let dynamic_option_value = parsed
-                .occurrences
+            let unsupported_option_value = parsed.occurrences.iter().any(|o| {
+                o.values
+                    .iter()
+                    .any(|v| !v.resolvable && v.parameter.is_none())
+            });
+            // An inline candidate has a supported role only when consumed
+            // as its own declared option, never as a positional after `--`.
+            let unsupported_argument = parsed
+                .positionals
                 .iter()
-                .any(|o| o.values.iter().any(|v| !v.resolvable));
+                .any(|a| !a.resolvable && a.parameter.is_none());
+            // A name grant cannot establish the safety of sed program or
+            // program-file options; their analyzer requires literal values.
+            let dynamic_sed_program = prof.analyzer == Some(AnalyzerId::SedV1)
+                && parsed.occurrences.iter().any(|o| {
+                    matches!(o.canonical.as_str(), "expression" | "file")
+                        && o.values.iter().any(|v| !v.resolvable)
+                });
             let dynamic_declaration_destination = prof.analyzer == Some(AnalyzerId::ExportV1)
                 && parsed.positionals.iter().any(|a| !a.resolvable);
             let sed_program = prof.analyzer == Some(AnalyzerId::SedV1)
@@ -222,11 +237,17 @@ pub(super) fn command_verdict(config: &Config, cmd: &Command) -> (CommandVerdict
                 .first()
                 .is_some_and(|head| super::executable::basename(&head.text) == Some("sed"))
                 && prof.analyzer != Some(AnalyzerId::SedV1)
-                && parsed.positionals.iter().any(|a| !a.resolvable);
+                && (parsed.positionals.iter().any(|a| !a.resolvable)
+                    || parsed
+                        .occurrences
+                        .iter()
+                        .any(|o| o.values.iter().any(|v| !v.resolvable)));
             let state = if matches!(part.state, EvidenceState::Invalid(_)) {
                 part.state
             } else if parsed.invalid_reasons.is_empty() {
-                if dynamic_option_value
+                if unsupported_option_value
+                    || unsupported_argument
+                    || dynamic_sed_program
                     || dynamic_declaration_destination
                     || sed_program
                     || unmodeled_sed_operand
@@ -398,6 +419,12 @@ fn evaluate_part_rules(
     let positionals: Vec<ArgToken> = parsed.positionals.clone();
     let path_coords = path_coordinates(prof, parsed, part, state);
     let ctx = PartFacts {
+        option_parameters: parsed
+            .occurrences
+            .iter()
+            .flat_map(|o| &o.values)
+            .filter_map(|v| v.parameter.as_ref())
+            .collect(),
         parameter_boundary: parsed.dashdash.is_some() && !parsed.unbounded_parameter,
         part,
         profile_id: Some(prof.id.as_str()),

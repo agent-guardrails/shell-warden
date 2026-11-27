@@ -17,6 +17,46 @@
       "valid": true
     },
     {
+      "path": "valid/option-value-home.json",
+      "valid": true
+    },
+    {
+      "path": "valid/option-value-boundary.json",
+      "valid": true
+    },
+    {
+      "path": "invalid/option-value-null.json",
+      "valid": false
+    },
+    {
+      "path": "invalid/option-value-wrong-type.json",
+      "valid": false
+    },
+    {
+      "path": "invalid/option-value-duplicate.json",
+      "valid": false
+    },
+    {
+      "path": "invalid/option-value-wildcard.json",
+      "valid": false
+    },
+    {
+      "path": "invalid/option-value-name-over-bound.json",
+      "valid": false
+    },
+    {
+      "path": "invalid/option-value-count-over-bound.json",
+      "valid": false
+    },
+    {
+      "path": "invalid/option-value-ask.json",
+      "valid": false
+    },
+    {
+      "path": "invalid/option-value-deny.json",
+      "valid": false
+    },
+    {
       "path": "valid/classifier-parameter.json",
       "valid": true
     },

@@ -1788,6 +1788,8 @@ pub struct ExpansionPermissions {
     #[serde(default)]
     pub arguments: Vec<String>,
     #[serde(default)]
+    pub option_values: Vec<String>,
+    #[serde(default)]
     pub redirect_targets: Vec<String>,
     #[serde(default)]
     pub assignment_values: Vec<String>,
