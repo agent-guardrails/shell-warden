@@ -83,7 +83,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: agent-guardrails/docs
-          ref: 144d9c2c51cdcd9634c2d6bf0bb04c2f963ce0ec
+          ref: 854f450eab487d544f29a7c1a46a06747b25c0a0
           path: contract-docs
           persist-credentials: false
       - name: Install Rust toolchain (stable)
