@@ -183,6 +183,7 @@ fn segment_observations(seg: &parse::Segment) -> (Vec<EnvAssign>, Vec<ArgToken>,
         argv.push(ArgToken {
             text: tok.text.clone(),
             parameter: tok.parameter(),
+            inline_parameter: tok.inline_parameter(),
             resolvable: tok.resolvable,
             span: tok.span,
         });
@@ -227,7 +228,9 @@ fn observations_state(
     if redirects.iter().any(|r| r.op.is_none()) {
         return EvidenceState::Invalid(reason::UNSUPPORTED_SYNTAX);
     }
-    let opaque = argv.iter().any(|a| !a.resolvable && a.parameter.is_none())
+    let opaque = argv
+        .iter()
+        .any(|a| !a.resolvable && a.parameter.is_none() && a.inline_parameter.is_none())
         || assigns
             .iter()
             .any(|a| !a.resolvable && a.parameter.is_none())
@@ -235,7 +238,9 @@ fn observations_state(
             .iter()
             .any(|r| !r.target_resolvable && r.parameter.is_none())
         || argv.first().is_some_and(|a| !a.resolvable);
-    let parameter = argv.iter().any(|a| a.parameter.is_some())
+    let parameter = argv
+        .iter()
+        .any(|a| a.parameter.is_some() || a.inline_parameter.is_some())
         || assigns.iter().any(|a| a.parameter.is_some())
         || redirects.iter().any(|r| r.parameter.is_some());
     // Unknown wrapper/interpreter operands are not ordinary positional values.
@@ -298,6 +303,7 @@ fn retain_overflow_marker(
     if argv.is_empty() && redirects.is_empty() {
         argv.push(ArgToken {
             parameter: None,
+            inline_parameter: None,
             text: seg.raw.trim().to_string(),
             resolvable: false,
             span: seg.span,
@@ -345,6 +351,7 @@ fn split_heredoc_like(
         argv.push(ArgToken {
             text: tok.text.clone(),
             parameter: None,
+            inline_parameter: None,
             resolvable: tok.resolvable,
             span: tok.span,
         });

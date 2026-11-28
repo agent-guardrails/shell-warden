@@ -126,6 +126,8 @@ pub struct OptionOccurrenceView {
 
 /// Everything a predicate or coverage check may consult about one part.
 pub struct PartFacts<'a> {
+    /// Parameters in values actually consumed by the selected option grammar.
+    pub option_parameters: Vec<&'a super::parameter::ParameterWord>,
     pub parameter_boundary: bool,
     pub part: &'a Part,
     pub profile_id: Option<&'a str>,
@@ -981,6 +983,11 @@ pub fn allow_covers(
             failures.push(CoverageCode::AllowCoverageMissing);
         }
     }
+    for parameter in &ctx.option_parameters {
+        if !permissions.option_values.contains(&parameter.name) {
+            failures.push(CoverageCode::AllowCoverageMissing);
+        }
+    }
     for assign in &ctx.part.assigns {
         if let Some(parameter) = &assign.parameter
             && !permissions.assignment_values.contains(&parameter.name)
@@ -1244,9 +1251,10 @@ fn option_values_covers(
     match coverage {
         OptionValueCoverage::Each { each } => {
             if !occs.iter().all(|o| {
-                o.values
-                    .iter()
-                    .all(|(v, resolvable)| token_value_holds(each, v, *resolvable, regexes, cwd))
+                o.values.iter().all(|(v, resolvable)| {
+                    matches!(each, TokenSelector::Str(StringValueSelector::Any))
+                        || token_value_holds(each, v, *resolvable, regexes, cwd)
+                })
             }) {
                 return Err(fail());
             }
@@ -1260,7 +1268,9 @@ fn option_values_covers(
                     return Err(fail());
                 }
                 for (sel, (v, resolvable)) in by_position.iter().zip(occ.values.iter()) {
-                    if !token_value_holds(sel, v, *resolvable, regexes, cwd) {
+                    if !matches!(sel, TokenSelector::Str(StringValueSelector::Any))
+                        && !token_value_holds(sel, v, *resolvable, regexes, cwd)
+                    {
                         return Err(fail());
                     }
                 }
@@ -1410,6 +1420,7 @@ mod tests {
             },
         ];
         let facts = PartFacts {
+            option_parameters: vec![],
             parameter_boundary: true,
             part,
             profile_id: Some("echo"),

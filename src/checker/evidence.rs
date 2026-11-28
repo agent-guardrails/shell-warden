@@ -57,12 +57,17 @@ pub mod reason {
     pub const REDIRECT_POLICY_UNCOVERED: &str = "redirect-policy-uncovered";
 }
 
-/// One positional-argument token (decoded literal; confusion-safe flags).
+/// One argv or option-value token (decoded literal; confusion-safe flags).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ArgToken {
     pub text: String,
     pub parameter: Option<ParameterWord>,
-    /// Fully known literal value. `false` ⇒ opaque (`\$…` marker kept).
+    /// Source-proven `--literal-alias="$NAME/suffix"` candidate. This is
+    /// not a leading-parameter word; only declared inline option parsing
+    /// can establish its value role.
+    pub inline_parameter: Option<ParameterWord>,
+    /// Fully known literal value. `false` keeps the effective value unknown,
+    /// even when supported parameter evidence is present.
     pub resolvable: bool,
     pub span: (usize, usize),
 }

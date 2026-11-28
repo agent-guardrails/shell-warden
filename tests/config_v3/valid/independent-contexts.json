@@ -38,6 +38,9 @@
             "arguments": [
               "HOME"
             ],
+            "optionValues": [
+              "CONFIG"
+            ],
             "redirectTargets": [
               "TMPDIR"
             ],

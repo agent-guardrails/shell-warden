@@ -1,0 +1,81 @@
+{
+  "version": 3,
+  "defaults": {
+    "action": "ask",
+    "redirectPolicy": "none"
+  },
+  "redirectPolicies": {
+    "none": {
+      "redirects": {
+        "none": true
+      },
+      "paths": {
+        "none": true
+      }
+    }
+  },
+  "profiles": [
+    {
+      "id": "ls",
+      "executables": [
+        "ls"
+      ],
+      "options": {
+        "config": {
+          "aliases": [
+            "--config",
+            "-c"
+          ],
+          "arity": 1,
+          "inline": true
+        }
+      },
+      "analyzer": "generic-v1",
+      "pathSources": [],
+      "rules": [
+        {
+          "id": "allow",
+          "action": "allow",
+          "expansions": {
+            "optionValues": [
+              "HOME"
+            ]
+          },
+          "match": {
+            "arguments": {
+              "exact": [
+                "list"
+              ]
+            },
+            "options": {
+              "allowed": [
+                {
+                  "option": "config",
+                  "required": true,
+                  "repeatable": false,
+                  "values": {
+                    "each": {
+                      "any": true
+                    }
+                  }
+                }
+              ]
+            },
+            "environment": {
+              "none": true
+            },
+            "paths": {
+              "none": true
+            },
+            "facts": {
+              "none": true
+            },
+            "nestedParts": {
+              "none": true
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

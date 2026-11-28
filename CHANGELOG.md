@@ -1,5 +1,21 @@
 # Release notes
 
+## Unreleased — quoted parameter option values
+
+Tracking: https://github.com/agent-guardrails/shell-warden/issues/80
+Contract: https://github.com/agent-guardrails/docs/issues/60
+Hook verification: https://github.com/agent-guardrails/opencode-shell-warden-hook/issues/34
+
+- Add independent allow-only `expansions.optionValues` name grants for supported
+  wholly double-quoted values consumed by declared fixed-arity options.
+  Explicit arity-one inline forms retain their opt-in requirement.
+- Grants still require complete value-independent coverage. Runtime equality,
+  regex, and path checks remain unresolved; applicable restrictive predicates
+  retain the ask floor. Code-bearing options remain unsupported.
+- Review restrictions selecting only `opaque`: supported option values are now
+  `parameter` evidence even when no rule grants their variable. Configuration and
+  verdict stay v3; older checkers reject policies using the new grant.
+
 ## 0.6.0 — configuration and verdict v3
 
 Release tracking: https://github.com/agent-guardrails/shell-warden/issues/78

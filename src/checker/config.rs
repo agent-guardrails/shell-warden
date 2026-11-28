@@ -1088,6 +1088,7 @@ fn validate_profile(
             }
             for names in [
                 &expansions.arguments,
+                &expansions.option_values,
                 &expansions.redirect_targets,
                 &expansions.assignment_values,
             ] {

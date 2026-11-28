@@ -203,6 +203,7 @@ mod tests {
         list.iter()
             .map(|s| ArgToken {
                 parameter: None,
+                inline_parameter: None,
                 text: (*s).to_string(),
                 resolvable: true,
                 span: (0, 0),

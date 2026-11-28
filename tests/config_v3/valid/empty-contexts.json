@@ -36,6 +36,7 @@
           "action": "allow",
           "expansions": {
             "arguments": [],
+            "optionValues": [],
             "redirectTargets": [],
             "assignmentValues": []
           },

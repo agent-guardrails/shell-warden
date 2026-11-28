@@ -70,6 +70,30 @@ impl Tok {
         (parameter.form == ParameterForm::DoubleQuoted).then_some(parameter)
     }
 
+    pub fn inline_parameter(&self) -> Option<ParameterWord> {
+        let (alias, value) = self.source.split_once('=')?;
+        // Validate original syntax, not decoded text: quoting/expansion in
+        // the alias and quoting the entire option word do not qualify.
+        if !alias.starts_with('-') || alias.len() < 2 {
+            return None;
+        }
+        let scanned = scan(alias);
+        let [segment] = scanned.segments.as_slice() else {
+            return None;
+        };
+        if scanned.malformed || !segment.redirects.is_empty() {
+            return None;
+        }
+        let [Item::Tok(token)] = segment.items.as_slice() else {
+            return None;
+        };
+        if !token.resolvable || token.quoting != Quoting::None || token.text != alias {
+            return None;
+        }
+        let parameter = parameter::parse(value)?;
+        (parameter.form == ParameterForm::DoubleQuoted).then_some(parameter)
+    }
+
     /// A syntactically literal destination and supported value expression.
     /// The caller must separately establish prefix/declaration assignment
     /// semantics; an ordinary argument containing '=' is not an assignment.

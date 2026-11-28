@@ -96,9 +96,10 @@ pub fn parse_options(argv: &[ArgToken], options: &BTreeMap<String, OptionSpec>) 
                     lookup[idx].0.clone(),
                     counts.entry(idx),
                     vec![ArgToken {
-                        parameter: None,
+                        parameter: tok.inline_parameter.clone(),
+                        inline_parameter: None,
                         text: value,
-                        resolvable: is_plain_literal(&tok.text[eq + 1..]),
+                        resolvable: tok.resolvable,
                         span: tok.span,
                     }],
                     true,
@@ -219,6 +220,7 @@ fn consume(
     });
 }
 
+#[cfg(test)]
 fn is_plain_literal(s: &str) -> bool {
     // active expansions left the replacement marker in the decoded text
     !s.contains('\u{fffd}')
@@ -232,6 +234,7 @@ mod tests {
     fn tok(text: &str) -> ArgToken {
         ArgToken {
             parameter: None,
+            inline_parameter: None,
             text: text.to_string(),
             resolvable: is_plain_literal(text),
             span: (0, 0),
